@@ -1,0 +1,41 @@
+name: Backend CD Pipeline
+
+on:
+  push:
+    branches:
+      - staging
+      - main
+
+# Crucial permission block: Required to fetch the short-lived OIDC security token from AWS
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Dynamically targets the GitHub Environment map based on the branch name
+    environment: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+    
+    steps:
+      - name: Checkout Code Base
+        uses: actions/checkout@v4
+
+      - name: Authenticate with AWS via OIDC Handshake
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Verify Cloud Session Security Status
+        run: |
+          aws sts get-caller-identity
+
+      # ------------------------------------------------------------------------
+      # FUTURE PLUGINS: As your team grows, your DevOps engineer will append 
+      # the direct infrastructure commands right below this line. 
+      # For instance:
+      #  - Building your application into a clean Docker container image
+      #  - Pushes the image to Amazon ECR (Container Registry)
+      #  - Updating AWS ECS / Fargate to deploy the live server code tasks
+      # ------------------------------------------------------------------------
