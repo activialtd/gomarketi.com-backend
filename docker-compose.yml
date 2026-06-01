@@ -1,0 +1,59 @@
+version: "3.9"
+
+# Local development only — mirrors ECS Fargate layout
+# Add a service block below for each microservice you build
+
+networks:
+  gomarketi-net:
+    driver: bridge
+
+# Shared services (database, cache, etc.)
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-gomarketi}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-localpassword}
+      POSTGRES_DB: ${POSTGRES_DB:-gomarketi_dev}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - gomarketi-net
+
+  # ── Add microservices below as you build them ──────────────────────────────
+  #
+  # user-service:                          # Node/Express
+  #   build: ./services/user-service
+  #   ports:
+  #     - "3001:3001"
+  #   env_file: ./services/user-service/.env
+  #   depends_on:
+  #     - postgres
+  #   networks:
+  #     - gomarketi-net
+  #
+  # product-service:                       # Go
+  #   build: ./services/product-service
+  #   ports:
+  #     - "3002:3002"
+  #   env_file: ./services/product-service/.env
+  #   depends_on:
+  #     - postgres
+  #   networks:
+  #     - gomarketi-net
+  #
+  # payment-service:                       # Python FastAPI
+  #   build: ./services/payment-service
+  #   ports:
+  #     - "3003:3003"
+  #   env_file: ./services/payment-service/.env
+  #   depends_on:
+  #     - postgres
+  #   networks:
+  #     - gomarketi-net
+
+volumes:
+  postgres_data:

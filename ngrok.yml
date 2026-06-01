@@ -1,5 +1,24 @@
 version: "3"
+authtoken: YOUR_NGROK_AUTHTOKEN
+
 tunnels:
-  api:
-    proto: http
-    addr: 8080
+  # Add one entry per microservice as you build them
+  # Each service gets its own public URL for local dev/testing
+
+  # Example — Node/Express service on port 3001
+  # user-service:
+  #   proto: http
+  #   addr: 3001
+  #   inspect: true
+
+  # Example — Go service on port 3002
+  # product-service:
+  #   proto: http
+  #   addr: 3002
+  #   inspect: true
+
+  # Example — Python FastAPI service on port 3003
+  # payment-service:
+  #   proto: http
+  #   addr: 3003
+  #   inspect: true
