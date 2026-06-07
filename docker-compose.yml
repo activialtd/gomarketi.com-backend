@@ -1,59 +1,127 @@
 version: "3.9"
 
-# Local development only — mirrors ECS Fargate layout
-# Add a service block below for each microservice you build
+# Local development stack — mirrors the ECS Fargate service layout.
+#
+# PostgreSQL note: when working against Neon, skip the postgres service
+# and point DATABASE_URL at your Neon connection string instead.
+#
+# Kafka note: services inside the network connect on PLAINTEXT://kafka:9092.
+# Host-machine tools (kcat, etc.) connect on localhost:9094 (EXTERNAL listener).
 
 networks:
   gomarketi-net:
     driver: bridge
 
-# Shared services (database, cache, etc.)
 services:
+
+  # ── PostgreSQL (local fallback — use Neon for CI/staging/prod) ───────────
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-gomarketi}
+      POSTGRES_USER:     ${POSTGRES_USER:-gomarketi}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-localpassword}
-      POSTGRES_DB: ${POSTGRES_DB:-gomarketi_dev}
+      POSTGRES_DB:       ${POSTGRES_DB:-gomarketi_dev}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - gomarketi-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-gomarketi}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
-  # ── Add microservices below as you build them ──────────────────────────────
+  # ── Redis ─────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --save "" --appendonly no
+    ports:
+      - "6379:6379"
+    networks:
+      - gomarketi-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── Kafka (KRaft mode — no Zookeeper) ────────────────────────────────────
+  kafka:
+    image: bitnami/kafka:3.7
+    restart: unless-stopped
+    environment:
+      KAFKA_CFG_NODE_ID: "1"
+      KAFKA_CFG_PROCESS_ROLES: "broker,controller"
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_CFG_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094"
+      KAFKA_CFG_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094"
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+    ports:
+      - "9094:9094"
+    volumes:
+      - kafka_data:/bitnami/kafka
+    networks:
+      - gomarketi-net
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ── Elasticsearch ─────────────────────────────────────────────────────────
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    networks:
+      - gomarketi-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health | grep -qv '\"status\":\"red\"'"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ── Microservices — add a block here as each service is built ────────────
   #
-  # user-service:                          # Node/Express
-  #   build: ./services/user-service
+  # auth:
+  #   build: ./services/auth
   #   ports:
-  #     - "3001:3001"
-  #   env_file: ./services/user-service/.env
+  #     - "8081:8080"
+  #   env_file: .env
   #   depends_on:
-  #     - postgres
+  #     postgres: { condition: service_healthy }
+  #     redis:    { condition: service_healthy }
   #   networks:
   #     - gomarketi-net
   #
-  # product-service:                       # Go
-  #   build: ./services/product-service
+  # identity:
+  #   build: ./services/identity
   #   ports:
-  #     - "3002:3002"
-  #   env_file: ./services/product-service/.env
+  #     - "8082:8080"
+  #   env_file: .env
   #   depends_on:
-  #     - postgres
-  #   networks:
-  #     - gomarketi-net
-  #
-  # payment-service:                       # Python FastAPI
-  #   build: ./services/payment-service
-  #   ports:
-  #     - "3003:3003"
-  #   env_file: ./services/payment-service/.env
-  #   depends_on:
-  #     - postgres
+  #     postgres: { condition: service_healthy }
   #   networks:
   #     - gomarketi-net
 
 volumes:
   postgres_data:
+  kafka_data:
+  es_data:

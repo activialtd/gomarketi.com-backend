@@ -1,32 +1,62 @@
-# Environment / secrets
+# ── Environment / secrets ─────────────────────────────────────────────────────
 .env
 .env.local
 .env.*.local
 *.env
 
-# macOS
+# ── Cryptographic keys — NEVER commit ────────────────────────────────────────
+keys/
+*.pem
+*.p8
+*.p12
+
+# ── Go build artifacts ────────────────────────────────────────────────────────
+bin/
+*.test
+coverage.out
+coverage.html
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
 .DS_Store
 ._*
+.AppleDouble
+.LSOverride
 
-# Node.js
+# ── Node.js ───────────────────────────────────────────────────────────────────
 node_modules/
 npm-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# Next.js build output
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# ── Frontend build output ─────────────────────────────────────────────────────
 .next/
 out/
 dist/
 build/
 *.tsbuildinfo
 
-# Logs
+# ── Logs ──────────────────────────────────────────────────────────────────────
 *.log
 logs/
 
-# IDE
+# ── IDE ───────────────────────────────────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
+*.swo
 
+# ── Terraform ─────────────────────────────────────────────────────────────────
+**/.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+!*.tfvars.example
+.terraform.lock.hcl

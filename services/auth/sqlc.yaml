@@ -1,0 +1,42 @@
+version: "2"
+sql:
+  - engine: "postgresql"
+    queries: "internal/repository/queries/"
+    schema:
+      - "../../shared/migrations/0001_create_users.sql"
+      - "../../shared/migrations/0002_create_auth_identities.sql"
+      - "../../shared/migrations/0003_create_otp_sessions.sql"
+      - "../../shared/migrations/0004_create_refresh_tokens.sql"
+      - "../../shared/migrations/0005_create_buyer_profiles.sql"
+    gen:
+      go:
+        package: "db"
+        out: "internal/repository/db"
+        emit_json_tags: true
+        emit_prepared_queries: false
+        emit_interface: false
+        emit_exact_table_names: false
+        emit_empty_slices: true
+        null_style: "sql"
+        overrides:
+          - db_type: "uuid"
+            go_type:
+              import: "github.com/google/uuid"
+              package: "uuid"
+              type: "UUID"
+          - db_type: "uuid"
+            nullable: true
+            go_type:
+              import: "github.com/google/uuid"
+              package: "uuid"
+              type: "NullUUID"
+          - db_type: "how_heard_source"
+            go_type: "string"
+          - db_type: "how_heard_source"
+            nullable: true
+            go_type: "database/sql.NullString"
+          - db_type: "auth_provider"
+            go_type: "string"
+          - db_type: "pg_catalog.inet"
+            nullable: true
+            go_type: "database/sql.NullString"

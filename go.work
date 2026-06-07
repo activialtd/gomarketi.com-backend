@@ -1,0 +1,13 @@
+go 1.22.0
+
+use (
+	./scripts/migrate
+	./shared/pkg
+)
+
+// Services are added here as they are built:
+use ./services/auth
+use ./services/identity
+// use ./services/catalogue
+// use ./services/orders
+// use ./services/storefront
