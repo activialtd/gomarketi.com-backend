@@ -15,3 +15,5 @@ use ./services/catalogue
 use ./services/orders
 
 use ./services/storefront
+
+use ./services/gateway
