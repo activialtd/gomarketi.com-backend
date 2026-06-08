@@ -1,4 +1,4 @@
-module github.com/activialtd/gomarketi.com-backend/services/identity
+module github.com/activialtd/gomarketi.com-backend/services/catalogue
 
 go 1.22.0
 
@@ -7,8 +7,6 @@ require (
 	github.com/gin-gonic/gin v1.10.0
 	github.com/go-playground/validator/v10 v10.22.0
 	github.com/google/uuid v1.6.0
-	github.com/jmoiron/sqlx v1.4.0
-	github.com/lib/pq v1.10.9
 	github.com/rs/zerolog v1.33.0
 	github.com/spf13/viper v1.19.0
 )

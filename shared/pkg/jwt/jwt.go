@@ -125,7 +125,7 @@ func (m *Manager) ValidateClaims(tokenStr string) (*Claims, error) {
 
 // ── Key loading ───────────────────────────────────────────────────────────────
 
-// LoadPrivateKey reads and parses a PEM-encoded RSA private key.
+// LoadPrivateKey reads and parses a PEM-encoded RSA private key from a file.
 // Accepts both PKCS#1 ("BEGIN RSA PRIVATE KEY") and PKCS#8 ("BEGIN PRIVATE KEY")
 // formats — OpenSSL 3.x generates PKCS#8 by default.
 func LoadPrivateKey(path string) (*rsa.PrivateKey, error) {
@@ -133,38 +133,46 @@ func LoadPrivateKey(path string) (*rsa.PrivateKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading private key %q: %w", path, err)
 	}
+	return ParsePrivateKeyBytes(data)
+}
+
+// LoadPublicKey reads and parses a PEM-encoded PKIX RSA public key from a file.
+func LoadPublicKey(path string) (*rsa.PublicKey, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading public key %q: %w", path, err)
+	}
+	return ParsePublicKeyBytes(data)
+}
+
+// ParsePrivateKeyBytes parses a PEM-encoded RSA private key from raw bytes.
+// Accepts both PKCS#1 ("BEGIN RSA PRIVATE KEY") and PKCS#8 ("BEGIN PRIVATE KEY") formats.
+// Use this when the key material comes from an env var rather than a file.
+func ParsePrivateKeyBytes(data []byte) (*rsa.PrivateKey, error) {
 	block, _ := pem.Decode(data)
 	if block == nil {
-		return nil, fmt.Errorf("no PEM block in private key file %q", path)
+		return nil, errors.New("jwt: no PEM block found in private key data")
 	}
-
-	// Try PKCS#1 first (legacy "BEGIN RSA PRIVATE KEY").
 	if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
 		return key, nil
 	}
-
-	// Fall back to PKCS#8 ("BEGIN PRIVATE KEY" — OpenSSL 3.x default).
 	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 	if err != nil {
 		return nil, fmt.Errorf("parsing private key (tried PKCS#1 and PKCS#8): %w", err)
 	}
 	key, ok := parsed.(*rsa.PrivateKey)
 	if !ok {
-		return nil, errors.New("private key is not an RSA key")
+		return nil, errors.New("jwt: private key is not an RSA key")
 	}
 	return key, nil
 }
 
-// LoadPublicKey reads and parses a PEM-encoded PKIX RSA public key.
-// Pass the value of JWT_PUBLIC_KEY_PATH env var as path.
-func LoadPublicKey(path string) (*rsa.PublicKey, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("reading public key %q: %w", path, err)
-	}
+// ParsePublicKeyBytes parses a PEM-encoded PKIX RSA public key from raw bytes.
+// Use this when the key material comes from an env var rather than a file.
+func ParsePublicKeyBytes(data []byte) (*rsa.PublicKey, error) {
 	block, _ := pem.Decode(data)
 	if block == nil {
-		return nil, fmt.Errorf("no PEM block in public key file %q", path)
+		return nil, errors.New("jwt: no PEM block found in public key data")
 	}
 	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
 	if err != nil {
@@ -172,7 +180,7 @@ func LoadPublicKey(path string) (*rsa.PublicKey, error) {
 	}
 	rsaPub, ok := pub.(*rsa.PublicKey)
 	if !ok {
-		return nil, errors.New("key is not an RSA public key")
+		return nil, errors.New("jwt: key is not an RSA public key")
 	}
 	return rsaPub, nil
 }

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rsa"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"os"
@@ -42,8 +44,6 @@ func run(log zerolog.Logger) error {
 		return fmt.Errorf("DATABASE_URL is required")
 	}
 
-	jwtPrivKeyPath := viper.GetString("JWT_PRIVATE_KEY_PATH")
-	jwtPubKeyPath := viper.GetString("JWT_PUBLIC_KEY_PATH")
 	accessTTL := time.Duration(viper.GetInt("JWT_ACCESS_TTL_SECONDS")) * time.Second
 	if accessTTL == 0 {
 		accessTTL = 15 * time.Minute
@@ -61,11 +61,14 @@ func run(log zerolog.Logger) error {
 	defer db.Close()
 
 	// ── JWT ───────────────────────────────────────────────────────────────────
-	privKey, err := sharedjwt.LoadPrivateKey(jwtPrivKeyPath)
+	// On Heroku (no persistent filesystem) supply JWT_PRIVATE_KEY_B64 /
+	// JWT_PUBLIC_KEY_B64 (base64-encoded PEM). Locally, use file paths via
+	// JWT_PRIVATE_KEY_PATH / JWT_PUBLIC_KEY_PATH.
+	privKey, err := loadPrivKey()
 	if err != nil {
 		return fmt.Errorf("load jwt private key: %w", err)
 	}
-	pubKey, err := sharedjwt.LoadPublicKey(jwtPubKeyPath)
+	pubKey, err := loadPubKey()
 	if err != nil {
 		return fmt.Errorf("load jwt public key: %w", err)
 	}
@@ -159,6 +162,41 @@ func run(log zerolog.Logger) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(ctx)
+}
+
+// loadPrivKey loads the RSA private key. Checks JWT_PRIVATE_KEY_B64 (base64
+// PEM) first so it works on Heroku; falls back to JWT_PRIVATE_KEY_PATH for
+// local dev.
+func loadPrivKey() (*rsa.PrivateKey, error) {
+	if b64 := viper.GetString("JWT_PRIVATE_KEY_B64"); b64 != "" {
+		pem, err := base64.StdEncoding.DecodeString(b64)
+		if err != nil {
+			return nil, fmt.Errorf("base64-decode JWT_PRIVATE_KEY_B64: %w", err)
+		}
+		return sharedjwt.ParsePrivateKeyBytes(pem)
+	}
+	path := viper.GetString("JWT_PRIVATE_KEY_PATH")
+	if path == "" {
+		return nil, fmt.Errorf("JWT_PRIVATE_KEY_B64 or JWT_PRIVATE_KEY_PATH is required")
+	}
+	return sharedjwt.LoadPrivateKey(path)
+}
+
+// loadPubKey loads the RSA public key. Checks JWT_PUBLIC_KEY_B64 first;
+// falls back to JWT_PUBLIC_KEY_PATH.
+func loadPubKey() (*rsa.PublicKey, error) {
+	if b64 := viper.GetString("JWT_PUBLIC_KEY_B64"); b64 != "" {
+		pem, err := base64.StdEncoding.DecodeString(b64)
+		if err != nil {
+			return nil, fmt.Errorf("base64-decode JWT_PUBLIC_KEY_B64: %w", err)
+		}
+		return sharedjwt.ParsePublicKeyBytes(pem)
+	}
+	path := viper.GetString("JWT_PUBLIC_KEY_PATH")
+	if path == "" {
+		return nil, fmt.Errorf("JWT_PUBLIC_KEY_B64 or JWT_PUBLIC_KEY_PATH is required")
+	}
+	return sharedjwt.LoadPublicKey(path)
 }
 
 func connectDB(dsn string, log zerolog.Logger) (*sqlx.DB, error) {

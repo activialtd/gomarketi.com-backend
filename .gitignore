@@ -3,6 +3,7 @@
 .env.local
 .env.*.local
 *.env
+.env.heroku
 
 # ── Cryptographic keys — NEVER commit ────────────────────────────────────────
 keys/

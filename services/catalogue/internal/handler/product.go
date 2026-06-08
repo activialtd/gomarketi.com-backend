@@ -1,0 +1,177 @@
+package handler
+
+import (
+	"net/http"
+	"strconv"
+
+	"github.com/gin-gonic/gin"
+
+	"github.com/activialtd/gomarketi.com-backend/services/catalogue/internal/dto"
+)
+
+// ListProducts godoc
+// GET /v1/catalogue/products?page=1&per_page=20&category_id=...&q=...&published=true
+func (h *Handler) ListProducts(c *gin.Context) {
+	storeID, ok := h.callerStoreID(c)
+	if !ok {
+		return
+	}
+
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "20"))
+	if page < 1 {
+		page = 1
+	}
+	if perPage < 1 || perPage > 100 {
+		perPage = 20
+	}
+
+	var categoryID *string
+	if v := c.Query("category_id"); v != "" {
+		categoryID = &v
+	}
+	var q *string
+	if v := c.Query("q"); v != "" {
+		q = &v
+	}
+	publishedOnly := c.Query("published") == "true"
+
+	resp, err := h.svc.ListProducts(c.Request.Context(), storeID, page, perPage, categoryID, q, publishedOnly)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+// CreateProduct godoc
+// POST /v1/catalogue/products
+func (h *Handler) CreateProduct(c *gin.Context) {
+	storeID, ok := h.callerStoreID(c)
+	if !ok {
+		return
+	}
+
+	var req dto.CreateProductReq
+	if !h.bind(c, &req) {
+		return
+	}
+
+	resp, err := h.svc.CreateProduct(c.Request.Context(), storeID, req)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusCreated, resp)
+}
+
+// GetProduct godoc
+// GET /v1/catalogue/products/:id
+func (h *Handler) GetProduct(c *gin.Context) {
+	storeID, ok := h.callerStoreID(c)
+	if !ok {
+		return
+	}
+	productID, ok := h.pathUUID(c, "id")
+	if !ok {
+		return
+	}
+
+	resp, err := h.svc.GetProduct(c.Request.Context(), storeID, productID)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+// UpdateProduct godoc
+// PATCH /v1/catalogue/products/:id
+func (h *Handler) UpdateProduct(c *gin.Context) {
+	storeID, ok := h.callerStoreID(c)
+	if !ok {
+		return
+	}
+	productID, ok := h.pathUUID(c, "id")
+	if !ok {
+		return
+	}
+
+	var req dto.UpdateProductReq
+	if !h.bind(c, &req) {
+		return
+	}
+
+	resp, err := h.svc.UpdateProduct(c.Request.Context(), storeID, productID, req)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+// DeleteProduct godoc
+// DELETE /v1/catalogue/products/:id
+func (h *Handler) DeleteProduct(c *gin.Context) {
+	storeID, ok := h.callerStoreID(c)
+	if !ok {
+		return
+	}
+	productID, ok := h.pathUUID(c, "id")
+	if !ok {
+		return
+	}
+
+	if err := h.svc.DeleteProduct(c.Request.Context(), storeID, productID); err != nil {
+		h.writeError(c, err)
+		return
+	}
+
+	c.Status(http.StatusNoContent)
+}
+
+// PublishProduct godoc
+// POST /v1/catalogue/products/:id/publish
+func (h *Handler) PublishProduct(c *gin.Context) {
+	storeID, ok := h.callerStoreID(c)
+	if !ok {
+		return
+	}
+	productID, ok := h.pathUUID(c, "id")
+	if !ok {
+		return
+	}
+
+	resp, err := h.svc.PublishProduct(c.Request.Context(), storeID, productID)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+// UnpublishProduct godoc
+// POST /v1/catalogue/products/:id/unpublish
+func (h *Handler) UnpublishProduct(c *gin.Context) {
+	storeID, ok := h.callerStoreID(c)
+	if !ok {
+		return
+	}
+	productID, ok := h.pathUUID(c, "id")
+	if !ok {
+		return
+	}
+
+	resp, err := h.svc.UnpublishProduct(c.Request.Context(), storeID, productID)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
