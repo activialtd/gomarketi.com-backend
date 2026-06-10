@@ -80,12 +80,13 @@ set_vars() {
       )
       ;;
     gateway)
+      # Use Railway private networking — avoids public internet hops and loop detection
       vars+=(
-        "UPSTREAM_AUTH=https://$SVC_AUTH.up.railway.app"
-        "UPSTREAM_IDENTITY=https://$SVC_IDENTITY.up.railway.app"
-        "UPSTREAM_STOREFRONT=https://$SVC_STOREFRONT.up.railway.app"
-        "UPSTREAM_CATALOGUE=https://$SVC_CATALOGUE.up.railway.app"
-        "UPSTREAM_ORDERS=https://$SVC_ORDERS.up.railway.app"
+        "UPSTREAM_AUTH=http://$SVC_AUTH.railway.internal:8080"
+        "UPSTREAM_IDENTITY=http://$SVC_IDENTITY.railway.internal:8080"
+        "UPSTREAM_STOREFRONT=http://$SVC_STOREFRONT.railway.internal:8080"
+        "UPSTREAM_CATALOGUE=http://$SVC_CATALOGUE.railway.internal:8080"
+        "UPSTREAM_ORDERS=http://$SVC_ORDERS.railway.internal:8080"
       )
       ;;
     *)
