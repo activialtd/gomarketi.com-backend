@@ -135,6 +135,19 @@ func newProxy(target string, log zerolog.Logger) *httputil.ReverseProxy {
 		req.Header.Del("X-Forwarded-Host")
 	}
 
+	// Strip CORS headers from upstream responses — the gateway owns CORS.
+	// Without this, both the upstream and the gateway set the headers and
+	// browsers reject the duplicate values (e.g. "true, true").
+	proxy.ModifyResponse = func(resp *http.Response) error {
+		resp.Header.Del("Access-Control-Allow-Origin")
+		resp.Header.Del("Access-Control-Allow-Credentials")
+		resp.Header.Del("Access-Control-Allow-Methods")
+		resp.Header.Del("Access-Control-Allow-Headers")
+		resp.Header.Del("Access-Control-Max-Age")
+		resp.Header.Del("Vary")
+		return nil
+	}
+
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		log.Error().Err(err).Str("path", r.URL.Path).Msg("upstream error")
 		w.Header().Set("Content-Type", "application/json")
