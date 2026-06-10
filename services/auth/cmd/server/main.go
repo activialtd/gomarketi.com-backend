@@ -82,9 +82,29 @@ func run(log zerolog.Logger) error {
 	}
 
 	// ── Email ─────────────────────────────────────────────────────────────────
-	// Use SMTP (Gmail) when SMTP_HOST is set, otherwise fall back to Mailgun.
+	// Priority: Resend (HTTP, works on Railway) → Mailgun → SMTP (blocked on Railway).
 	var emailer email.Emailer
-	if viper.GetString("SMTP_HOST") != "" {
+	switch {
+	case viper.GetString("RESEND_API_KEY") != "":
+		emailer, err = email.NewResendClient(email.ResendConfig{
+			APIKey: viper.GetString("RESEND_API_KEY"),
+			From:   viper.GetString("RESEND_FROM"),
+		})
+		if err != nil {
+			return fmt.Errorf("resend client: %w", err)
+		}
+		log.Info().Msg("using Resend emailer")
+	case viper.GetString("MAILGUN_API_KEY") != "":
+		emailer, err = email.NewMailgunClient(email.MailgunConfig{
+			APIKey: viper.GetString("MAILGUN_API_KEY"),
+			Domain: viper.GetString("MAILGUN_DOMAIN"),
+			From:   viper.GetString("MAILGUN_FROM"),
+		})
+		if err != nil {
+			return fmt.Errorf("mailgun client: %w", err)
+		}
+		log.Info().Msg("using Mailgun emailer")
+	default:
 		emailer, err = email.NewSMTPClient(email.SMTPConfig{
 			Host:     viper.GetString("SMTP_HOST"),
 			Port:     viper.GetString("SMTP_PORT"),
@@ -96,16 +116,6 @@ func run(log zerolog.Logger) error {
 			return fmt.Errorf("smtp client: %w", err)
 		}
 		log.Info().Str("host", viper.GetString("SMTP_HOST")).Msg("using SMTP emailer")
-	} else {
-		emailer, err = email.NewMailgunClient(email.MailgunConfig{
-			APIKey: viper.GetString("MAILGUN_API_KEY"),
-			Domain: viper.GetString("MAILGUN_DOMAIN"),
-			From:   viper.GetString("MAILGUN_FROM"),
-		})
-		if err != nil {
-			return fmt.Errorf("mailgun client: %w", err)
-		}
-		log.Info().Msg("using Mailgun emailer")
 	}
 
 	// ── OAuth verifiers ───────────────────────────────────────────────────────
