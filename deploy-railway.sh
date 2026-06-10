@@ -2,28 +2,49 @@
 # deploy-railway.sh — set env vars and deploy GoMarketi services to Railway
 #
 # Usage:
-#   ./deploy-railway.sh              # deploy all services
-#   ./deploy-railway.sh auth         # deploy one service
-#   ./deploy-railway.sh gateway      # deploy only gateway
+#   ./deploy-railway.sh                        # deploy all → production
+#   ./deploy-railway.sh auth                   # deploy auth → production
+#   ./deploy-railway.sh gateway staging        # deploy gateway → staging
+#   ./deploy-railway.sh --env staging          # deploy all → staging
 #
 # Prerequisites:
 #   1. railway CLI installed  (npm install -g @railway/cli)
 #   2. railway login
-#   3. Services already created in Railway dashboard (one-time — see README)
-#   4. .env.railway filled in (copy from .env.railway.template)
+#   3. Services created in Railway dashboard for both environments
+#   4. .env.railway (production) and .env.railway.staging filled in
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
-ENV_FILE="$REPO_ROOT/.env.railway"
+
+# ── Parse arguments ───────────────────────────────────────────────────────────
+FILTER=""
+ENVIRONMENT="production"
+
+for arg in "$@"; do
+  case "$arg" in
+    staging|production) ENVIRONMENT="$arg" ;;
+    --env=*) ENVIRONMENT="${arg#--env=}" ;;
+    --env) ;;  # handled by next arg — not supported in this simple parser
+    *) FILTER="$arg" ;;
+  esac
+done
+
+# ── Load env file ─────────────────────────────────────────────────────────────
+if [[ "$ENVIRONMENT" == "staging" ]]; then
+  ENV_FILE="$REPO_ROOT/.env.railway.staging"
+else
+  ENV_FILE="$REPO_ROOT/.env.railway"
+fi
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "ERROR: $ENV_FILE not found."
-  echo "Copy .env.railway.template to .env.railway and fill in the values."
   exit 1
 fi
 
 source "$ENV_FILE"
+
+echo "Deploying to: $ENVIRONMENT"
 
 SERVICES=(auth identity storefront catalogue orders gateway)
 SVC_NAMES=(
@@ -35,15 +56,11 @@ SVC_NAMES=(
   "$SVC_GATEWAY"
 )
 
-FILTER="${1:-}"
-
 set_vars() {
   local svc="$1"
   local name="$2"
-  local vars=()
-
-  vars+=(
-    "ENV=production"
+  local vars=(
+    "ENV=$ENVIRONMENT"
     "ALLOWED_ORIGINS=$ALLOWED_ORIGINS"
   )
 
@@ -79,7 +96,7 @@ set_vars() {
       ;;
   esac
 
-  # Filter out empty values — Railway rejects KEY= with no value
+  # Filter empty values
   local filtered=()
   for v in "${vars[@]}"; do
     local val="${v#*=}"
@@ -87,7 +104,7 @@ set_vars() {
   done
 
   echo "  Setting ${#filtered[@]} env vars..."
-  railway variables set "${filtered[@]}" --service "$name"
+  railway variables set "${filtered[@]}" --service "$name" --environment "$ENVIRONMENT"
 }
 
 deploy_service() {
@@ -96,22 +113,22 @@ deploy_service() {
 
   echo ""
   echo "══════════════════════════════════════════"
-  echo "  Deploying: $svc → $name"
+  echo "  [$ENVIRONMENT] $svc → $name"
   echo "══════════════════════════════════════════"
 
   set_vars "$svc" "$name"
 
   echo "  Deploying..."
-  railway up --service "$name" --detach
+  railway up --service "$name" --environment "$ENVIRONMENT" --detach
 
-  echo "✓ $svc queued → https://$name.up.railway.app"
+  echo "✓ $svc queued"
 }
 
 for i in "${!SERVICES[@]}"; do
   svc="${SERVICES[$i]}"
   name="${SVC_NAMES[$i]}"
 
-  if [[ -n "$FILTER" && "$svc" != "$FILTER" ]]; then
+  if [[ -n "$FILTER" && "$svc" != "$FILTER" && "$FILTER" != "staging" && "$FILTER" != "production" ]]; then
     continue
   fi
 
@@ -119,7 +136,4 @@ for i in "${!SERVICES[@]}"; do
 done
 
 echo ""
-echo "All services queued. Watch progress at https://railway.app"
-echo ""
-echo "Next: add api.activialtd.com as a custom domain on the gateway service:"
-echo "  railway domain --service $SVC_GATEWAY"
+echo "All done → $ENVIRONMENT"

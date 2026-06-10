@@ -1,18 +1,8 @@
-name: Backend CD Pipeline
+name: Deploy Backend
 
 on:
   push:
-    branches:
-      - staging
-      - main
-
-permissions:
-  id-token: write   # required for AWS OIDC
-  contents: read
-
-env:
-  AWS_REGION: ${{ vars.AWS_REGION }}
-  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}   # e.g. 123456789.dkr.ecr.us-east-1.amazonaws.com
+    branches: [main, staging]
 
 jobs:
   # ── Detect which services changed ─────────────────────────────────────────
@@ -28,15 +18,25 @@ jobs:
         uses: dorny/paths-filter@v3
         with:
           filters: |
-            # Add one entry per service as you build them:
-            # user-service:
-            #   - 'services/user-service/**'
-            # product-service:
-            #   - 'services/product-service/**'
-            # payment-service:
-            #   - 'services/payment-service/**'
+            auth:
+              - 'services/auth/**'
+              - 'shared/pkg/**'
+            identity:
+              - 'services/identity/**'
+              - 'shared/pkg/**'
+            catalogue:
+              - 'services/catalogue/**'
+              - 'shared/pkg/**'
+            orders:
+              - 'services/orders/**'
+              - 'shared/pkg/**'
+            storefront:
+              - 'services/storefront/**'
+              - 'shared/pkg/**'
+            gateway:
+              - 'services/gateway/**'
 
-  # ── Build + Deploy changed services ───────────────────────────────────────
+  # ── Deploy changed services to the matching Railway environment ────────────
   deploy:
     needs: detect-changes
     if: needs.detect-changes.outputs.services != '[]'
@@ -44,71 +44,23 @@ jobs:
     environment: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
 
     strategy:
+      fail-fast: false
       matrix:
         service: ${{ fromJson(needs.detect-changes.outputs.services) }}
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Authenticate with AWS via OIDC
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
 
-      - name: Verify AWS session
-        run: aws sts get-caller-identity
-
-      - name: Log in to Amazon ECR
-        id: ecr-login
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Build and push Docker image
-        id: build
+      - name: Deploy ${{ matrix.service }} to ${{ github.ref_name == 'main' && 'production' || 'staging' }}
         env:
-          IMAGE_TAG: ${{ github.sha }}
-          SERVICE: ${{ matrix.service }}
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          IMAGE_URI=$ECR_REGISTRY/$SERVICE:$IMAGE_TAG
-          docker build -t $IMAGE_URI ./services/$SERVICE
-          docker push $IMAGE_URI
-          echo "image=$IMAGE_URI" >> $GITHUB_OUTPUT
-
-      - name: Deploy to ECS Fargate
-        env:
-          IMAGE_URI: ${{ steps.build.outputs.image }}
-          SERVICE: ${{ matrix.service }}
-          ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
-        run: |
-          # Grab the current task definition, swap in the new image, register it
-          TASK_DEF=$(aws ecs describe-task-definition \
-            --task-definition $SERVICE \
-            --query taskDefinition)
-
-          NEW_TASK_DEF=$(echo $TASK_DEF | jq \
-            --arg IMAGE "$IMAGE_URI" \
-            '.containerDefinitions[0].image = $IMAGE |
-             del(.taskDefinitionArn, .revision, .status,
-                 .requiresAttributes, .compatibilities,
-                 .registeredAt, .registeredBy)')
-
-          NEW_TASK_ARN=$(aws ecs register-task-definition \
-            --cli-input-json "$NEW_TASK_DEF" \
-            --query 'taskDefinition.taskDefinitionArn' \
-            --output text)
-
-          aws ecs update-service \
-            --cluster $ECS_CLUSTER \
-            --service $SERVICE \
-            --task-definition $NEW_TASK_ARN \
-            --force-new-deployment
-
-      - name: Wait for service to stabilize
-        env:
-          SERVICE: ${{ matrix.service }}
-          ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
-        run: |
-          aws ecs wait services-stable \
-            --cluster $ECS_CLUSTER \
-            --services $SERVICE
-          echo "✅ $SERVICE deployed successfully"
+          ENV="${{ github.ref_name == 'main' && 'production' || 'staging' }}"
+          railway up \
+            --service gomarketi-${{ matrix.service }} \
+            --environment "$ENV" \
+            --detach
+          echo "✅ gomarketi-${{ matrix.service }} deployed to $ENV"
