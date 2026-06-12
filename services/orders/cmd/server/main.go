@@ -10,9 +10,12 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jmoiron/sqlx"
+	_ "github.com/lib/pq"
 	"github.com/rs/zerolog"
 	"github.com/spf13/viper"
 
+	orddb "github.com/activialtd/gomarketi.com-backend/services/orders/db"
 	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/handler"
 	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/service"
 )
@@ -33,7 +36,24 @@ func run(log zerolog.Logger) error {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
-	svc := service.New(log)
+	dbURL := viper.GetString("DATABASE_URL")
+	if dbURL == "" {
+		return fmt.Errorf("DATABASE_URL is required")
+	}
+
+	db, err := connectDB(dbURL, log)
+	if err != nil {
+		return fmt.Errorf("database: %w", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := orddb.Migrate(ctx, db); err != nil {
+		return fmt.Errorf("migrations: %w", err)
+	}
+	log.Info().Msg("migrations applied")
+
+	svc := service.New(db, log)
 	h := handler.New(svc)
 	r := gin.New()
 
@@ -63,7 +83,6 @@ func run(log zerolog.Logger) error {
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-
 	select {
 	case err := <-errCh:
 		return fmt.Errorf("server error: %w", err)
@@ -71,7 +90,30 @@ func run(log zerolog.Logger) error {
 		log.Info().Str("signal", sig.String()).Msg("shutting down")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return srv.Shutdown(ctx)
+	return srv.Shutdown(shutCtx)
+}
+
+func connectDB(dsn string, log zerolog.Logger) (*sqlx.DB, error) {
+	db, err := sqlx.Open("postgres", dsn)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * time.Minute)
+
+	for i := 1; i <= 5; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err = db.PingContext(ctx)
+		cancel()
+		if err == nil {
+			log.Info().Msg("orders db connected")
+			return db, nil
+		}
+		log.Warn().Err(err).Int("attempt", i).Msg("db ping failed, retrying")
+		time.Sleep(2 * time.Second)
+	}
+	return nil, fmt.Errorf("database unreachable: %w", err)
 }
