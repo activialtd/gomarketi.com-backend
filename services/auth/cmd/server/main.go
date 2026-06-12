@@ -82,7 +82,7 @@ func run(log zerolog.Logger) error {
 	}
 
 	// ── Email ─────────────────────────────────────────────────────────────────
-	// Priority: Resend (HTTP, works on Railway) → Mailgun → SMTP (blocked on Railway).
+	// Priority: Resend → Gmail API (HTTPS, works on Railway) → Mailgun → SMTP (blocked on Railway).
 	var emailer email.Emailer
 	switch {
 	case viper.GetString("RESEND_API_KEY") != "":
@@ -94,6 +94,17 @@ func run(log zerolog.Logger) error {
 			return fmt.Errorf("resend client: %w", err)
 		}
 		log.Info().Msg("using Resend emailer")
+	case viper.GetString("GMAIL_REFRESH_TOKEN") != "":
+		emailer, err = email.NewGmailClient(email.GmailConfig{
+			ClientID:     viper.GetString("GMAIL_CLIENT_ID"),
+			ClientSecret: viper.GetString("GMAIL_CLIENT_SECRET"),
+			RefreshToken: viper.GetString("GMAIL_REFRESH_TOKEN"),
+			From:         viper.GetString("GMAIL_FROM"),
+		})
+		if err != nil {
+			return fmt.Errorf("gmail client: %w", err)
+		}
+		log.Info().Str("from", viper.GetString("GMAIL_FROM")).Msg("using Gmail API emailer")
 	case viper.GetString("MAILGUN_API_KEY") != "":
 		emailer, err = email.NewMailgunClient(email.MailgunConfig{
 			APIKey: viper.GetString("MAILGUN_API_KEY"),
