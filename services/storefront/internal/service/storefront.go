@@ -46,13 +46,13 @@ func (s *StorefrontService) CreateStore(ctx context.Context, userID uuid.UUID, r
 
 	var row storeRow
 	err = s.db.QueryRowxContext(ctx, `
-		INSERT INTO stores (vendor_id, name, slug, category, currency, team_size, staff_range)
+		INSERT INTO stores (vendor_id, name, slug, category, currency, team_size, support_phone)
 		VALUES ($1,$2,$3,$4,$5,$6,$7)
 		RETURNING id, vendor_id, name, slug, category, currency,
 		          team_size, staff_range, tagline, logo_url, support_phone,
-		          address, city, state, is_active, created_at`,
+		          address, city, state, custom_domain, custom_domain_status, is_active, created_at`,
 		userID, req.Name, req.Slug, req.Category, req.Currency,
-		nullStr(req.TeamSize), nullStr(req.StaffRange),
+		req.TeamSize, req.SupportPhone,
 	).StructScan(&row)
 	if err != nil {
 		return dto.StoreResp{}, fmt.Errorf("insert store: %w", err)
@@ -79,7 +79,7 @@ func (s *StorefrontService) UpdateStore(ctx context.Context, userID uuid.UUID, s
 		WHERE id=$8 AND vendor_id=$9
 		RETURNING id, vendor_id, name, slug, category, currency,
 		          team_size, staff_range, tagline, logo_url, support_phone,
-		          address, city, state, is_active, created_at`,
+		          address, city, state, custom_domain, custom_domain_status, is_active, created_at`,
 		req.Name, req.Tagline, req.LogoURL, req.SupportPhone,
 		req.Address, req.City, req.State,
 		storeID, userID,
@@ -97,6 +97,38 @@ func (s *StorefrontService) CheckSlugAvailable(ctx context.Context, slug string)
 	var taken bool
 	_ = s.db.QueryRowContext(ctx, `SELECT TRUE FROM stores WHERE slug=$1`, slug).Scan(&taken)
 	return dto.SlugCheckResp{Slug: slug, Available: !taken}, nil
+}
+
+func (s *StorefrontService) GetStoreBySlug(ctx context.Context, slug string) (dto.StoreResp, error) {
+	var row storeRow
+	err := s.db.QueryRowxContext(ctx, `
+		SELECT id, vendor_id, name, slug, category, currency,
+		       team_size, staff_range, tagline, logo_url, support_phone,
+		       address, city, state, custom_domain, custom_domain_status, is_active, created_at
+		FROM stores WHERE slug=$1 AND is_active=TRUE`, slug).StructScan(&row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return dto.StoreResp{}, apperrors.NotFound("store not found")
+	}
+	if err != nil {
+		return dto.StoreResp{}, fmt.Errorf("get store by slug: %w", err)
+	}
+	return rowToResp(row), nil
+}
+
+func (s *StorefrontService) GetStoreByDomain(ctx context.Context, domain string) (dto.StoreResp, error) {
+	var row storeRow
+	err := s.db.QueryRowxContext(ctx, `
+		SELECT id, vendor_id, name, slug, category, currency,
+		       team_size, staff_range, tagline, logo_url, support_phone,
+		       address, city, state, custom_domain, custom_domain_status, is_active, created_at
+		FROM stores WHERE custom_domain=$1 AND custom_domain_status='active' AND is_active=TRUE`, domain).StructScan(&row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return dto.StoreResp{}, apperrors.NotFound("store not found")
+	}
+	if err != nil {
+		return dto.StoreResp{}, fmt.Errorf("get store by domain: %w", err)
+	}
+	return rowToResp(row), nil
 }
 
 // ── Staff ─────────────────────────────────────────────────────────────────────
@@ -176,22 +208,24 @@ func (s *StorefrontService) RemoveStaff(ctx context.Context, userID uuid.UUID, s
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 type storeRow struct {
-	ID           uuid.UUID      `db:"id"`
-	VendorID     uuid.UUID      `db:"vendor_id"`
-	Name         string         `db:"name"`
-	Slug         string         `db:"slug"`
-	Category     string         `db:"category"`
-	Currency     string         `db:"currency"`
-	TeamSize     sql.NullString `db:"team_size"`
-	StaffRange   sql.NullString `db:"staff_range"`
-	Tagline      sql.NullString `db:"tagline"`
-	LogoURL      sql.NullString `db:"logo_url"`
-	SupportPhone sql.NullString `db:"support_phone"`
-	Address      sql.NullString `db:"address"`
-	City         sql.NullString `db:"city"`
-	State        sql.NullString `db:"state"`
-	IsActive     bool           `db:"is_active"`
-	CreatedAt    time.Time      `db:"created_at"`
+	ID                 uuid.UUID      `db:"id"`
+	VendorID           uuid.UUID      `db:"vendor_id"`
+	Name               string         `db:"name"`
+	Slug               string         `db:"slug"`
+	Category           string         `db:"category"`
+	Currency           string         `db:"currency"`
+	TeamSize           sql.NullString `db:"team_size"`
+	StaffRange         sql.NullString `db:"staff_range"`
+	Tagline            sql.NullString `db:"tagline"`
+	LogoURL            sql.NullString `db:"logo_url"`
+	SupportPhone       sql.NullString `db:"support_phone"`
+	Address            sql.NullString `db:"address"`
+	City               sql.NullString `db:"city"`
+	State              sql.NullString `db:"state"`
+	CustomDomain       sql.NullString `db:"custom_domain"`
+	CustomDomainStatus string         `db:"custom_domain_status"`
+	IsActive           bool           `db:"is_active"`
+	CreatedAt          time.Time      `db:"created_at"`
 }
 
 type staffRow struct {
@@ -208,7 +242,7 @@ func (s *StorefrontService) getStoreByVendor(ctx context.Context, userID uuid.UU
 	err := s.db.QueryRowxContext(ctx, `
 		SELECT id, vendor_id, name, slug, category, currency,
 		       team_size, staff_range, tagline, logo_url, support_phone,
-		       address, city, state, is_active, created_at
+		       address, city, state, custom_domain, custom_domain_status, is_active, created_at
 		FROM stores WHERE vendor_id=$1`, userID).StructScan(&row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.StoreResp{}, apperrors.NotFound("store not found")
@@ -230,22 +264,24 @@ func (s *StorefrontService) assertOwner(ctx context.Context, userID, storeID uui
 
 func rowToResp(r storeRow) dto.StoreResp {
 	return dto.StoreResp{
-		ID:           r.ID.String(),
-		VendorID:     r.VendorID.String(),
-		Name:         r.Name,
-		Slug:         r.Slug,
-		Category:     r.Category,
-		Currency:     r.Currency,
-		TeamSize:     nullToPtr(r.TeamSize),
-		StaffRange:   nullToPtr(r.StaffRange),
-		Tagline:      nullToPtr(r.Tagline),
-		LogoURL:      nullToPtr(r.LogoURL),
-		SupportPhone: nullToPtr(r.SupportPhone),
-		Address:      nullToPtr(r.Address),
-		City:         nullToPtr(r.City),
-		State:        nullToPtr(r.State),
-		IsActive:     r.IsActive,
-		CreatedAt:    r.CreatedAt.UTC().Format(time.RFC3339),
+		ID:                 r.ID.String(),
+		VendorID:           r.VendorID.String(),
+		Name:               r.Name,
+		Slug:               r.Slug,
+		Category:           r.Category,
+		Currency:           r.Currency,
+		TeamSize:           nullToPtr(r.TeamSize),
+		StaffRange:         nullToPtr(r.StaffRange),
+		Tagline:            nullToPtr(r.Tagline),
+		LogoURL:            nullToPtr(r.LogoURL),
+		SupportPhone:       nullToPtr(r.SupportPhone),
+		Address:            nullToPtr(r.Address),
+		City:               nullToPtr(r.City),
+		State:              nullToPtr(r.State),
+		CustomDomain:       nullToPtr(r.CustomDomain),
+		CustomDomainStatus: r.CustomDomainStatus,
+		IsActive:           r.IsActive,
+		CreatedAt:          r.CreatedAt.UTC().Format(time.RFC3339),
 	}
 }
 
@@ -264,12 +300,5 @@ func nullStr(s string) sql.NullString {
 }
 
 func isNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-	var appErr interface{ StatusCode() int }
-	if errors.As(err, &appErr) {
-		return appErr.StatusCode() == http.StatusNotFound
-	}
-	return errors.Is(err, sql.ErrNoRows)
+	return apperrors.IsNotFound(err) || errors.Is(err, sql.ErrNoRows)
 }

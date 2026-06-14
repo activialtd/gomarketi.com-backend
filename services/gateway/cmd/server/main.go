@@ -74,6 +74,12 @@ func run(log zerolog.Logger) error {
 				return
 			}
 
+			// Public storefront routes (e.g. store lookup by slug) require no auth.
+			if strings.HasPrefix(r.URL.Path, "/v1/storefront/public/") {
+				proxy.ServeHTTP(w, r)
+				return
+			}
+
 			// All other routes require a valid Bearer token.
 			userID, storeIDs, ok := validateBearer(r, jwtKey)
 			if !ok {
@@ -285,24 +291,29 @@ func needsStoreIDs(prefix string) bool {
 // ── Upstream loading ──────────────────────────────────────────────────────────
 
 func loadUpstreams() (map[string]string, error) {
+	// loadDotEnv reads KEY=VALUE lines from .env in the working directory.
+	// It only sets vars that are not already in the environment, so real env
+	// vars always win (same behaviour as viper.AutomaticEnv).
+	loadDotEnv()
+
+	// Required upstreams — gateway will not start without these.
 	required := map[string]string{
 		"/v1/auth/":       "UPSTREAM_AUTH",
-		"/v1/identity/":   "UPSTREAM_IDENTITY",
 		"/v1/storefront/": "UPSTREAM_STOREFRONT",
-		"/v1/catalogue/":  "UPSTREAM_CATALOGUE",
-		"/v1/orders/":     "UPSTREAM_ORDERS",
-		"/v1/crm/":        "UPSTREAM_ORDERS",
-		"/v1/analytics/":  "UPSTREAM_ORDERS",
 	}
 
-	seen := map[string]bool{}
+	// Optional upstreams — routes are registered only when the var is set.
+	optional := map[string]string{
+		"/v1/identity/":  "UPSTREAM_IDENTITY",
+		"/v1/catalogue/": "UPSTREAM_CATALOGUE",
+		"/v1/orders/":    "UPSTREAM_ORDERS",
+		"/v1/crm/":       "UPSTREAM_ORDERS",
+		"/v1/analytics/": "UPSTREAM_ORDERS",
+	}
+
 	result := map[string]string{}
 
 	for prefix, envKey := range required {
-		if seen[envKey] {
-			result[prefix] = os.Getenv(envKey)
-			continue
-		}
 		val := os.Getenv(envKey)
 		if val == "" {
 			return nil, fmt.Errorf("%s is required", envKey)
@@ -310,10 +321,49 @@ func loadUpstreams() (map[string]string, error) {
 		if _, err := url.ParseRequestURI(val); err != nil {
 			return nil, fmt.Errorf("%s %q is not a valid URL: %w", envKey, val, err)
 		}
-		seen[envKey] = true
 		result[prefix] = val
 	}
+
+	seen := map[string]bool{}
+	for prefix, envKey := range optional {
+		val := os.Getenv(envKey)
+		if val == "" {
+			continue // service not running locally — skip route
+		}
+		if !seen[envKey] {
+			if _, err := url.ParseRequestURI(val); err != nil {
+				return nil, fmt.Errorf("%s %q is not a valid URL: %w", envKey, val, err)
+			}
+			seen[envKey] = true
+		}
+		result[prefix] = val
+	}
+
 	return result, nil
+}
+
+// loadDotEnv reads KEY=VALUE pairs from .env in the current directory and
+// sets them in the process environment if not already set.
+func loadDotEnv() {
+	data, err := os.ReadFile(".env")
+	if err != nil {
+		return // no .env — fine in production
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		idx := strings.IndexByte(line, '=')
+		if idx < 1 {
+			continue
+		}
+		key := strings.TrimSpace(line[:idx])
+		val := strings.TrimSpace(line[idx+1:])
+		if os.Getenv(key) == "" { // don't override real env vars
+			os.Setenv(key, val)
+		}
+	}
 }
 
 // ── Reverse proxy ─────────────────────────────────────────────────────────────

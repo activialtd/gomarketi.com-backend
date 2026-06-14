@@ -18,6 +18,13 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 		middleware.UserContext(),
 	)
 
+	// Public routes — no authentication required.
+	pub := r.Group("/v1/storefront/public")
+	{
+		pub.GET("/stores/by-domain", h.GetStoreByDomain)
+		pub.GET("/stores/:slug", h.GetStorePublic)
+	}
+
 	v1 := r.Group("/v1/storefront")
 	v1.Use(middleware.RequireUser())
 	{
