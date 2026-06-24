@@ -24,6 +24,7 @@ type UpdateStoreReq struct {
 	Address      *string `json:"address"       validate:"omitempty,max=500"`
 	City         *string `json:"city"          validate:"omitempty,max=100"`
 	State        *string `json:"state"         validate:"omitempty,max=100"`
+	ThemeConfig  *string `json:"theme_config,omitempty"` // raw JSON, stored as JSONB
 }
 
 // StoreResp is returned for any store read or write operation.
@@ -44,6 +45,7 @@ type StoreResp struct {
 	State        *string `json:"state,omitempty"`
 	CustomDomain       *string `json:"custom_domain,omitempty"`
 	CustomDomainStatus string  `json:"custom_domain_status,omitempty"`
+	ThemeConfig        *string `json:"theme_config,omitempty"` // raw JSON
 	IsActive           bool    `json:"is_active"`
 	CreatedAt          string  `json:"created_at"`
 }

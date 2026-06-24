@@ -50,7 +50,7 @@ func (s *StorefrontService) CreateStore(ctx context.Context, userID uuid.UUID, r
 		VALUES ($1,$2,$3,$4,$5,$6,$7)
 		RETURNING id, vendor_id, name, slug, category, currency,
 		          team_size, staff_range, tagline, logo_url, support_phone,
-		          address, city, state, custom_domain, custom_domain_status, is_active, created_at`,
+		          address, city, state, custom_domain, custom_domain_status, theme_config, is_active, created_at`,
 		userID, req.Name, req.Slug, req.Category, req.Currency,
 		req.TeamSize, req.SupportPhone,
 	).StructScan(&row)
@@ -75,13 +75,14 @@ func (s *StorefrontService) UpdateStore(ctx context.Context, userID uuid.UUID, s
 			address       = COALESCE($5, address),
 			city          = COALESCE($6, city),
 			state         = COALESCE($7, state),
+			theme_config  = COALESCE($8::jsonb, theme_config),
 			updated_at    = NOW()
-		WHERE id=$8 AND vendor_id=$9
+		WHERE id=$9 AND vendor_id=$10
 		RETURNING id, vendor_id, name, slug, category, currency,
 		          team_size, staff_range, tagline, logo_url, support_phone,
-		          address, city, state, custom_domain, custom_domain_status, is_active, created_at`,
+		          address, city, state, custom_domain, custom_domain_status, theme_config, is_active, created_at`,
 		req.Name, req.Tagline, req.LogoURL, req.SupportPhone,
-		req.Address, req.City, req.State,
+		req.Address, req.City, req.State, req.ThemeConfig,
 		storeID, userID,
 	).StructScan(&row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -224,6 +225,7 @@ type storeRow struct {
 	State              sql.NullString `db:"state"`
 	CustomDomain       sql.NullString `db:"custom_domain"`
 	CustomDomainStatus string         `db:"custom_domain_status"`
+	ThemeConfig        sql.NullString `db:"theme_config"`
 	IsActive           bool           `db:"is_active"`
 	CreatedAt          time.Time      `db:"created_at"`
 }
@@ -280,6 +282,7 @@ func rowToResp(r storeRow) dto.StoreResp {
 		State:              nullToPtr(r.State),
 		CustomDomain:       nullToPtr(r.CustomDomain),
 		CustomDomainStatus: r.CustomDomainStatus,
+		ThemeConfig:        nullToPtr(r.ThemeConfig),
 		IsActive:           r.IsActive,
 		CreatedAt:          r.CreatedAt.UTC().Format(time.RFC3339),
 	}
