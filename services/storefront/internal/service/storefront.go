@@ -302,6 +302,42 @@ func nullStr(s string) sql.NullString {
 	return sql.NullString{String: s, Valid: true}
 }
 
+// LogView records a storefront page view. It silently ignores unknown slugs.
+func (s *StorefrontService) LogView(ctx context.Context, req dto.LogViewReq, ipHash string) {
+	var storeID uuid.UUID
+	if err := s.db.QueryRowContext(ctx, `SELECT id FROM stores WHERE slug=$1 AND is_active=TRUE`, req.StoreSlug).Scan(&storeID); err != nil {
+		return // unknown slug — ignore
+	}
+	_, _ = s.db.ExecContext(ctx, `
+		INSERT INTO storefront_views (store_id, slug, path, referrer, ip_hash)
+		VALUES ($1,$2,$3,$4,$5)`,
+		storeID, req.StoreSlug, req.Path,
+		nullStr(req.Referrer), nullStr(ipHash),
+	)
+}
+
+// GetStoreViews returns view counts for a store.
+func (s *StorefrontService) GetStoreViews(ctx context.Context, storeID uuid.UUID) (dto.StoreViewsResp, error) {
+	var r dto.StoreViewsResp
+	r.StoreID = storeID.String()
+	rows := []struct {
+		label string
+		field *int64
+		where string
+	}{
+		{"30d", &r.Views30d, "NOW() - INTERVAL '30 days'"},
+		{"7d", &r.Views7d, "NOW() - INTERVAL '7 days'"},
+		{"all", &r.ViewsAll, "'epoch'"},
+	}
+	for _, row := range rows {
+		q := fmt.Sprintf(`SELECT COUNT(*) FROM storefront_views WHERE store_id=$1 AND viewed_at > %s`, row.where)
+		if err := s.db.QueryRowContext(ctx, q, storeID).Scan(row.field); err != nil {
+			return r, err
+		}
+	}
+	return r, nil
+}
+
 func isNotFound(err error) bool {
 	return apperrors.IsNotFound(err) || errors.Is(err, sql.ErrNoRows)
 }

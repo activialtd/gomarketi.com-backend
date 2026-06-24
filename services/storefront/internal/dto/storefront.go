@@ -56,6 +56,21 @@ type SlugCheckResp struct {
 	Available bool   `json:"available"`
 }
 
+// LogViewReq is the body for POST /v1/storefront/public/log.
+type LogViewReq struct {
+	StoreSlug string `json:"slug"     validate:"required"`
+	Path      string `json:"path"     validate:"required"`
+	Referrer  string `json:"referrer"`
+}
+
+// StoreViewsResp is returned by GET /v1/storefront/stores/:id/views.
+type StoreViewsResp struct {
+	StoreID  string `json:"store_id"`
+	Views30d int64  `json:"views_30d"`
+	Views7d  int64  `json:"views_7d"`
+	ViewsAll int64  `json:"views_all"`
+}
+
 // ── Staff ──────────────────────────────────────────────────────────────────────
 
 // InviteStaffReq is the body for POST /v1/storefront/stores/:id/staff.

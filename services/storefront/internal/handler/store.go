@@ -1,7 +1,11 @@
 package handler
 
 import (
+	"context"
+	"crypto/sha256"
+	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -94,6 +98,43 @@ func (h *Handler) GetStoreByDomain(c *gin.Context) {
 		return
 	}
 	resp, err := h.svc.GetStoreByDomain(c.Request.Context(), domain)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+// LogView godoc
+// POST /v1/storefront/public/log — fire-and-forget analytics pixel, no auth
+func (h *Handler) LogView(c *gin.Context) {
+	var req dto.LogViewReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.Status(http.StatusNoContent)
+		return
+	}
+	ip := c.ClientIP()
+	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(ip)))
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		h.svc.LogView(ctx, req, hash)
+	}()
+	c.Status(http.StatusNoContent)
+}
+
+// GetStoreViews godoc
+// GET /v1/storefront/stores/:id/views — authenticated, returns view counts
+func (h *Handler) GetStoreViews(c *gin.Context) {
+	_, ok := h.callerID(c)
+	if !ok {
+		return
+	}
+	storeID, ok := h.pathUUID(c, "id")
+	if !ok {
+		return
+	}
+	resp, err := h.svc.GetStoreViews(c.Request.Context(), storeID)
 	if err != nil {
 		h.writeError(c, err)
 		return

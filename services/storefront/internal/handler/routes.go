@@ -23,6 +23,7 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 	{
 		pub.GET("/stores/by-domain", h.GetStoreByDomain)
 		pub.GET("/stores/:slug", h.GetStorePublic)
+		pub.POST("/log", h.LogView)
 	}
 
 	v1 := r.Group("/v1/storefront")
@@ -38,6 +39,7 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 
 		store := stores.Group("/:id")
 		store.PATCH("", h.UpdateStore)
+		store.GET("/views", h.GetStoreViews)
 
 		// Staff management (MERCHANT.STAFF dashboard section)
 		staff := store.Group("/staff")
