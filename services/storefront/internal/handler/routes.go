@@ -32,6 +32,9 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 		// Slug availability — called live as the vendor types in StoreSetupForm
 		v1.GET("/slugs/check", h.CheckSlugAvailable)
 
+		// File uploads — presign a PUT URL for direct-to-R2 upload
+		v1.POST("/uploads/presign", h.PresignUpload)
+
 		// Store lifecycle
 		stores := v1.Group("/stores")
 		stores.POST("", h.CreateStore)

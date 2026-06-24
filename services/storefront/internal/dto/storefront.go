@@ -56,6 +56,21 @@ type SlugCheckResp struct {
 	Available bool   `json:"available"`
 }
 
+// PresignUploadReq is the body for POST /v1/storefront/uploads/presign.
+type PresignUploadReq struct {
+	Filename    string `json:"filename"     validate:"required"`
+	ContentType string `json:"content_type" validate:"required"`
+	Size        int64  `json:"size"         validate:"required,min=1,max=10485760"` // 10 MB max
+}
+
+// PresignUploadResp is returned by POST /v1/storefront/uploads/presign.
+type PresignUploadResp struct {
+	UploadURL string `json:"upload_url"`
+	PublicURL string `json:"public_url"`
+	Key       string `json:"key"`
+	ExpiresIn int    `json:"expires_in"` // seconds
+}
+
 // LogViewReq is the body for POST /v1/storefront/public/log.
 type LogViewReq struct {
 	StoreSlug string `json:"slug"     validate:"required"`
