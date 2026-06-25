@@ -5,9 +5,38 @@ import (
 	"strconv"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/activialtd/gomarketi.com-backend/services/catalogue/internal/dto"
 )
+
+// ListPublicProducts godoc
+// GET /v1/catalogue/public/stores/:store_id/products — no auth, returns published products only
+func (h *Handler) ListPublicProducts(c *gin.Context) {
+	storeID, err := uuid.Parse(c.Param("store_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.ErrorResp{Error: "invalid store_id"})
+		return
+	}
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "20"))
+
+	var catID *string
+	if v := c.Query("category_id"); v != "" {
+		catID = &v
+	}
+	var q *string
+	if v := c.Query("q"); v != "" {
+		q = &v
+	}
+
+	resp, err := h.svc.ListProducts(c.Request.Context(), storeID, page, perPage, catID, q, true)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, resp)
+}
 
 // ListProducts godoc
 // GET /v1/catalogue/products?page=1&per_page=20&category_id=...&q=...&published=true

@@ -80,6 +80,12 @@ func run(log zerolog.Logger) error {
 				return
 			}
 
+			// Public catalogue routes (published products for storefront pages).
+			if strings.HasPrefix(r.URL.Path, "/v1/catalogue/public/") {
+				proxy.ServeHTTP(w, r)
+				return
+			}
+
 			// All other routes require a valid Bearer token.
 			userID, storeIDs, ok := validateBearer(r, jwtKey)
 			if !ok {
