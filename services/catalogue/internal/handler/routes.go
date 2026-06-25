@@ -39,5 +39,15 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 		categories.POST("", h.CreateCategory)
 		categories.PATCH("/:id", h.UpdateCategory)
 		categories.DELETE("/:id", h.DeleteCategory)
+
+		// Collections
+		collections := v1.Group("/collections")
+		collections.GET("", h.ListCollections)
+		collections.POST("", h.CreateCollection)
+		col := collections.Group("/:id")
+		col.PATCH("", h.UpdateCollection)
+		col.DELETE("", h.DeleteCollection)
+		col.POST("/publish", h.PublishCollection)
+		col.POST("/unpublish", h.UnpublishCollection)
 	}
 }

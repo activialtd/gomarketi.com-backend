@@ -71,6 +71,37 @@ type CategoryResp struct {
 	ParentID *string `json:"parent_id,omitempty"`
 }
 
+// ── Collections ───────────────────────────────────────────────────────────────
+
+type CreateCollectionReq struct {
+	Name        string   `json:"name"        validate:"required,min=1,max=200"`
+	Description *string  `json:"description"`
+	ImageURL    *string  `json:"image_url"`
+	ProductIDs  []string `json:"product_ids" validate:"omitempty,dive,uuid"`
+}
+
+type UpdateCollectionReq struct {
+	Name        *string  `json:"name"        validate:"omitempty,min=1,max=200"`
+	Description *string  `json:"description"`
+	ImageURL    *string  `json:"image_url"`
+	ProductIDs  []string `json:"product_ids" validate:"omitempty,dive,uuid"`
+}
+
+type CollectionResp struct {
+	ID          string   `json:"id"`
+	StoreID     string   `json:"store_id"`
+	Name        string   `json:"name"`
+	Description *string  `json:"description,omitempty"`
+	ImageURL    *string  `json:"image_url,omitempty"`
+	IsPublished bool     `json:"is_published"`
+	ProductIDs  []string `json:"product_ids"`
+	CreatedAt   string   `json:"created_at"`
+}
+
+type CollectionListResp struct {
+	Collections []CollectionResp `json:"collections"`
+}
+
 // ── Shared ────────────────────────────────────────────────────────────────────
 
 // ErrorResp is the standard error envelope.

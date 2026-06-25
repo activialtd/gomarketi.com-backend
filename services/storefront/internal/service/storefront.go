@@ -25,6 +25,8 @@ func New(db *sqlx.DB, log zerolog.Logger) *StorefrontService {
 	return &StorefrontService{db: db, log: log}
 }
 
+func (s *StorefrontService) DB() *sqlx.DB { return s.db }
+
 // ── Store ─────────────────────────────────────────────────────────────────────
 
 func (s *StorefrontService) CreateStore(ctx context.Context, userID uuid.UUID, req dto.CreateStoreReq) (dto.StoreResp, error) {

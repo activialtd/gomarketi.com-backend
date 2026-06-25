@@ -61,6 +61,7 @@ type PresignUploadReq struct {
 	Filename    string `json:"filename"     validate:"required"`
 	ContentType string `json:"content_type" validate:"required"`
 	Size        int64  `json:"size"         validate:"required,min=1,max=10485760"` // 10 MB max
+	Purpose     string `json:"purpose"      validate:"omitempty,oneof=products collections logo banners documents"`
 }
 
 // PresignUploadResp is returned by POST /v1/storefront/uploads/presign.

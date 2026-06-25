@@ -72,9 +72,27 @@ func (h *Handler) PresignUpload(c *gin.Context) {
 		return
 	}
 
-	// Build a scoped object key: stores/<uuid>/<original-filename>
+	// Build a store-scoped key for multi-tenant isolation
+	purpose := req.Purpose
+	if purpose == "" {
+		purpose = "files"
+	}
 	ext := filepath.Ext(req.Filename)
-	key := fmt.Sprintf("stores/%s%s", uuid.New().String(), ext)
+
+	// Look up the vendor's store to namespace uploads correctly
+	userID, ok := h.callerID(c)
+	if !ok {
+		return
+	}
+	var storeID string
+	_ = h.svc.DB().QueryRowContext(context.Background(), `SELECT id FROM stores WHERE vendor_id=$1 AND is_active=TRUE LIMIT 1`, userID).Scan(&storeID)
+
+	var key string
+	if storeID != "" {
+		key = fmt.Sprintf("stores/%s/%s/%s%s", storeID, purpose, uuid.New().String(), ext)
+	} else {
+		key = fmt.Sprintf("uploads/%s/%s%s", purpose, uuid.New().String(), ext)
+	}
 
 	presigner := s3.NewPresignClient(client)
 	presigned, err := presigner.PresignPutObject(context.Background(),

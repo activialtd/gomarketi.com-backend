@@ -318,3 +318,179 @@ func rowToCategory(r categoryRow) dto.CategoryResp {
 	}
 	return c
 }
+
+// ── Collections ───────────────────────────────────────────────────────────────
+
+type collectionRow struct {
+	ID          uuid.UUID      `db:"id"`
+	StoreID     uuid.UUID      `db:"store_id"`
+	Name        string         `db:"name"`
+	Description sql.NullString `db:"description"`
+	ImageURL    sql.NullString `db:"image_url"`
+	IsPublished bool           `db:"is_published"`
+	CreatedAt   time.Time      `db:"created_at"`
+}
+
+func (s *CatalogueService) ListCollections(ctx context.Context, storeID uuid.UUID) (dto.CollectionListResp, error) {
+	rows, err := s.db.QueryxContext(ctx, `SELECT id, store_id, name, description, image_url, is_published, created_at FROM collections WHERE store_id=$1 ORDER BY created_at DESC`, storeID)
+	if err != nil {
+		return dto.CollectionListResp{}, fmt.Errorf("list collections: %w", err)
+	}
+	defer rows.Close()
+
+	var out []dto.CollectionResp
+	for rows.Next() {
+		var r collectionRow
+		if err := rows.StructScan(&r); err != nil {
+			return dto.CollectionListResp{}, err
+		}
+		col := rowToCollection(r)
+		col.ProductIDs = s.collectionProductIDs(ctx, r.ID)
+		out = append(out, col)
+	}
+	if out == nil {
+		out = []dto.CollectionResp{}
+	}
+	return dto.CollectionListResp{Collections: out}, nil
+}
+
+func (s *CatalogueService) CreateCollection(ctx context.Context, storeID uuid.UUID, req dto.CreateCollectionReq) (dto.CollectionResp, error) {
+	var r collectionRow
+	err := s.db.QueryRowxContext(ctx, `
+		INSERT INTO collections (store_id, name, description, image_url)
+		VALUES ($1,$2,$3,$4)
+		RETURNING id, store_id, name, description, image_url, is_published, created_at`,
+		storeID, req.Name, req.Description, req.ImageURL,
+	).StructScan(&r)
+	if err != nil {
+		if isPGConflict(err) {
+			return dto.CollectionResp{}, apperrors.Conflict("a collection with that name already exists")
+		}
+		return dto.CollectionResp{}, fmt.Errorf("create collection: %w", err)
+	}
+	col := rowToCollection(r)
+	if len(req.ProductIDs) > 0 {
+		_ = s.setCollectionProducts(ctx, r.ID, req.ProductIDs)
+		col.ProductIDs = req.ProductIDs
+	} else {
+		col.ProductIDs = []string{}
+	}
+	return col, nil
+}
+
+func (s *CatalogueService) UpdateCollection(ctx context.Context, storeID, colID uuid.UUID, req dto.UpdateCollectionReq) (dto.CollectionResp, error) {
+	var r collectionRow
+	err := s.db.QueryRowxContext(ctx, `
+		UPDATE collections SET
+			name        = COALESCE($1, name),
+			description = COALESCE($2, description),
+			image_url   = COALESCE($3, image_url),
+			updated_at  = NOW()
+		WHERE id=$4 AND store_id=$5
+		RETURNING id, store_id, name, description, image_url, is_published, created_at`,
+		req.Name, req.Description, req.ImageURL, colID, storeID,
+	).StructScan(&r)
+	if errors.Is(err, sql.ErrNoRows) {
+		return dto.CollectionResp{}, apperrors.NotFound("collection not found")
+	}
+	if err != nil {
+		return dto.CollectionResp{}, fmt.Errorf("update collection: %w", err)
+	}
+	col := rowToCollection(r)
+	if req.ProductIDs != nil {
+		_ = s.setCollectionProducts(ctx, r.ID, req.ProductIDs)
+		col.ProductIDs = req.ProductIDs
+	} else {
+		col.ProductIDs = s.collectionProductIDs(ctx, r.ID)
+	}
+	return col, nil
+}
+
+func (s *CatalogueService) DeleteCollection(ctx context.Context, storeID, colID uuid.UUID) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM collections WHERE id=$1 AND store_id=$2`, colID, storeID)
+	if err != nil {
+		return fmt.Errorf("delete collection: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return apperrors.NotFound("collection not found")
+	}
+	return nil
+}
+
+func (s *CatalogueService) PublishCollection(ctx context.Context, storeID, colID uuid.UUID, publish bool) (dto.CollectionResp, error) {
+	var r collectionRow
+	err := s.db.QueryRowxContext(ctx, `
+		UPDATE collections SET is_published=$1, updated_at=NOW()
+		WHERE id=$2 AND store_id=$3
+		RETURNING id, store_id, name, description, image_url, is_published, created_at`,
+		publish, colID, storeID,
+	).StructScan(&r)
+	if errors.Is(err, sql.ErrNoRows) {
+		return dto.CollectionResp{}, apperrors.NotFound("collection not found")
+	}
+	if err != nil {
+		return dto.CollectionResp{}, fmt.Errorf("publish collection: %w", err)
+	}
+	col := rowToCollection(r)
+	col.ProductIDs = s.collectionProductIDs(ctx, r.ID)
+	return col, nil
+}
+
+func (s *CatalogueService) setCollectionProducts(ctx context.Context, colID uuid.UUID, productIDs []string) error {
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM collection_products WHERE collection_id=$1`, colID); err != nil {
+		return err
+	}
+	for i, pid := range productIDs {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO collection_products (collection_id, product_id, position) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`, colID, pid, i); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *CatalogueService) collectionProductIDs(ctx context.Context, colID uuid.UUID) []string {
+	rows, err := s.db.QueryContext(ctx, `SELECT product_id FROM collection_products WHERE collection_id=$1 ORDER BY position`, colID)
+	if err != nil {
+		return []string{}
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			ids = append(ids, id)
+		}
+	}
+	if ids == nil {
+		return []string{}
+	}
+	return ids
+}
+
+func rowToCollection(r collectionRow) dto.CollectionResp {
+	col := dto.CollectionResp{
+		ID:          r.ID.String(),
+		StoreID:     r.StoreID.String(),
+		Name:        r.Name,
+		IsPublished: r.IsPublished,
+		CreatedAt:   r.CreatedAt.UTC().Format(time.RFC3339),
+		ProductIDs:  []string{},
+	}
+	if r.Description.Valid {
+		col.Description = &r.Description.String
+	}
+	if r.ImageURL.Valid {
+		col.ImageURL = &r.ImageURL.String
+	}
+	return col
+}
+
+func isPGConflict(err error) bool {
+	var pgErr *pq.Error
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
