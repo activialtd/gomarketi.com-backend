@@ -107,7 +107,7 @@ func (s *StorefrontService) GetStoreBySlug(ctx context.Context, slug string) (dt
 	err := s.db.QueryRowxContext(ctx, `
 		SELECT id, vendor_id, name, slug, category, currency,
 		       team_size, staff_range, tagline, logo_url, support_phone,
-		       address, city, state, custom_domain, custom_domain_status, is_active, created_at
+		       address, city, state, custom_domain, custom_domain_status, theme_config, is_active, created_at
 		FROM stores WHERE slug=$1 AND is_active=TRUE`, slug).StructScan(&row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.StoreResp{}, apperrors.NotFound("store not found")
@@ -123,7 +123,7 @@ func (s *StorefrontService) GetStoreByDomain(ctx context.Context, domain string)
 	err := s.db.QueryRowxContext(ctx, `
 		SELECT id, vendor_id, name, slug, category, currency,
 		       team_size, staff_range, tagline, logo_url, support_phone,
-		       address, city, state, custom_domain, custom_domain_status, is_active, created_at
+		       address, city, state, custom_domain, custom_domain_status, theme_config, is_active, created_at
 		FROM stores WHERE custom_domain=$1 AND custom_domain_status='active' AND is_active=TRUE`, domain).StructScan(&row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.StoreResp{}, apperrors.NotFound("store not found")
@@ -246,7 +246,7 @@ func (s *StorefrontService) getStoreByVendor(ctx context.Context, userID uuid.UU
 	err := s.db.QueryRowxContext(ctx, `
 		SELECT id, vendor_id, name, slug, category, currency,
 		       team_size, staff_range, tagline, logo_url, support_phone,
-		       address, city, state, custom_domain, custom_domain_status, is_active, created_at
+		       address, city, state, custom_domain, custom_domain_status, theme_config, is_active, created_at
 		FROM stores WHERE vendor_id=$1`, userID).StructScan(&row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.StoreResp{}, apperrors.NotFound("store not found")
