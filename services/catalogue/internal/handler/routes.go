@@ -21,6 +21,7 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 	// Public route — no auth required
 	pub := r.Group("/v1/catalogue/public")
 	pub.GET("/stores/:store_id/products", h.ListPublicProducts)
+	pub.GET("/stores/:store_id/products/:product_id", h.GetPublicProduct)
 
 	v1 := r.Group("/v1/catalogue")
 	v1.Use(middleware.RequireUser())

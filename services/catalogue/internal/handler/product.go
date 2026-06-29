@@ -10,6 +10,33 @@ import (
 	"github.com/activialtd/gomarketi.com-backend/services/catalogue/internal/dto"
 )
 
+// GetPublicProduct godoc
+// GET /v1/catalogue/public/stores/:store_id/products/:product_id — no auth, published only
+func (h *Handler) GetPublicProduct(c *gin.Context) {
+	storeID, err := uuid.Parse(c.Param("store_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.ErrorResp{Error: "invalid store_id"})
+		return
+	}
+	productID, err := uuid.Parse(c.Param("product_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.ErrorResp{Error: "invalid product_id"})
+		return
+	}
+
+	resp, err := h.svc.GetProduct(c.Request.Context(), storeID, productID)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	// Public endpoint: only expose published products
+	if !resp.IsPublished {
+		c.JSON(http.StatusNotFound, dto.ErrorResp{Error: "product not found"})
+		return
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
 // ListPublicProducts godoc
 // GET /v1/catalogue/public/stores/:store_id/products — no auth, returns published products only
 func (h *Handler) ListPublicProducts(c *gin.Context) {
