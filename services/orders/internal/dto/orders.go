@@ -47,6 +47,27 @@ type OrderListResp struct {
 	PerPage int         `json:"per_page"`
 }
 
+// CreateOrderItem is a single line item in CreateOrderReq.
+type CreateOrderItem struct {
+	ProductID string `json:"product_id" validate:"required,uuid"`
+	Name      string `json:"name"       validate:"required"`
+	ImageURL  string `json:"image_url"`
+	Quantity  int32  `json:"quantity"   validate:"required,min=1"`
+	PriceKobo int64  `json:"price_kobo" validate:"min=0"`
+}
+
+// CreateOrderReq is the body for POST /v1/orders/public — called directly
+// from the storefront checkout after a successful (simulated) Paystack charge.
+type CreateOrderReq struct {
+	StoreID         string            `json:"store_id"         validate:"required,uuid"`
+	CustomerName    string            `json:"customer_name"    validate:"required"`
+	CustomerEmail   string            `json:"customer_email"   validate:"required,email"`
+	CustomerPhone   string            `json:"customer_phone"`
+	DeliveryAddress string            `json:"delivery_address"`
+	Items           []CreateOrderItem `json:"items"             validate:"required,min=1,dive"`
+	PaymentRef      string            `json:"payment_reference" validate:"required"`
+}
+
 // UpdateOrderStatusReq is the body for PATCH /v1/orders/:id/status.
 type UpdateOrderStatusReq struct {
 	Status OrderStatus `json:"status" validate:"required,oneof=confirmed shipped delivered cancelled"`
@@ -95,6 +116,47 @@ type AnalyticsOverviewResp struct {
 	TotalCustomers   int32 `json:"total_customers"`
 	PendingOrders    int32 `json:"pending_orders"`
 	LowStockProducts int32 `json:"low_stock_products"`
+}
+
+// TopProductResp is a single entry in the top-selling products list,
+// aggregated from order_items across all of a store's orders.
+type TopProductResp struct {
+	ProductID    string `json:"product_id"`
+	Name         string `json:"name"`
+	ImageURL     string `json:"image_url,omitempty"`
+	UnitsSold    int64  `json:"units_sold"`
+	RevenueKobo  int64  `json:"revenue_kobo"`
+}
+
+// ── Wallet ────────────────────────────────────────────────────────────────────
+
+// WalletTransactionResp is a single ledger entry.
+type WalletTransactionResp struct {
+	ID            string `json:"id"`
+	Type          string `json:"type"` // credit | debit
+	AmountKobo    int64  `json:"amount_kobo"`
+	Description   string `json:"description"`
+	Reference     string `json:"reference,omitempty"`
+	Status        string `json:"status"`
+	BankName      string `json:"bank_name,omitempty"`
+	AccountNumber string `json:"account_number,omitempty"`
+	AccountName   string `json:"account_name,omitempty"`
+	CreatedAt     string `json:"created_at"`
+}
+
+// WalletResp is returned by GET /v1/wallet.
+type WalletResp struct {
+	BalanceKobo  int64                    `json:"balance_kobo"`
+	TotalEarned  int64                    `json:"total_earned_kobo"`
+	Transactions []WalletTransactionResp `json:"transactions"`
+}
+
+// WithdrawReq is the body for POST /v1/wallet/withdraw.
+type WithdrawReq struct {
+	AmountKobo    int64  `json:"amount_kobo"    validate:"required,min=100"`
+	BankName      string `json:"bank_name"      validate:"required"`
+	AccountNumber string `json:"account_number" validate:"required,len=10"`
+	AccountName   string `json:"account_name"   validate:"required"`
 }
 
 // ── Shared ────────────────────────────────────────────────────────────────────

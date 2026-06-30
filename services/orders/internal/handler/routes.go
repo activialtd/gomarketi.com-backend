@@ -18,6 +18,10 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 		middleware.UserContext(),
 	)
 
+	// Public — no auth. Called directly from the storefront checkout.
+	pub := r.Group("/v1/orders/public")
+	pub.POST("", h.CreateOrder)
+
 	v1 := r.Group("/v1")
 	v1.Use(middleware.RequireUser())
 	{
@@ -36,5 +40,11 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 		// Analytics (MERCHANT.ANALYTICS dashboard section)
 		analytics := v1.Group("/analytics")
 		analytics.GET("/overview", h.GetAnalyticsOverview)
+		analytics.GET("/top-products", h.GetTopProducts)
+
+		// Wallet (MERCHANT.WALLET dashboard section)
+		wallet := v1.Group("/wallet")
+		wallet.GET("/balance", h.GetWallet)
+		wallet.POST("/withdraw", h.Withdraw)
 	}
 }

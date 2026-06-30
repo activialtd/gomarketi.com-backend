@@ -61,7 +61,7 @@ func run(log zerolog.Logger) error {
 		proxy := newProxy(target, log)
 		needsStore := needsStoreIDs(prefix)
 
-		mux.HandleFunc(prefix, func(w http.ResponseWriter, r *http.Request) {
+		handler := func(w http.ResponseWriter, r *http.Request) {
 			setCORS(w, r, allowedOrigins)
 			if r.Method == http.MethodOptions {
 				w.WriteHeader(http.StatusNoContent)
@@ -82,6 +82,12 @@ func run(log zerolog.Logger) error {
 
 			// Public catalogue routes (published products for storefront pages).
 			if strings.HasPrefix(r.URL.Path, "/v1/catalogue/public/") {
+				proxy.ServeHTTP(w, r)
+				return
+			}
+
+			// Public order creation — storefront checkout creates orders without a vendor JWT.
+			if strings.HasPrefix(r.URL.Path, "/v1/orders/public") {
 				proxy.ServeHTTP(w, r)
 				return
 			}
@@ -111,7 +117,14 @@ func run(log zerolog.Logger) error {
 			}
 
 			proxy.ServeHTTP(w, r)
-		})
+		}
+
+		mux.HandleFunc(prefix, handler)
+		// Also register the exact path without a trailing slash so a bare
+		// request like GET /v1/orders doesn't hit ServeMux's subtree
+		// redirect (which would 307 to /v1/orders/ and risk a redirect
+		// loop against Gin's own trailing-slash redirect on the other side).
+		mux.HandleFunc(strings.TrimSuffix(prefix, "/"), handler)
 	}
 
 	port := getenv("PORT", "8080")
@@ -291,7 +304,8 @@ func needsStoreIDs(prefix string) bool {
 	return strings.HasPrefix(prefix, "/v1/catalogue/") ||
 		strings.HasPrefix(prefix, "/v1/orders/") ||
 		strings.HasPrefix(prefix, "/v1/crm/") ||
-		strings.HasPrefix(prefix, "/v1/analytics/")
+		strings.HasPrefix(prefix, "/v1/analytics/") ||
+		strings.HasPrefix(prefix, "/v1/wallet/")
 }
 
 // ── Upstream loading ──────────────────────────────────────────────────────────
@@ -315,6 +329,7 @@ func loadUpstreams() (map[string]string, error) {
 		"/v1/orders/":    "UPSTREAM_ORDERS",
 		"/v1/crm/":       "UPSTREAM_ORDERS",
 		"/v1/analytics/": "UPSTREAM_ORDERS",
+		"/v1/wallet/":    "UPSTREAM_ORDERS",
 	}
 
 	result := map[string]string{}

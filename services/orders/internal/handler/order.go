@@ -91,6 +91,24 @@ func (h *Handler) UpdateOrderStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
+// CreateOrder godoc
+// POST /v1/orders/public — no auth, called by the storefront checkout after
+// a successful (simulated) Paystack charge.
+func (h *Handler) CreateOrder(c *gin.Context) {
+	var req dto.CreateOrderReq
+	if !h.bind(c, &req) {
+		return
+	}
+
+	resp, err := h.svc.CreateOrder(c.Request.Context(), req)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusCreated, resp)
+}
+
 // ListAbandonedCarts godoc
 // GET /v1/orders/abandoned?page=1&per_page=20
 func (h *Handler) ListAbandonedCarts(c *gin.Context) {
