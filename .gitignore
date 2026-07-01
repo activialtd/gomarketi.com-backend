@@ -13,8 +13,10 @@ keys/
 
 # ── Go build artifacts ────────────────────────────────────────────────────────
 bin/
-server
-*/server
+# Ignore compiled binaries named "server" at repo root or one level deep,
+# but NOT cmd/server source directories (which are Go package entry points)
+/server
+scripts/migrate/migrate
 *.test
 coverage.out
 coverage.html
