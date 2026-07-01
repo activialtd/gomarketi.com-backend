@@ -108,7 +108,9 @@ set_vars() {
   done
 
   echo "  Setting ${#filtered[@]} env vars..."
-  railway variables set "${filtered[@]}" --service "$name" --environment "$ENVIRONMENT"
+  railway variables set "${filtered[@]}" --service "$name" --environment "$ENVIRONMENT" || {
+    echo "  ⚠ railway variables set exited non-zero (vars may still have been applied — continuing)"
+  }
 }
 
 deploy_service() {
