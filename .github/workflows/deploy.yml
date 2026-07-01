@@ -3,18 +3,31 @@ name: Deploy Backend
 on:
   push:
     branches: [main, staging]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        required: true
+        default: production
+        type: choice
+        options: [production, staging]
+      services:
+        description: Services to deploy (comma-separated, or "all")
+        required: false
+        default: all
 
 jobs:
   # ── Detect which services changed ─────────────────────────────────────────
   detect-changes:
     runs-on: ubuntu-latest
     outputs:
-      services: ${{ steps.filter.outputs.changes }}
+      services: ${{ steps.set.outputs.services }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Detect changed services
+      - name: Detect changed services (push)
         id: filter
+        if: github.event_name == 'push'
         uses: dorny/paths-filter@v3
         with:
           filters: |
@@ -36,12 +49,27 @@ jobs:
             gateway:
               - 'services/gateway/**'
 
+      - name: Set services to deploy
+        id: set
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            INPUT="${{ github.event.inputs.services }}"
+            if [ "$INPUT" = "all" ] || [ -z "$INPUT" ]; then
+              echo 'services=["auth","identity","storefront","catalogue","orders","gateway"]' >> $GITHUB_OUTPUT
+            else
+              ARRAY=$(echo "$INPUT" | tr ',' '\n' | jq -R . | jq -sc .)
+              echo "services=$ARRAY" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "services=${{ steps.filter.outputs.changes }}" >> $GITHUB_OUTPUT
+          fi
+
   # ── Deploy changed services to the matching Railway environment ────────────
   deploy:
     needs: detect-changes
-    if: needs.detect-changes.outputs.services != '[]'
+    if: needs.detect-changes.outputs.services != '[]' && needs.detect-changes.outputs.services != ''
     runs-on: ubuntu-latest
-    environment: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+    environment: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.environment) || (github.ref_name == 'main' && 'production') || 'staging' }}
 
     strategy:
       fail-fast: false
@@ -54,11 +82,17 @@ jobs:
       - name: Install Railway CLI
         run: npm install -g @railway/cli
 
-      - name: Deploy ${{ matrix.service }} to ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+      - name: Deploy ${{ matrix.service }}
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          ENV="${{ github.ref_name == 'main' && 'production' || 'staging' }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ENV="${{ github.event.inputs.environment }}"
+          elif [ "${{ github.ref_name }}" = "main" ]; then
+            ENV="production"
+          else
+            ENV="staging"
+          fi
           railway up \
             --service gomarketi-${{ matrix.service }} \
             --environment "$ENV" \
