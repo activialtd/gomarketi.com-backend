@@ -82,9 +82,19 @@ func run(log zerolog.Logger) error {
 	}
 
 	// ── Email ─────────────────────────────────────────────────────────────────
-	// Priority: Resend → Gmail API (HTTPS, works on Railway) → Mailgun → SMTP (blocked on Railway).
+	// Priority: Brevo → Resend → Gmail API (HTTPS, works on Railway) → Mailgun → SMTP (blocked on Railway).
 	var emailer email.Emailer
 	switch {
+	case viper.GetString("BREVO_API_KEY") != "":
+		emailer, err = email.NewBrevoClient(email.BrevoConfig{
+			APIKey:   viper.GetString("BREVO_API_KEY"),
+			From:     viper.GetString("BREVO_FROM"),
+			FromName: viper.GetString("BREVO_FROM_NAME"),
+		})
+		if err != nil {
+			return fmt.Errorf("brevo client: %w", err)
+		}
+		log.Info().Str("from", viper.GetString("BREVO_FROM")).Msg("using Brevo emailer")
 	case viper.GetString("RESEND_API_KEY") != "":
 		emailer, err = email.NewResendClient(email.ResendConfig{
 			APIKey: viper.GetString("RESEND_API_KEY"),
