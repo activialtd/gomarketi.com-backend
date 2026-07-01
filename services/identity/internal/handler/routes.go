@@ -33,15 +33,20 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 		me.DELETE("/:id", h.DeleteAddress)
 		me.POST("/:id/set-default", h.SetDefaultAddress)
 
+		// Plans (authenticated but no store required)
+		v1.GET("/plans", h.ListPlans)
+
 		// Vendor onboarding
 		onboard := v1.Group("/vendor/onboard")
 		onboard.POST("", h.StartVendorOnboarding)
 		onboard.PATCH("/business", h.UpdateVendorBusiness)
 		onboard.POST("/kyc", h.SubmitVendorKYC)
 
-		// Vendor profile & banks
+		// Vendor profile, plan & banks
 		vendor := v1.Group("/vendor")
 		vendor.GET("/profile", h.GetVendorProfile)
+		vendor.POST("/plan", h.SelectPlan)
+		vendor.GET("/subscription", h.GetSubscription)
 		vendor.POST("/banks", h.AddVendorBank)
 		vendor.GET("/banks", h.ListVendorBanks)
 		vendor.POST("/banks/:id/set-primary", h.SetPrimaryVendorBank)

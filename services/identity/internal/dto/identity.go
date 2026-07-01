@@ -145,6 +145,40 @@ type VendorBankResp struct {
 	IsVerified          bool   `json:"is_verified"`
 }
 
+// ── Plans & Subscriptions ─────────────────────────────────────────────────────
+
+// PlanResp is a single vendor subscription plan.
+type PlanResp struct {
+	ID           string   `json:"id"`
+	Slug         string   `json:"slug"`
+	DisplayName  string   `json:"display_name"`
+	Description  string   `json:"description"`
+	PriceKobo    int64    `json:"price_kobo"`
+	BillingCycle string   `json:"billing_cycle"`
+	ProductLimit int      `json:"product_limit"`
+	StoreLimit   int      `json:"store_limit"`
+	TeamLimit    int      `json:"team_limit"`
+	Features     []string `json:"features"`
+	SortOrder    int      `json:"sort_order"`
+}
+
+// SelectPlanReq is the body for POST /v1/identity/vendor/plan.
+type SelectPlanReq struct {
+	PlanID           string  `json:"plan_id"           validate:"required,uuid"`
+	PaymentReference *string `json:"payment_reference"` // required for paid plans
+}
+
+// SubscriptionResp is returned for GET /v1/identity/vendor/subscription.
+type SubscriptionResp struct {
+	ID                  string   `json:"id"`
+	PlanID              string   `json:"plan_id"`
+	Plan                PlanResp `json:"plan"`
+	Status              string   `json:"status"`
+	PaymentReference    *string  `json:"payment_reference,omitempty"`
+	CurrentPeriodStart  string   `json:"current_period_start"`
+	CurrentPeriodEnd    *string  `json:"current_period_end,omitempty"`
+}
+
 // ── Shared ────────────────────────────────────────────────────────────────────
 
 // ErrorResp is the standard error envelope.

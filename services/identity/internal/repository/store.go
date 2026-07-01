@@ -23,6 +23,11 @@ func (s *Store) Queries() *db.Queries {
 	return db.New(s.db)
 }
 
+// DB exposes the raw connection pool for direct sqlx queries (e.g. plans/subscriptions).
+func (s *Store) DB() *sqlx.DB {
+	return s.db
+}
+
 func (s *Store) ExecTx(ctx context.Context, fn func(*db.Queries) error) error {
 	tx, err := s.db.BeginTxx(ctx, nil)
 	if err != nil {
