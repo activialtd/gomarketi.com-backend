@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -393,11 +395,33 @@ func newProxy(target string, log zerolog.Logger) *httputil.ReverseProxy {
 	targetURL, _ := url.ParseRequestURI(target)
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
 
+	// Wrap the default transport with retry-on-transient-error logic.
+	// Handles EOF / connection-reset that occur when an upstream service
+	// restarts or when Neon's serverless DB wakes from idle.
+	proxy.Transport = &retryTransport{
+		base: &http.Transport{
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 20,
+			IdleConnTimeout:     30 * time.Second, // shorter than Neon's idle timeout
+			DisableKeepAlives:   false,
+		},
+		log: log,
+	}
+
 	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
 		originalDirector(req)
 		req.Header.Set("X-Forwarded-Proto", "https")
 		req.Header.Del("X-Forwarded-Host")
+
+		// Buffer body so the retry transport can re-send it on retry.
+		if req.Body != nil && req.Body != http.NoBody {
+			body, _ := io.ReadAll(req.Body)
+			req.Body = io.NopCloser(bytes.NewReader(body))
+			req.GetBody = func() (io.ReadCloser, error) {
+				return io.NopCloser(bytes.NewReader(body)), nil
+			}
+		}
 	}
 
 	proxy.ModifyResponse = func(resp *http.Response) error {
@@ -418,6 +442,52 @@ func newProxy(target string, log zerolog.Logger) *httputil.ReverseProxy {
 	}
 
 	return proxy
+}
+
+// retryTransport retries once on transient upstream errors (EOF, connection
+// reset, connection refused). These occur when a service restarts or when an
+// idle keep-alive connection is recycled by the upstream's TCP stack.
+type retryTransport struct {
+	base http.RoundTripper
+	log  zerolog.Logger
+}
+
+func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.base.RoundTrip(req)
+	if err == nil || !isTransientUpstreamErr(err) {
+		return resp, err
+	}
+
+	// One retry after a short pause.
+	time.Sleep(80 * time.Millisecond)
+	t.log.Warn().Err(err).Str("path", req.URL.Path).Msg("transient upstream error — retrying once")
+
+	// Restore the request body for the retry.
+	if req.GetBody != nil {
+		body, bodyErr := req.GetBody()
+		if bodyErr != nil {
+			return nil, err // return original error
+		}
+		req.Body = body
+	}
+
+	return t.base.RoundTrip(req)
+}
+
+func isTransientUpstreamErr(err error) bool {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		msg := strings.ToLower(urlErr.Error())
+		return urlErr.Temporary() ||
+			strings.Contains(msg, "eof") ||
+			strings.Contains(msg, "connection reset") ||
+			strings.Contains(msg, "connection refused") ||
+			strings.Contains(msg, "broken pipe")
+	}
+	return false
 }
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
