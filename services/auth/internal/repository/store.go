@@ -50,6 +50,26 @@ func (s *Store) ExecTx(ctx context.Context, fn func(*db.Queries) error) error {
 	return tx.Commit()
 }
 
+// QueryStoreIDs returns all store UUID strings owned by userID.
+// Queries the stores table directly (same Neon DB, cross-service read).
+// Returns nil on any error — callers treat a missing store ID as "no store yet".
+func (s *Store) QueryStoreIDs(ctx context.Context, userID string) []string {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id::text FROM stores WHERE vendor_id = $1 ORDER BY created_at`, userID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
 // NormaliseErr converts sql.ErrNoRows to an apperrors.NotFound so the service
 // layer does not need to import database/sql to distinguish not-found cases.
 func NormaliseErr(err error, resourceName string) error {

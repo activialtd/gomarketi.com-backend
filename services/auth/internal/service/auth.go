@@ -115,7 +115,7 @@ func (s *AuthService) Register(ctx context.Context, req dto.RegisterReq) (dto.Au
 		return dto.AuthResp{}, "", apperrors.Internal(fmt.Errorf("register: %w", err))
 	}
 
-	accessToken, err := s.issueAccessToken(user, true, false)
+	accessToken, err := s.issueAccessToken(ctx, user, true, false)
 	if err != nil {
 		return dto.AuthResp{}, "", apperrors.Internal(fmt.Errorf("issue token: %w", err))
 	}
@@ -170,7 +170,7 @@ func (s *AuthService) LoginWithPassword(ctx context.Context, req dto.LoginReq) (
 		isBuyer = true
 	}
 
-	accessToken, err := s.issueAccessToken(user, isBuyer, false)
+	accessToken, err := s.issueAccessToken(ctx, user, isBuyer, false)
 	if err != nil {
 		return dto.AuthResp{}, "", apperrors.Internal(fmt.Errorf("issue token: %w", err))
 	}
@@ -300,7 +300,7 @@ func (s *AuthService) VerifyOTP(ctx context.Context, req dto.OTPVerifyReq) (dto.
 		return dto.AuthResp{}, "", apperrors.Internal(fmt.Errorf("complete login: %w", err))
 	}
 
-	accessToken, err := s.issueAccessToken(user, false, false)
+	accessToken, err := s.issueAccessToken(ctx, user, false, false)
 	if err != nil {
 		return dto.AuthResp{}, "", apperrors.Internal(fmt.Errorf("issue access token: %w", err))
 	}
@@ -370,7 +370,7 @@ func (s *AuthService) AuthGoogle(ctx context.Context, req dto.GoogleAuthReq) (dt
 		return dto.AuthResp{}, "", apperrors.Internal(fmt.Errorf("google login: %w", err))
 	}
 
-	accessToken, err := s.issueAccessToken(user, false, false)
+	accessToken, err := s.issueAccessToken(ctx, user, false, false)
 	if err != nil {
 		return dto.AuthResp{}, "", apperrors.Internal(fmt.Errorf("issue access token: %w", err))
 	}
@@ -447,7 +447,7 @@ func (s *AuthService) AuthApple(ctx context.Context, req dto.AppleAuthReq) (dto.
 		return dto.AuthResp{}, "", apperrors.Internal(fmt.Errorf("apple login: %w", err))
 	}
 
-	accessToken, err := s.issueAccessToken(user, false, false)
+	accessToken, err := s.issueAccessToken(ctx, user, false, false)
 	if err != nil {
 		return dto.AuthResp{}, "", apperrors.Internal(fmt.Errorf("issue access token: %w", err))
 	}
@@ -502,7 +502,7 @@ func (s *AuthService) RefreshTokens(ctx context.Context, rawToken string) (dto.A
 		return dto.AuthResp{}, "", apperrors.Internal(fmt.Errorf("rotate refresh token: %w", err))
 	}
 
-	accessToken, err := s.issueAccessToken(user, false, false)
+	accessToken, err := s.issueAccessToken(ctx, user, false, false)
 	if err != nil {
 		return dto.AuthResp{}, "", apperrors.Internal(fmt.Errorf("issue access token: %w", err))
 	}
@@ -567,10 +567,14 @@ func (s *AuthService) issueRefreshToken(
 	return raw, nil
 }
 
-func (s *AuthService) issueAccessToken(user db.User, isBuyer, isVendor bool) (string, error) {
+func (s *AuthService) issueAccessToken(ctx context.Context, user db.User, isBuyer, isVendor bool) (string, error) {
+	// Embed store IDs so the gateway reads them directly from the JWT claim —
+	// no storefront HTTP lookup needed for users who already have a store.
+	storeIDs := s.store.QueryStoreIDs(ctx, user.ID.String())
 	claims := sharedjwt.Claims{
 		IsBuyer:  isBuyer,
 		IsVendor: isVendor,
+		StoreIDs: storeIDs,
 	}
 	return s.jwt.IssueAccessToken(user.ID.String(), claims)
 }
