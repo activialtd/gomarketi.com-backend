@@ -1,5 +1,5 @@
-// Package email provides a minimal Brevo transactional email client used
-// by the storefront service to send vendor welcome emails after store creation.
+// Package email provides welcome email delivery for the storefront service.
+// Supports Brevo HTTP API and SMTP (Gmail port 465/587) with a noop fallback.
 package email
 
 import (
@@ -11,23 +11,30 @@ import (
 	"time"
 )
 
-// Client sends transactional email via the Brevo v3 API.
-type Client struct {
+// WelcomeMailer is the interface every email backend must satisfy.
+type WelcomeMailer interface {
+	SendWelcome(ctx context.Context, to, vendorName, storeName, storeSlug, storeDomain string) error
+}
+
+// ── Brevo ─────────────────────────────────────────────────────────────────────
+
+// BrevoMailer sends welcome emails via the Brevo v3 HTTP API.
+type BrevoMailer struct {
 	apiKey   string
 	from     string
 	fromName string
 	http     *http.Client
 }
 
-// New returns nil (disabled) when apiKey is empty — callers must nil-check.
-func New(apiKey, from, fromName string) *Client {
+// NewBrevo returns a BrevoMailer. Returns nil when apiKey is empty.
+func NewBrevo(apiKey, from, fromName string) *BrevoMailer {
 	if apiKey == "" {
 		return nil
 	}
 	if fromName == "" {
-		fromName = "GoMarketi"
+		fromName = "GoMarket"
 	}
-	return &Client{
+	return &BrevoMailer{
 		apiKey:   apiKey,
 		from:     from,
 		fromName: fromName,
@@ -36,11 +43,7 @@ func New(apiKey, from, fromName string) *Client {
 }
 
 // SendWelcome fires a branded welcome email to a newly onboarded vendor.
-// It is non-blocking: failures are logged by the caller, never returned.
-func (c *Client) SendWelcome(ctx context.Context, to, vendorName, storeName, storeSlug, storeDomain string) error {
-	if c == nil {
-		return nil // emailer disabled
-	}
+func (c *BrevoMailer) SendWelcome(ctx context.Context, to, vendorName, storeName, storeSlug, storeDomain string) error {
 
 	storeURL := fmt.Sprintf("https://%s.%s", storeSlug, storeDomain)
 	if storeDomain == "" {

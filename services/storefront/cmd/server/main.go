@@ -54,12 +54,35 @@ func run(log zerolog.Logger) error {
 	}
 	log.Info().Msg("migrations applied")
 
-	// Welcome emailer — fires after store creation. Disabled when BREVO_API_KEY is unset.
-	welcomeMailer := email.New(
-		viper.GetString("BREVO_API_KEY"),
-		viper.GetString("BREVO_FROM"),
-		viper.GetString("BREVO_FROM_NAME"),
-	)
+	// Welcome emailer — priority: Brevo HTTP API → SMTP → noop.
+	var welcomeMailer email.WelcomeMailer
+	switch {
+	case viper.GetString("BREVO_API_KEY") != "":
+		welcomeMailer = email.NewBrevo(
+			viper.GetString("BREVO_API_KEY"),
+			viper.GetString("BREVO_FROM"),
+			viper.GetString("BREVO_FROM_NAME"),
+		)
+		log.Info().Msg("welcome emails: Brevo")
+	case viper.GetString("SMTP_HOST") != "":
+		sm, smErr := email.NewSMTP(
+			viper.GetString("SMTP_HOST"),
+			viper.GetString("SMTP_PORT"),
+			viper.GetString("SMTP_USERNAME"),
+			viper.GetString("SMTP_PASSWORD"),
+			viper.GetString("SMTP_FROM"),
+		)
+		if smErr != nil {
+			log.Warn().Err(smErr).Msg("welcome emails: smtp config invalid, using noop")
+			welcomeMailer = email.NoopMailer{}
+		} else {
+			welcomeMailer = sm
+			log.Info().Str("host", viper.GetString("SMTP_HOST")).Msg("welcome emails: SMTP")
+		}
+	default:
+		welcomeMailer = email.NoopMailer{}
+		log.Warn().Msg("welcome emails: no emailer configured, using noop")
+	}
 	storeDomain := viper.GetString("STORE_DOMAIN")
 	if storeDomain == "" {
 		storeDomain = "gomarketi.com"

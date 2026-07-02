@@ -18,13 +18,13 @@ import (
 )
 
 type StorefrontService struct {
-	db        *sqlx.DB
-	log       zerolog.Logger
-	emailer   *email.Client
+	db          *sqlx.DB
+	log         zerolog.Logger
+	emailer     email.WelcomeMailer
 	storeDomain string
 }
 
-func New(db *sqlx.DB, emailer *email.Client, storeDomain string, log zerolog.Logger) *StorefrontService {
+func New(db *sqlx.DB, emailer email.WelcomeMailer, storeDomain string, log zerolog.Logger) *StorefrontService {
 	return &StorefrontService{db: db, emailer: emailer, storeDomain: storeDomain, log: log}
 }
 
@@ -66,27 +66,24 @@ func (s *StorefrontService) CreateStore(ctx context.Context, userID uuid.UUID, r
 	resp := rowToResp(row)
 
 	// Send welcome email asynchronously — never block store creation on email delivery.
-	// Look up the vendor's email/name from users table using their userID.
-	if s.emailer != nil {
-		var vendorEmail, vendorName string
-		_ = s.db.QueryRowContext(ctx,
-			`SELECT COALESCE(email,''), COALESCE(full_name,'') FROM users WHERE id=$1`, userID,
-		).Scan(&vendorEmail, &vendorName)
+	var vendorEmail, vendorName string
+	_ = s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(email,''), COALESCE(full_name,'') FROM users WHERE id=$1`, userID,
+	).Scan(&vendorEmail, &vendorName)
 
-		if vendorEmail != "" {
-			storeName := resp.Name
-			storeSlug := resp.Slug
-			storeDomain := s.storeDomain
-			go func() {
-				ctx2, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				defer cancel()
-				if emailErr := s.emailer.SendWelcome(ctx2,
-					vendorEmail, vendorName, storeName, storeSlug, storeDomain,
-				); emailErr != nil {
-					s.log.Warn().Err(emailErr).Str("slug", storeSlug).Msg("welcome email failed")
-				}
-			}()
-		}
+	if vendorEmail != "" {
+		storeName := resp.Name
+		storeSlug := resp.Slug
+		storeDomain := s.storeDomain
+		go func() {
+			ctx2, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if emailErr := s.emailer.SendWelcome(ctx2,
+				vendorEmail, vendorName, storeName, storeSlug, storeDomain,
+			); emailErr != nil {
+				s.log.Warn().Err(emailErr).Str("slug", storeSlug).Msg("welcome email failed")
+			}
+		}()
 	}
 
 	return resp, nil
