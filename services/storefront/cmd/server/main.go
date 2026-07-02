@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/viper"
 
 	sfdb "github.com/activialtd/gomarketi.com-backend/services/storefront/db"
+	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/email"
 	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/handler"
 	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/service"
 )
@@ -53,7 +54,18 @@ func run(log zerolog.Logger) error {
 	}
 	log.Info().Msg("migrations applied")
 
-	svc := service.New(db, log)
+	// Welcome emailer — fires after store creation. Disabled when BREVO_API_KEY is unset.
+	welcomeMailer := email.New(
+		viper.GetString("BREVO_API_KEY"),
+		viper.GetString("BREVO_FROM"),
+		viper.GetString("BREVO_FROM_NAME"),
+	)
+	storeDomain := viper.GetString("STORE_DOMAIN")
+	if storeDomain == "" {
+		storeDomain = "gomarketi.com"
+	}
+
+	svc := service.New(db, welcomeMailer, storeDomain, log)
 	h := handler.New(svc)
 	r := gin.New()
 

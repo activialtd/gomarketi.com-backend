@@ -92,6 +92,16 @@ set_vars() {
         "UPSTREAM_ORDERS=http://$SVC_ORDERS.railway.internal:8080"
       )
       ;;
+    storefront)
+      vars+=(
+        "DATABASE_URL=$DATABASE_URL"
+        "JWT_PUBLIC_KEY_B64=$JWT_PUBLIC_KEY_B64"
+        "BREVO_API_KEY=${BREVO_API_KEY:-}"
+        "BREVO_FROM=${BREVO_FROM:-}"
+        "BREVO_FROM_NAME=${BREVO_FROM_NAME:-GoMarketi}"
+        "STORE_DOMAIN=${STORE_DOMAIN:-gomarketi.com}"
+      )
+      ;;
     *)
       vars+=(
         "DATABASE_URL=$DATABASE_URL"
