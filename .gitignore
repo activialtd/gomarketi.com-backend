@@ -1,9 +1,21 @@
-# ── Environment / secrets ─────────────────────────────────────────────────────
+# ── Environment / secrets — ALL .env variations blocked ──────────────────────
 .env
-.env.local
-.env.*.local
+.env.*
 *.env
+*.env.*
+.env.local
+.env.development
+.env.production
+.env.staging
+.env.test
+.env.*.local
 .env.heroku
+.env.railway
+.env.railway.*
+# Allow only the safe template (no real values)
+!.env.railway.template
+!.env.example
+!.env.sample
 
 # ── Cryptographic keys — NEVER commit ────────────────────────────────────────
 keys/
