@@ -17,11 +17,11 @@ var migrationFiles embed.FS
 // in migrations/ that have not been applied yet (ordered by filename).
 func Migrate(ctx context.Context, db *sqlx.DB) error {
 	if _, err := db.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS _migrations (
+		CREATE TABLE IF NOT EXISTS orders_schema_versions (
 			name       TEXT PRIMARY KEY,
 			applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`); err != nil {
-		return fmt.Errorf("create _migrations table: %w", err)
+		return fmt.Errorf("create orders_schema_versions table: %w", err)
 	}
 
 	entries, err := migrationFiles.ReadDir("migrations")
@@ -39,7 +39,7 @@ func Migrate(ctx context.Context, db *sqlx.DB) error {
 
 	for _, name := range names {
 		var applied bool
-		_ = db.QueryRowContext(ctx, `SELECT TRUE FROM _migrations WHERE name=$1`, name).Scan(&applied)
+		_ = db.QueryRowContext(ctx, `SELECT TRUE FROM orders_schema_versions WHERE name=$1`, name).Scan(&applied)
 		if applied {
 			continue
 		}
@@ -53,7 +53,7 @@ func Migrate(ctx context.Context, db *sqlx.DB) error {
 			return fmt.Errorf("apply %s: %w", name, err)
 		}
 
-		if _, err := db.ExecContext(ctx, `INSERT INTO _migrations (name) VALUES ($1)`, name); err != nil {
+		if _, err := db.ExecContext(ctx, `INSERT INTO orders_schema_versions (name) VALUES ($1)`, name); err != nil {
 			return fmt.Errorf("record %s: %w", name, err)
 		}
 	}

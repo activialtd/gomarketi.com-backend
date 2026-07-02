@@ -10,6 +10,9 @@ cd "$ROOT"
 # Load shared env
 set -a; source .env; set +a
 
+echo "→ running shared migrations..."
+go run ./scripts/migrate
+
 # Port map  (gateway = 8080 public-facing, each service gets its own)
 #   gateway   :8080  ← what the frontend hits
 #   auth      :8081
