@@ -94,6 +94,13 @@ func run(log zerolog.Logger) error {
 				return
 			}
 
+			// EventSource API cannot send headers — accept token as query param for SSE.
+			if r.Header.Get("Accept") == "text/event-stream" && r.Header.Get("Authorization") == "" {
+				if tok := r.URL.Query().Get("token"); tok != "" {
+					r.Header.Set("Authorization", "Bearer "+tok)
+				}
+			}
+
 			// All other routes require a valid Bearer token.
 			userID, storeIDs, ok := validateBearer(r, jwtKey)
 			if !ok {
@@ -118,6 +125,12 @@ func run(log zerolog.Logger) error {
 				}
 			}
 
+			// For SSE connections, clear the write deadline — they stay open indefinitely.
+			if r.Header.Get("Accept") == "text/event-stream" {
+				if rc := http.NewResponseController(w); rc != nil {
+					_ = rc.SetWriteDeadline(time.Time{})
+				}
+			}
 			proxy.ServeHTTP(w, r)
 		}
 

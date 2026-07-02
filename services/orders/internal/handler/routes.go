@@ -25,6 +25,9 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 	v1 := r.Group("/v1")
 	v1.Use(middleware.RequireUser())
 	{
+		// Real-time SSE stream — vendor dashboard subscribes once per session
+		v1.GET("/orders/events", h.StreamEvents)
+
 		// Orders (MERCHANT.ORDERS dashboard section)
 		orders := v1.Group("/orders")
 		orders.GET("", h.ListOrders)

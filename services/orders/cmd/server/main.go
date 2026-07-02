@@ -18,6 +18,7 @@ import (
 	orddb "github.com/activialtd/gomarketi.com-backend/services/orders/db"
 	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/handler"
 	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/service"
+	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/sse"
 )
 
 func main() {
@@ -53,8 +54,9 @@ func run(log zerolog.Logger) error {
 	}
 	log.Info().Msg("migrations applied")
 
-	svc := service.New(db, log)
-	h := handler.New(svc)
+	broker := sse.New()
+	svc := service.New(db, log, broker)
+	h := handler.New(svc, log, broker)
 	r := gin.New()
 
 	allowedOrigins := viper.GetStringSlice("ALLOWED_ORIGINS")

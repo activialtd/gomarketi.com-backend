@@ -8,24 +8,30 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 
 	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
 	"github.com/activialtd/gomarketi.com-backend/shared/pkg/middleware"
 	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/dto"
 	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/service"
+	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/sse"
 )
 
 // Handler holds the service and validator.
 type Handler struct {
 	svc      *service.OrdersService
 	validate *validator.Validate
+	log      zerolog.Logger
+	broker   *sse.Broker
 }
 
 // New creates a Handler.
-func New(svc *service.OrdersService) *Handler {
+func New(svc *service.OrdersService, log zerolog.Logger, broker *sse.Broker) *Handler {
 	return &Handler{
 		svc:      svc,
 		validate: validator.New(),
+		log:      log,
+		broker:   broker,
 	}
 }
 
@@ -85,5 +91,6 @@ func (h *Handler) writeError(c *gin.Context, err error) {
 		c.JSON(appErr.HTTPStatus(), dto.ErrorResp{Error: appErr.Message})
 		return
 	}
+	h.log.Error().Err(err).Str("path", c.FullPath()).Msg("unhandled orders error")
 	c.JSON(http.StatusInternalServerError, dto.ErrorResp{Error: "internal server error"})
 }

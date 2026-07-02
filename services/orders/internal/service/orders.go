@@ -15,15 +15,17 @@ import (
 
 	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
 	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/dto"
+	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/sse"
 )
 
 type OrdersService struct {
-	db  *sqlx.DB
-	log zerolog.Logger
+	db     *sqlx.DB
+	log    zerolog.Logger
+	broker *sse.Broker
 }
 
-func New(db *sqlx.DB, log zerolog.Logger) *OrdersService {
-	return &OrdersService{db: db, log: log}
+func New(db *sqlx.DB, log zerolog.Logger, broker *sse.Broker) *OrdersService {
+	return &OrdersService{db: db, log: log, broker: broker}
 }
 
 // ── Orders ────────────────────────────────────────────────────────────────────
@@ -111,6 +113,10 @@ func (s *OrdersService) UpdateOrderStatus(ctx context.Context, storeID uuid.UUID
 	if err != nil {
 		return dto.OrderResp{}, fmt.Errorf("update status: %w", err)
 	}
+	go s.broker.Publish(storeID.String(), sse.Event{
+		Type: "order_updated",
+		Data: fmt.Sprintf(`{"order_id":%q,"status":%q}`, orderID.String(), req.Status),
+	})
 	o := rowToOrder(r)
 	o.Items = s.loadItems(ctx, r.ID)
 	return o, nil
@@ -187,6 +193,12 @@ func (s *OrdersService) CreateOrder(ctx context.Context, req dto.CreateOrderReq)
 		return dto.OrderResp{}, fmt.Errorf("commit: %w", err)
 	}
 
+	// Notify any open SSE dashboard connections
+	go s.broker.Publish(storeID.String(), sse.Event{
+		Type: "order_created",
+		Data: fmt.Sprintf(`{"order_id":%q,"total_kobo":%d}`, orderID, totalKobo),
+	})
+
 	return s.GetOrder(ctx, storeID, orderID)
 }
 
@@ -260,6 +272,11 @@ func (s *OrdersService) Withdraw(ctx context.Context, storeID uuid.UUID, req dto
 	if err != nil {
 		return dto.WalletResp{}, fmt.Errorf("debit wallet: %w", err)
 	}
+
+	go s.broker.Publish(storeID.String(), sse.Event{
+		Type: "wallet_updated",
+		Data: `{"reason":"withdrawal"}`,
+	})
 
 	return s.GetWallet(ctx, storeID)
 }
