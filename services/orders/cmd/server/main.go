@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
+	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 	"github.com/spf13/viper"
 
@@ -54,7 +55,29 @@ func run(log zerolog.Logger) error {
 	}
 	log.Info().Msg("migrations applied")
 
-	broker := sse.New()
+	// SSE broker: use Redis for cross-instance fan-out when REDIS_URL is set,
+	// fall back to in-memory for local dev (single instance).
+	var broker *sse.Broker
+	if redisURL := viper.GetString("REDIS_URL"); redisURL != "" {
+		opt, err := redis.ParseURL(redisURL)
+		if err != nil {
+			log.Warn().Err(err).Msg("invalid REDIS_URL — using in-memory SSE broker")
+			broker = sse.NewInMemory(log)
+		} else {
+			rdb := redis.NewClient(opt)
+			if err := rdb.Ping(context.Background()).Err(); err != nil {
+				log.Warn().Err(err).Msg("redis unreachable — using in-memory SSE broker")
+				broker = sse.NewInMemory(log)
+			} else {
+				log.Info().Str("url", redisURL).Msg("sse broker: using Redis pub/sub")
+				broker = sse.New(rdb, log)
+			}
+		}
+	} else {
+		log.Info().Msg("sse broker: no REDIS_URL — using in-memory (single instance only)")
+		broker = sse.NewInMemory(log)
+	}
+
 	svc := service.New(db, log, broker)
 	h := handler.New(svc, log, broker)
 	r := gin.New()
