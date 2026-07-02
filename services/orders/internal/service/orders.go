@@ -15,6 +15,7 @@ import (
 
 	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
 	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/dto"
+	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/email"
 	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/sse"
 )
 
@@ -80,6 +81,24 @@ func (s *OrdersService) ListOrders(ctx context.Context, storeID uuid.UUID, page,
 		orders = append(orders, o)
 	}
 	return dto.OrderListResp{Orders: orders, Total: total, Page: page, PerPage: perPage}, nil
+}
+
+// GetPublicOrder returns an order for a customer to track — gated by email match, no vendor auth needed.
+func (s *OrdersService) GetPublicOrder(ctx context.Context, orderID uuid.UUID, email string) (dto.OrderResp, error) {
+	var r orderRow
+	err := s.db.QueryRowxContext(ctx, `
+		SELECT id, store_id, customer_id, customer_name, customer_email,
+		       status, total_kobo, delivery_address, created_at, updated_at
+		FROM orders WHERE id=$1 AND LOWER(customer_email)=LOWER($2)`, orderID, email).StructScan(&r)
+	if errors.Is(err, sql.ErrNoRows) {
+		return dto.OrderResp{}, apperrors.NotFound("order not found")
+	}
+	if err != nil {
+		return dto.OrderResp{}, fmt.Errorf("get public order: %w", err)
+	}
+	o := rowToOrder(r)
+	o.Items = s.loadItems(ctx, r.ID)
+	return o, nil
 }
 
 func (s *OrdersService) GetOrder(ctx context.Context, storeID uuid.UUID, orderID uuid.UUID) (dto.OrderResp, error) {
@@ -193,11 +212,43 @@ func (s *OrdersService) CreateOrder(ctx context.Context, req dto.CreateOrderReq)
 		return dto.OrderResp{}, fmt.Errorf("commit: %w", err)
 	}
 
-	// Notify any open SSE dashboard connections
+	// Notify any open SSE dashboard connections.
 	go s.broker.Publish(storeID.String(), sse.Event{
 		Type: "order_created",
 		Data: fmt.Sprintf(`{"order_id":%q,"total_kobo":%d}`, orderID, totalKobo),
 	})
+
+	// Send invoice email to customer asynchronously — never block checkout on email delivery.
+	if req.CustomerEmail != "" {
+		invoiceItems := make([]email.InvoiceItem, len(req.Items))
+		for i, it := range req.Items {
+			invoiceItems[i] = email.InvoiceItem{
+				Name:      it.Name,
+				Quantity:  int(it.Quantity),
+				PriceKobo: it.PriceKobo,
+			}
+		}
+		storeSlug := req.StoreSlug
+		storeName := req.StoreName
+		if storeName == "" {
+			storeName = "GoMarketi Store"
+		}
+		orderIDStr := orderID.String()
+		go func() {
+			if err := email.SendInvoice(
+				context.Background(),
+				req.CustomerEmail,
+				req.CustomerName,
+				orderIDStr,
+				storeSlug,
+				storeName,
+				totalKobo,
+				invoiceItems,
+			); err != nil {
+				s.log.Warn().Err(err).Str("order_id", orderIDStr).Msg("invoice email failed")
+			}
+		}()
+	}
 
 	return s.GetOrder(ctx, storeID, orderID)
 }

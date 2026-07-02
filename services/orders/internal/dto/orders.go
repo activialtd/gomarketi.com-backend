@@ -60,6 +60,8 @@ type CreateOrderItem struct {
 // from the storefront checkout after a successful (simulated) Paystack charge.
 type CreateOrderReq struct {
 	StoreID         string            `json:"store_id"         validate:"required,uuid"`
+	StoreSlug       string            `json:"store_slug"`
+	StoreName       string            `json:"store_name"`
 	CustomerName    string            `json:"customer_name"    validate:"required"`
 	CustomerEmail   string            `json:"customer_email"   validate:"required,email"`
 	CustomerPhone   string            `json:"customer_phone"`

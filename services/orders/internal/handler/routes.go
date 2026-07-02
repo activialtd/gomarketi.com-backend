@@ -18,9 +18,10 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 		middleware.UserContext(),
 	)
 
-	// Public — no auth. Called directly from the storefront checkout.
+	// Public — no auth.
 	pub := r.Group("/v1/orders/public")
 	pub.POST("", h.CreateOrder)
+	pub.GET("/:id", h.GetPublicOrder) // customer order tracking — gated by email param
 
 	v1 := r.Group("/v1")
 	v1.Use(middleware.RequireUser())

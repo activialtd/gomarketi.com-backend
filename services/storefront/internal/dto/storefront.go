@@ -1,6 +1,8 @@
 // Package dto defines request and response shapes for the storefront service.
 package dto
 
+import "encoding/json"
+
 // ── Store ──────────────────────────────────────────────────────────────────────
 
 // CreateStoreReq is the body for POST /v1/storefront/stores.
@@ -17,37 +19,43 @@ type CreateStoreReq struct {
 // UpdateStoreReq is the body for PATCH /v1/storefront/stores/:id.
 // All fields are optional (PATCH semantics — omit to leave unchanged).
 type UpdateStoreReq struct {
-	Name         *string `json:"name"          validate:"omitempty,min=2,max=200"`
-	Tagline      *string `json:"tagline"       validate:"omitempty,max=300"`
-	LogoURL      *string `json:"logo_url"      validate:"omitempty,url"`
-	SupportPhone *string `json:"support_phone" validate:"omitempty,min=7,max=20"`
-	Address      *string `json:"address"       validate:"omitempty,max=500"`
-	City         *string `json:"city"          validate:"omitempty,max=100"`
-	State        *string `json:"state"         validate:"omitempty,max=100"`
-	ThemeConfig  *string `json:"theme_config,omitempty"` // raw JSON, stored as JSONB
+	Name            *string         `json:"name"             validate:"omitempty,min=2,max=200"`
+	Tagline         *string         `json:"tagline"          validate:"omitempty,max=300"`
+	LogoURL         *string         `json:"logo_url"         validate:"omitempty,url"`
+	HeroImageURL    *string         `json:"hero_image_url"   validate:"omitempty,url"`
+	SiteDescription *string         `json:"site_description" validate:"omitempty,max=1000"`
+	SocialLinks     json.RawMessage `json:"social_links"`
+	SupportPhone    *string         `json:"support_phone"    validate:"omitempty,min=7,max=20"`
+	Address         *string         `json:"address"          validate:"omitempty,max=500"`
+	City            *string         `json:"city"             validate:"omitempty,max=100"`
+	State           *string         `json:"state"            validate:"omitempty,max=100"`
+	ThemeConfig     json.RawMessage `json:"theme_config"` // raw JSON, stored as JSONB
 }
 
 // StoreResp is returned for any store read or write operation.
 type StoreResp struct {
-	ID           string  `json:"id"`
-	VendorID     string  `json:"vendor_id"`
-	Name         string  `json:"name"`
-	Slug         string  `json:"slug"`
-	Category     string  `json:"category"`
-	Currency     string  `json:"currency"`
-	TeamSize     *string `json:"team_size,omitempty"`
-	StaffRange   *string `json:"staff_range,omitempty"`
-	Tagline      *string `json:"tagline,omitempty"`
-	LogoURL      *string `json:"logo_url,omitempty"`
-	SupportPhone *string `json:"support_phone,omitempty"`
-	Address      *string `json:"address,omitempty"`
-	City         *string `json:"city,omitempty"`
-	State        *string `json:"state,omitempty"`
-	CustomDomain       *string `json:"custom_domain,omitempty"`
-	CustomDomainStatus string  `json:"custom_domain_status,omitempty"`
-	ThemeConfig        *string `json:"theme_config,omitempty"` // raw JSON
-	IsActive           bool    `json:"is_active"`
-	CreatedAt          string  `json:"created_at"`
+	ID              string          `json:"id"`
+	VendorID        string          `json:"vendor_id"`
+	Name            string          `json:"name"`
+	Slug            string          `json:"slug"`
+	Category        string          `json:"category"`
+	Currency        string          `json:"currency"`
+	TeamSize        *string         `json:"team_size,omitempty"`
+	StaffRange      *string         `json:"staff_range,omitempty"`
+	Tagline         *string         `json:"tagline,omitempty"`
+	LogoURL         *string         `json:"logo_url,omitempty"`
+	HeroImageURL    *string         `json:"hero_image_url,omitempty"`
+	SiteDescription *string         `json:"site_description,omitempty"`
+	SocialLinks     json.RawMessage `json:"social_links,omitempty"`
+	SupportPhone    *string         `json:"support_phone,omitempty"`
+	Address         *string         `json:"address,omitempty"`
+	City            *string         `json:"city,omitempty"`
+	State           *string         `json:"state,omitempty"`
+	CustomDomain       *string         `json:"custom_domain,omitempty"`
+	CustomDomainStatus string          `json:"custom_domain_status,omitempty"`
+	ThemeConfig        json.RawMessage `json:"theme_config,omitempty"` // raw JSON
+	IsActive           bool            `json:"is_active"`
+	CreatedAt          string          `json:"created_at"`
 }
 
 // SlugCheckResp is returned by GET /v1/storefront/slugs/check.

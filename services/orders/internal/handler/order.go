@@ -91,6 +91,31 @@ func (h *Handler) UpdateOrderStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
+// GetPublicOrder godoc
+// GET /v1/orders/public/:id?email=customer@example.com
+// Returns an order for a customer to track their purchase.
+// Gated by the customer's email address — no vendor auth required.
+func (h *Handler) GetPublicOrder(c *gin.Context) {
+	orderID, ok := h.pathUUID(c, "id")
+	if !ok {
+		return
+	}
+
+	email := c.Query("email")
+	if email == "" {
+		c.JSON(http.StatusBadRequest, dto.ErrorResp{Error: "email query param is required"})
+		return
+	}
+
+	resp, err := h.svc.GetPublicOrder(c.Request.Context(), orderID, email)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
 // CreateOrder godoc
 // POST /v1/orders/public — no auth, called by the storefront checkout after
 // a successful (simulated) Paystack charge.

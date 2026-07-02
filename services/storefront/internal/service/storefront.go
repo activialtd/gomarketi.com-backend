@@ -54,8 +54,10 @@ func (s *StorefrontService) CreateStore(ctx context.Context, userID uuid.UUID, r
 		INSERT INTO stores (vendor_id, name, slug, category, currency, team_size, support_phone)
 		VALUES ($1,$2,$3,$4,$5,$6,$7)
 		RETURNING id, vendor_id, name, slug, category, currency,
-		          team_size, staff_range, tagline, logo_url, support_phone,
-		          address, city, state, custom_domain, custom_domain_status, theme_config, is_active, created_at`,
+		          team_size, staff_range, tagline, logo_url, hero_image_url, site_description,
+		          COALESCE(social_links, '{}') AS social_links,
+		          support_phone, address, city, state, custom_domain, custom_domain_status,
+		          COALESCE(theme_config, '{}') AS theme_config, is_active, created_at`,
 		userID, req.Name, req.Slug, req.Category, req.Currency,
 		req.TeamSize, req.SupportPhone,
 	).StructScan(&row)
@@ -97,21 +99,27 @@ func (s *StorefrontService) UpdateStore(ctx context.Context, userID uuid.UUID, s
 	var row storeRow
 	err := s.db.QueryRowxContext(ctx, `
 		UPDATE stores SET
-			name          = COALESCE($1, name),
-			tagline       = COALESCE($2, tagline),
-			logo_url      = COALESCE($3, logo_url),
-			support_phone = COALESCE($4, support_phone),
-			address       = COALESCE($5, address),
-			city          = COALESCE($6, city),
-			state         = COALESCE($7, state),
-			theme_config  = COALESCE($8::jsonb, theme_config),
-			updated_at    = NOW()
-		WHERE id=$9 AND vendor_id=$10
+			name             = COALESCE($1, name),
+			tagline          = COALESCE($2, tagline),
+			logo_url         = COALESCE($3, logo_url),
+			hero_image_url   = COALESCE($4, hero_image_url),
+			site_description = COALESCE($5, site_description),
+			social_links     = CASE WHEN $6::jsonb IS NOT NULL THEN $6::jsonb ELSE COALESCE(social_links, '{}') END,
+			support_phone    = COALESCE($7, support_phone),
+			address          = COALESCE($8, address),
+			city             = COALESCE($9, city),
+			state            = COALESCE($10, state),
+			theme_config     = CASE WHEN $11::jsonb IS NOT NULL THEN $11::jsonb ELSE COALESCE(theme_config, '{}') END,
+			updated_at       = NOW()
+		WHERE id=$12 AND vendor_id=$13
 		RETURNING id, vendor_id, name, slug, category, currency,
-		          team_size, staff_range, tagline, logo_url, support_phone,
-		          address, city, state, custom_domain, custom_domain_status, theme_config, is_active, created_at`,
-		req.Name, req.Tagline, req.LogoURL, req.SupportPhone,
-		req.Address, req.City, req.State, req.ThemeConfig,
+		          team_size, staff_range, tagline, logo_url, hero_image_url, site_description,
+		          COALESCE(social_links, '{}') AS social_links,
+		          support_phone, address, city, state, custom_domain, custom_domain_status,
+		          COALESCE(theme_config, '{}') AS theme_config, is_active, created_at`,
+		req.Name, req.Tagline, req.LogoURL, req.HeroImageURL, req.SiteDescription,
+		nullJSON(req.SocialLinks), req.SupportPhone,
+		req.Address, req.City, req.State, nullJSON(req.ThemeConfig),
 		storeID, userID,
 	).StructScan(&row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -133,8 +141,10 @@ func (s *StorefrontService) GetStoreBySlug(ctx context.Context, slug string) (dt
 	var row storeRow
 	err := s.db.QueryRowxContext(ctx, `
 		SELECT id, vendor_id, name, slug, category, currency,
-		       team_size, staff_range, tagline, logo_url, support_phone,
-		       address, city, state, custom_domain, custom_domain_status, theme_config, is_active, created_at
+		       team_size, staff_range, tagline, logo_url, hero_image_url, site_description,
+		       COALESCE(social_links, '{}') AS social_links,
+		       support_phone, address, city, state, custom_domain, custom_domain_status,
+		       COALESCE(theme_config, '{}') AS theme_config, is_active, created_at
 		FROM stores WHERE slug=$1 AND is_active=TRUE`, slug).StructScan(&row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.StoreResp{}, apperrors.NotFound("store not found")
@@ -149,8 +159,10 @@ func (s *StorefrontService) GetStoreByDomain(ctx context.Context, domain string)
 	var row storeRow
 	err := s.db.QueryRowxContext(ctx, `
 		SELECT id, vendor_id, name, slug, category, currency,
-		       team_size, staff_range, tagline, logo_url, support_phone,
-		       address, city, state, custom_domain, custom_domain_status, theme_config, is_active, created_at
+		       team_size, staff_range, tagline, logo_url, hero_image_url, site_description,
+		       COALESCE(social_links, '{}') AS social_links,
+		       support_phone, address, city, state, custom_domain, custom_domain_status,
+		       COALESCE(theme_config, '{}') AS theme_config, is_active, created_at
 		FROM stores WHERE custom_domain=$1 AND custom_domain_status='active' AND is_active=TRUE`, domain).StructScan(&row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.StoreResp{}, apperrors.NotFound("store not found")
@@ -248,13 +260,16 @@ type storeRow struct {
 	StaffRange         sql.NullString `db:"staff_range"`
 	Tagline            sql.NullString `db:"tagline"`
 	LogoURL            sql.NullString `db:"logo_url"`
+	HeroImageURL       sql.NullString `db:"hero_image_url"`
+	SiteDescription    sql.NullString `db:"site_description"`
+	SocialLinks        []byte         `db:"social_links"`
 	SupportPhone       sql.NullString `db:"support_phone"`
 	Address            sql.NullString `db:"address"`
 	City               sql.NullString `db:"city"`
 	State              sql.NullString `db:"state"`
 	CustomDomain       sql.NullString `db:"custom_domain"`
 	CustomDomainStatus string         `db:"custom_domain_status"`
-	ThemeConfig        sql.NullString `db:"theme_config"`
+	ThemeConfig        []byte         `db:"theme_config"`
 	IsActive           bool           `db:"is_active"`
 	CreatedAt          time.Time      `db:"created_at"`
 }
@@ -272,8 +287,10 @@ func (s *StorefrontService) getStoreByVendor(ctx context.Context, userID uuid.UU
 	var row storeRow
 	err := s.db.QueryRowxContext(ctx, `
 		SELECT id, vendor_id, name, slug, category, currency,
-		       team_size, staff_range, tagline, logo_url, support_phone,
-		       address, city, state, custom_domain, custom_domain_status, theme_config, is_active, created_at
+		       team_size, staff_range, tagline, logo_url, hero_image_url, site_description,
+		       COALESCE(social_links, '{}') AS social_links,
+		       support_phone, address, city, state, custom_domain, custom_domain_status,
+		       COALESCE(theme_config, '{}') AS theme_config, is_active, created_at
 		FROM stores WHERE vendor_id=$1`, userID).StructScan(&row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.StoreResp{}, apperrors.NotFound("store not found")
@@ -294,7 +311,7 @@ func (s *StorefrontService) assertOwner(ctx context.Context, userID, storeID uui
 }
 
 func rowToResp(r storeRow) dto.StoreResp {
-	return dto.StoreResp{
+	resp := dto.StoreResp{
 		ID:                 r.ID.String(),
 		VendorID:           r.VendorID.String(),
 		Name:               r.Name,
@@ -305,16 +322,25 @@ func rowToResp(r storeRow) dto.StoreResp {
 		StaffRange:         nullToPtr(r.StaffRange),
 		Tagline:            nullToPtr(r.Tagline),
 		LogoURL:            nullToPtr(r.LogoURL),
+		HeroImageURL:       nullToPtr(r.HeroImageURL),
+		SiteDescription:    nullToPtr(r.SiteDescription),
 		SupportPhone:       nullToPtr(r.SupportPhone),
 		Address:            nullToPtr(r.Address),
 		City:               nullToPtr(r.City),
 		State:              nullToPtr(r.State),
 		CustomDomain:       nullToPtr(r.CustomDomain),
 		CustomDomainStatus: r.CustomDomainStatus,
-		ThemeConfig:        nullToPtr(r.ThemeConfig),
 		IsActive:           r.IsActive,
 		CreatedAt:          r.CreatedAt.UTC().Format(time.RFC3339),
 	}
+	// social_links and theme_config are JSONB — only set when non-empty.
+	if len(r.SocialLinks) > 0 && string(r.SocialLinks) != "{}" && string(r.SocialLinks) != "null" {
+		resp.SocialLinks = r.SocialLinks
+	}
+	if len(r.ThemeConfig) > 0 && string(r.ThemeConfig) != "{}" && string(r.ThemeConfig) != "null" {
+		resp.ThemeConfig = r.ThemeConfig
+	}
+	return resp
 }
 
 func nullToPtr(n sql.NullString) *string {
@@ -329,6 +355,19 @@ func nullStr(s string) sql.NullString {
 		return sql.NullString{}
 	}
 	return sql.NullString{String: s, Valid: true}
+}
+
+// nullJSON returns nil when the raw JSON is empty or a bare null/empty-object,
+// so the SQL CASE expression leaves the existing DB value untouched.
+func nullJSON(b []byte) interface{} {
+	if len(b) == 0 {
+		return nil
+	}
+	s := string(b)
+	if s == "null" || s == "{}" || s == "[]" {
+		return nil
+	}
+	return s
 }
 
 // LogView records a storefront page view. It silently ignores unknown slugs.

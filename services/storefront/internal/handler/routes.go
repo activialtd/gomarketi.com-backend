@@ -39,6 +39,7 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 		stores := v1.Group("/stores")
 		stores.POST("", h.CreateStore)
 		stores.GET("/mine", h.GetMyStore)
+		stores.POST("/upload", h.UploadStoreAsset)
 
 		store := stores.Group("/:id")
 		store.PATCH("", h.UpdateStore)
