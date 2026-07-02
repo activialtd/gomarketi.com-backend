@@ -66,3 +66,8 @@ logs/
 !*.tfvars.example
 .terraform.lock.hcl
 .vercel
+
+# ── Railway env files — contain real secrets, never commit ────────────────────
+.env.railway
+.env.railway.staging
+.env.railway.production
