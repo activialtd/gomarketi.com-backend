@@ -18,6 +18,7 @@ import (
 	"github.com/activialtd/gomarketi.com-backend/services/identity/internal/dto"
 	"github.com/activialtd/gomarketi.com-backend/services/identity/internal/repository"
 	"github.com/activialtd/gomarketi.com-backend/services/identity/internal/repository/db"
+	"github.com/activialtd/gomarketi.com-backend/services/identity/internal/smileid"
 )
 
 // IdentityService implements all identity use-cases.
@@ -25,11 +26,12 @@ type IdentityService struct {
 	store         *repository.Store
 	encryptionKey []byte
 	log           zerolog.Logger
+	kycClient     *smileid.Client
 }
 
 // New creates an IdentityService.
-func New(store *repository.Store, encryptionKey []byte, log zerolog.Logger) *IdentityService {
-	return &IdentityService{store: store, encryptionKey: encryptionKey, log: log}
+func New(store *repository.Store, encryptionKey []byte, kycClient *smileid.Client, log zerolog.Logger) *IdentityService {
+	return &IdentityService{store: store, encryptionKey: encryptionKey, kycClient: kycClient, log: log}
 }
 
 // ── User profile ──────────────────────────────────────────────────────────────
@@ -350,16 +352,121 @@ func (s *IdentityService) UpdateVendorBusiness(ctx context.Context, userID uuid.
 	return vendorToProfileResp(updated), nil
 }
 
-// SubmitVendorKYC encrypts PII fields and stores them, advancing the step to kyc_submitted.
+// SubmitVendorKYC performs the full CBN-aligned KYC verification flow:
+//   1. Rate-limit check (max 3 attempts / 24 h per vendor — CBN AML requirement)
+//   2. If BVN or NIN provided: call Smile ID to verify against NIMC/CBN database
+//   3. If CAC number provided: call Smile ID KYB check against CAC database
+//   4. Encrypt every PII field (AES-256-GCM) before writing to DB
+//   5. Advance onboarding_step and set kyc_status = pending (manual review)
+//      OR = verified (if Smile ID returned an instant Verified result)
+//
+// SECURITY: req.Bvn, req.Nin and req.IdNumber are NEVER logged anywhere in
+// this function. They are passed to Smile ID over TLS and then immediately
+// encrypted before storage. The raw strings are not written to any log line.
 func (s *IdentityService) SubmitVendorKYC(ctx context.Context, userID uuid.UUID, req dto.VendorKYCReq) (dto.VendorProfileResp, error) {
 	vendor, err := s.store.Queries().GetVendorProfileByUserID(ctx, userID)
 	if err != nil {
 		return dto.VendorProfileResp{}, repository.NormaliseErr(err, "vendor profile")
 	}
 
+	// ── Rate limit ────────────────────────────────────────────────────────────
+	// CBN AML guidelines require limiting brute-force enumeration.
+	// We allow 3 attempts in any rolling 24-hour window.
+	// Query directly — the new columns were added via migration 0013 after
+	// the sqlc model was generated, so they're not in db.VendorProfile yet.
+	var attempts int
+	var lastAttempt sql.NullTime
+	_ = s.store.DB().QueryRowContext(ctx,
+		`SELECT COALESCE(kyc_attempts,0), kyc_last_attempt_at FROM vendor_profiles WHERE id=$1`, vendor.ID,
+	).Scan(&attempts, &lastAttempt)
+
+	if attempts >= 3 {
+		cutoff := time.Now().Add(-24 * time.Hour)
+		if lastAttempt.Valid && lastAttempt.Time.After(cutoff) {
+			remaining := lastAttempt.Time.Add(24 * time.Hour).Sub(time.Now())
+			return dto.VendorProfileResp{}, apperrors.BadRequest(
+				fmt.Sprintf("KYC attempt limit reached. Try again in %.0f hours.", remaining.Hours()))
+		}
+		// Window expired — reset counter
+		_, _ = s.store.DB().ExecContext(ctx,
+			`UPDATE vendor_profiles SET kyc_attempts = 0 WHERE id = $1`, vendor.ID)
+	}
+
+	// Record this attempt (increment counter + timestamp)
+	_, _ = s.store.DB().ExecContext(ctx,
+		`UPDATE vendor_profiles SET kyc_attempts = kyc_attempts + 1, kyc_last_attempt_at = NOW() WHERE id = $1`, vendor.ID)
+
+	// ── Smile ID verification ─────────────────────────────────────────────────
+	// Use a tight context deadline so the Smile ID call can never block a
+	// goroutine beyond the configured timeout (12 s in the client).
+	verifyCtx, cancel := context.WithTimeout(ctx, 14*time.Second)
+	defer cancel()
+
+	finalStatus := "pending" // default: queue for manual review
+	var smileJobID *string
+
+	if req.Nin != nil || req.Bvn != nil {
+		idNumber := req.Nin
+		idType := smileid.IDTypeNIN
+		if req.Bvn != nil {
+			idNumber = req.Bvn
+			idType = smileid.IDTypeBVN
+		}
+
+		firstName, lastName, dob := "", "", ""
+		if req.FirstName != nil { firstName = *req.FirstName }
+		if req.LastName != nil  { lastName  = *req.LastName  }
+		if req.DOB != nil       { dob       = *req.DOB       }
+
+		result, smileErr := s.kycClient.VerifyID(verifyCtx, smileid.VerifyRequest{
+			Country:   "NG",
+			IDType:    idType,
+			IDNumber:  *idNumber, // raw — sent to Smile ID over TLS, NEVER logged
+			FirstName: firstName,
+			LastName:  lastName,
+			DOB:       dob,
+		})
+
+		if smileErr != nil {
+			// Verification call failed (network, timeout, etc.).
+			// We still store the encrypted data and mark pending for manual review;
+			// we do NOT leak the raw ID number in the error message.
+			s.log.Warn().
+				Str("id_type", string(idType)).
+				Err(smileErr).
+				Msg("smile id call failed — falling back to manual review")
+		} else {
+			sj := result.SmileJobID
+			smileJobID = &sj
+			if result.Matched {
+				finalStatus = "verified"
+			}
+		}
+	}
+
+	if req.CacNumber != nil {
+		result, smileErr := s.kycClient.VerifyID(verifyCtx, smileid.VerifyRequest{
+			Country:  "NG",
+			IDType:   "CAC", // Smile ID KYB check
+			IDNumber: *req.CacNumber,
+		})
+		if smileErr != nil {
+			s.log.Warn().Err(smileErr).Msg("smile id CAC check failed — manual review")
+		} else {
+			sj := result.SmileJobID
+			smileJobID = &sj
+			if result.Matched {
+				finalStatus = "verified"
+			}
+		}
+	}
+
+	// ── Encrypt PII before storage ────────────────────────────────────────────
+	// AES-256-GCM with unique nonce per field. The encryption key is injected
+	// at startup from ENCRYPTION_KEY env var and never written to logs/DB.
 	params := db.UpdateVendorKYCParams{
 		ID:             vendor.ID,
-		KycStatus:      "pending",
+		KycStatus:      finalStatus,
 		OnboardingStep: "kyc_submitted",
 		Tin:            nullableString(req.Tin),
 		CacNumber:      nullableString(req.CacNumber),
@@ -394,6 +501,12 @@ func (s *IdentityService) SubmitVendorKYC(ctx context.Context, userID uuid.UUID,
 	updated, err := s.store.Queries().UpdateVendorKYC(ctx, params)
 	if err != nil {
 		return dto.VendorProfileResp{}, apperrors.Internal(fmt.Errorf("update vendor kyc: %w", err))
+	}
+
+	// Store Smile ID audit job reference (safe — does not contain PII)
+	if smileJobID != nil {
+		_, _ = s.store.DB().ExecContext(ctx,
+			`UPDATE vendor_profiles SET kyc_smile_job_id = $1 WHERE id = $2`, *smileJobID, vendor.ID)
 	}
 
 	return vendorToProfileResp(updated), nil

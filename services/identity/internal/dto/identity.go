@@ -86,17 +86,27 @@ type VendorBusinessReq struct {
 
 // VendorKYCReq is the body for POST /v1/identity/vendor/onboard/kyc.
 // PII fields are encrypted by the service before DB write.
-// Never log or echo this struct.
+// NEVER log or echo this struct — it contains raw BVN/NIN.
 type VendorKYCReq struct {
-	Bvn            *string `json:"bvn"              validate:"omitempty,len=11,numeric"`
-	Nin            *string `json:"nin"              validate:"omitempty,len=11,numeric"`
+	// Identity fields used for Smile ID matching (sent to Smile ID, never logged)
+	FirstName *string `json:"first_name"`
+	LastName  *string `json:"last_name"`
+	DOB       *string `json:"dob"` // YYYY-MM-DD
+
+	// One of bvn/nin for Tier 1 individual verification
+	Bvn *string `json:"bvn" validate:"omitempty,len=11,numeric"`
+	Nin *string `json:"nin" validate:"omitempty,len=11,numeric"`
+
+	// Business fields for Tier 2 KYB
 	Tin            *string `json:"tin"`
 	CacNumber      *string `json:"cac_number"`
 	CacDocumentUrl *string `json:"cac_document_url" validate:"omitempty,url"`
-	IdType         *string `json:"id_type"          validate:"omitempty,oneof=national_id passport drivers_license voters_card"`
-	IdNumber       *string `json:"id_number"`
-	IdDocumentUrl  *string `json:"id_document_url"  validate:"omitempty,url"`
-	SelfieUrl      *string `json:"selfie_url"       validate:"omitempty,url"`
+
+	// Optional supporting docs
+	IdType        *string `json:"id_type"         validate:"omitempty,oneof=national_id passport drivers_license voters_card"`
+	IdNumber      *string `json:"id_number"`
+	IdDocumentUrl *string `json:"id_document_url" validate:"omitempty,url"`
+	SelfieUrl     *string `json:"selfie_url"      validate:"omitempty,url"`
 }
 
 // VendorProfileResp is returned for GET /v1/identity/vendor/profile.

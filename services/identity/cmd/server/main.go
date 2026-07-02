@@ -19,6 +19,7 @@ import (
 	"github.com/activialtd/gomarketi.com-backend/services/identity/internal/handler"
 	"github.com/activialtd/gomarketi.com-backend/services/identity/internal/repository"
 	"github.com/activialtd/gomarketi.com-backend/services/identity/internal/service"
+	"github.com/activialtd/gomarketi.com-backend/services/identity/internal/smileid"
 )
 
 func main() {
@@ -54,7 +55,18 @@ func run(log zerolog.Logger) error {
 	defer db.Close()
 
 	store := repository.NewStore(db)
-	svc := service.New(store, encKey, log)
+
+	// Smile ID KYC client — runs in simulation mode when credentials are not set.
+	// Set SMILE_ID_PARTNER_ID + SMILE_ID_API_KEY env vars for live verification.
+	// Set SMILE_ID_SANDBOX=true to use the Smile ID sandbox environment.
+	kycClient := smileid.New(
+		viper.GetString("SMILE_ID_PARTNER_ID"),
+		viper.GetString("SMILE_ID_API_KEY"),
+		viper.GetBool("SMILE_ID_SANDBOX"),
+		log,
+	)
+
+	svc := service.New(store, encKey, kycClient, log)
 
 	isProduction := viper.GetString("ENV") == "production"
 	if isProduction {
