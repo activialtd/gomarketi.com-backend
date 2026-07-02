@@ -221,24 +221,27 @@ func loadPublicKey() (*rsa.PublicKey, error) {
 // ── Store lookup cache ────────────────────────────────────────────────────────
 
 type storeEntry struct {
-	storeID  string
+	storeID   string
 	fetchedAt time.Time
+	failed    bool // true when the last lookup returned no store
 }
 
 type storeCache struct {
-	mu      sync.Mutex
-	entries map[string]storeEntry
-	baseURL string
-	ttl     time.Duration
-	log     zerolog.Logger
+	mu         sync.Mutex
+	entries    map[string]storeEntry
+	baseURL    string
+	ttl        time.Duration
+	failedTTL  time.Duration // short TTL for failed lookups — retry sooner
+	log        zerolog.Logger
 }
 
 func newStoreCache(storefrontBaseURL string, log zerolog.Logger) *storeCache {
 	return &storeCache{
-		entries: make(map[string]storeEntry),
-		baseURL: storefrontBaseURL,
-		ttl:     5 * time.Minute,
-		log:     log,
+		entries:   make(map[string]storeEntry),
+		baseURL:   storefrontBaseURL,
+		ttl:       5 * time.Minute,
+		failedTTL: 5 * time.Second, // retry failed lookups after 5s (handles slow service start)
+		log:       log,
 	}
 }
 
@@ -247,18 +250,28 @@ func (c *storeCache) lookup(ctx context.Context, userID string) (string, bool) {
 	entry, ok := c.entries[userID]
 	c.mu.Unlock()
 
-	if ok && time.Since(entry.fetchedAt) < c.ttl {
-		if entry.storeID == "" {
-			return "", false
+	if ok {
+		ttl := c.ttl
+		if entry.failed {
+			ttl = c.failedTTL // don't block requests for 5 min on a temporary failure
 		}
-		return entry.storeID, true
+		if time.Since(entry.fetchedAt) < ttl {
+			if entry.storeID == "" {
+				return "", false
+			}
+			return entry.storeID, true
+		}
 	}
 
 	// Fetch from storefront service (service-to-service: inject X-User-ID directly).
 	storeID := c.fetchFromStorefront(ctx, userID)
 
 	c.mu.Lock()
-	c.entries[userID] = storeEntry{storeID: storeID, fetchedAt: time.Now()}
+	c.entries[userID] = storeEntry{
+		storeID:   storeID,
+		fetchedAt: time.Now(),
+		failed:    storeID == "",
+	}
 	c.mu.Unlock()
 
 	if storeID == "" {
@@ -275,29 +288,49 @@ func (c *storeCache) invalidate(userID string) {
 
 func (c *storeCache) fetchFromStorefront(ctx context.Context, userID string) string {
 	if c.baseURL == "" {
+		c.log.Warn().Msg("store cache: UPSTREAM_STOREFRONT not set — cannot look up store ID")
 		return ""
 	}
 	reqURL := strings.TrimRight(c.baseURL, "/") + "/v1/storefront/stores/mine"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
+		c.log.Error().Err(err).Msg("store cache: failed to build storefront request")
 		return ""
 	}
 	req.Header.Set("X-User-ID", userID)
 
-	client := &http.Client{Timeout: 3 * time.Second}
+	// Use a longer timeout — storefront may be waiting on a cold Neon DB connection.
+	client := &http.Client{Timeout: 8 * time.Second}
 	resp, err := client.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
+	if err != nil {
+		c.log.Warn().Err(err).Str("user_id", userID).Msg("store cache: storefront unreachable")
 		return ""
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 
+	if resp.StatusCode == http.StatusNotFound {
+		// Vendor hasn't created a store yet — not an error.
+		return ""
+	}
+	if resp.StatusCode != http.StatusOK {
+		c.log.Warn().Int("status", resp.StatusCode).Str("user_id", userID).
+			Str("body", string(body)).Msg("store cache: storefront returned non-200")
+		return ""
+	}
+
 	var store struct {
 		ID string `json:"id"`
 	}
 	if err := json.Unmarshal(body, &store); err != nil {
+		c.log.Error().Err(err).Str("body", string(body)).Msg("store cache: failed to parse store response")
 		return ""
 	}
+	if store.ID == "" {
+		c.log.Warn().Str("user_id", userID).Msg("store cache: storefront returned empty store ID")
+		return ""
+	}
+	c.log.Debug().Str("user_id", userID).Str("store_id", store.ID).Msg("store cache: resolved store ID")
 	return store.ID
 }
 
