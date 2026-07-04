@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -27,6 +28,7 @@ type BrevoConfig struct {
 }
 
 func NewBrevoClient(cfg BrevoConfig) (*BrevoClient, error) {
+	cfg.APIKey = strings.TrimSpace(cfg.APIKey)
 	if cfg.APIKey == "" {
 		return nil, fmt.Errorf("brevo: BREVO_API_KEY is required")
 	}
