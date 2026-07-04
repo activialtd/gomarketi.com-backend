@@ -24,6 +24,10 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 			auth.POST("/register", h.Register)
 			auth.POST("/login", h.Login)
 
+			// Staff login — separate from vendor/buyer login
+			staff := auth.Group("/staff")
+			staff.POST("/login", h.StaffLogin)
+
 			otp := auth.Group("/otp")
 			otp.POST("/request", h.RequestOTP)
 			otp.POST("/verify", h.VerifyOTP)

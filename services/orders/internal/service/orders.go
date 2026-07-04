@@ -136,6 +136,24 @@ func (s *OrdersService) UpdateOrderStatus(ctx context.Context, storeID uuid.UUID
 		Type: "order_updated",
 		Data: fmt.Sprintf(`{"order_id":%q,"status":%q}`, orderID.String(), req.Status),
 	})
+
+	// Notify customer of the status change asynchronously.
+	if r.CustomerEmail != "" {
+		custEmail := r.CustomerEmail
+		custName := r.CustomerName
+		oidStr := orderID.String()
+		statusVal := string(req.Status)
+		go func() {
+			slug, name := s.getStoreSlugName(context.Background(), storeID)
+			if err := email.SendStatusUpdate(
+				context.Background(),
+				custEmail, custName, oidStr, slug, name, statusVal,
+			); err != nil {
+				s.log.Warn().Err(err).Str("order_id", oidStr).Msg("status update email failed")
+			}
+		}()
+	}
+
 	o := rowToOrder(r)
 	o.Items = s.loadItems(ctx, r.ID)
 	return o, nil
@@ -164,6 +182,12 @@ func (s *OrdersService) CreateOrder(ctx context.Context, req dto.CreateOrderReq)
 	}
 	if totalKobo <= 0 {
 		return dto.OrderResp{}, apperrors.BadRequest("order total must be greater than zero")
+	}
+
+	// Verify the Paystack charge before touching the database.
+	// In dev mode (no PAYSTACK_SECRET_KEY) this is a no-op with a log warning.
+	if err := s.verifyPaystackTransaction(ctx, req.PaymentRef, totalKobo); err != nil {
+		return dto.OrderResp{}, err
 	}
 
 	custID := customerUUID(storeID, req.CustomerEmail)
@@ -219,21 +243,23 @@ func (s *OrdersService) CreateOrder(ctx context.Context, req dto.CreateOrderReq)
 	})
 
 	// Send invoice email to customer asynchronously — never block checkout on email delivery.
+	invoiceItems := make([]email.InvoiceItem, len(req.Items))
+	for i, it := range req.Items {
+		invoiceItems[i] = email.InvoiceItem{
+			Name:      it.Name,
+			ImageURL:  it.ImageURL,
+			Quantity:  int(it.Quantity),
+			PriceKobo: it.PriceKobo,
+		}
+	}
+	storeSlug := req.StoreSlug
+	storeName := req.StoreName
+	if storeName == "" {
+		storeName = "GoMarketi Store"
+	}
+	orderIDStr := orderID.String()
+
 	if req.CustomerEmail != "" {
-		invoiceItems := make([]email.InvoiceItem, len(req.Items))
-		for i, it := range req.Items {
-			invoiceItems[i] = email.InvoiceItem{
-				Name:      it.Name,
-				Quantity:  int(it.Quantity),
-				PriceKobo: it.PriceKobo,
-			}
-		}
-		storeSlug := req.StoreSlug
-		storeName := req.StoreName
-		if storeName == "" {
-			storeName = "GoMarketi Store"
-		}
-		orderIDStr := orderID.String()
 		go func() {
 			if err := email.SendInvoice(
 				context.Background(),
@@ -250,7 +276,55 @@ func (s *OrdersService) CreateOrder(ctx context.Context, req dto.CreateOrderReq)
 		}()
 	}
 
+	// Notify vendor of the new order.
+	go func() {
+		vendorEmail, err := s.getVendorEmail(context.Background(), storeID)
+		if err != nil || vendorEmail == "" {
+			s.log.Warn().Err(err).Str("store_id", storeID.String()).Msg("vendor email lookup failed")
+			return
+		}
+		if err := email.SendVendorAlert(
+			context.Background(),
+			vendorEmail,
+			storeName,
+			orderIDStr,
+			req.CustomerName,
+			req.CustomerEmail,
+			req.CustomerPhone,
+			req.DeliveryAddress,
+			totalKobo,
+			invoiceItems,
+		); err != nil {
+			s.log.Warn().Err(err).Str("order_id", orderIDStr).Msg("vendor alert email failed")
+		}
+	}()
+
 	return s.GetOrder(ctx, storeID, orderID)
+}
+
+// getVendorEmail returns the email of the user who owns the given store.
+func (s *OrdersService) getVendorEmail(ctx context.Context, storeID uuid.UUID) (string, error) {
+	var vendorEmail string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT u.email FROM stores s JOIN users u ON u.id = s.vendor_id WHERE s.id = $1`,
+		storeID,
+	).Scan(&vendorEmail)
+	if err != nil {
+		return "", fmt.Errorf("vendor email lookup: %w", err)
+	}
+	return vendorEmail, nil
+}
+
+// getStoreSlugName returns the slug and display name for a store.
+func (s *OrdersService) getStoreSlugName(ctx context.Context, storeID uuid.UUID) (slug, name string) {
+	_ = s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(slug,''), COALESCE(name,'GoMarketi Store') FROM stores WHERE id = $1`,
+		storeID,
+	).Scan(&slug, &name)
+	if name == "" {
+		name = "GoMarketi Store"
+	}
+	return slug, name
 }
 
 // ── Wallet ────────────────────────────────────────────────────────────────────
@@ -504,10 +578,83 @@ func (s *OrdersService) GetAnalyticsOverview(ctx context.Context, storeID uuid.U
 			COALESCE(SUM(CASE WHEN status != 'cancelled' THEN total_kobo ELSE 0 END), 0),
 			COUNT(*)::int,
 			COUNT(DISTINCT customer_id)::int,
-			COUNT(CASE WHEN status='confirmed' THEN 1 END)::int
+			COUNT(CASE WHEN status='confirmed' THEN 1 END)::int,
+			COALESCE(SUM(discount_kobo), 0)
 		FROM orders WHERE store_id=$1`, storeID).
-		Scan(&resp.TotalRevenueKobo, &resp.TotalOrders, &resp.TotalCustomers, &resp.PendingOrders)
+		Scan(&resp.TotalRevenueKobo, &resp.TotalOrders, &resp.TotalCustomers, &resp.PendingOrders, &resp.TotalDiscountsKobo)
+
+	// Total expenses = sum of all wallet debit transactions
+	_ = s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(amount_kobo), 0) FROM wallet_transactions WHERE store_id=$1 AND type='debit' AND status='completed'`,
+		storeID,
+	).Scan(&resp.TotalExpensesKobo)
+
+	// Storefront visits in the last 30 days
+	_ = s.db.QueryRowContext(ctx,
+		`SELECT COUNT(DISTINCT session_id) FROM storefront_visits WHERE store_id=$1 AND visited_at >= NOW() - INTERVAL '30 days'`,
+		storeID,
+	).Scan(&resp.StorefrontVisits30d)
+
 	return resp, nil
+}
+
+// TrackVisit records a storefront page view. Upserts on (store_id, session_id, page)
+// with a 30-minute window to avoid duplicate counts from refreshes.
+func (s *OrdersService) TrackVisit(ctx context.Context, storeID uuid.UUID, sessionID, page string) {
+	_, _ = s.db.ExecContext(ctx, `
+		INSERT INTO storefront_visits (store_id, session_id, page)
+		VALUES ($1, $2, $3)
+		ON CONFLICT DO NOTHING`, storeID, sessionID, page)
+}
+
+// GetRevenueTrend returns daily revenue for the last `days` days (default 30).
+// Missing days are filled with zero so the chart is always continuous.
+func (s *OrdersService) GetRevenueTrend(ctx context.Context, storeID uuid.UUID, days int) ([]dto.RevenueTrendPoint, error) {
+	if days < 1 || days > 365 {
+		days = 30
+	}
+
+	type row struct {
+		Date        string `db:"date"`
+		RevenueKobo int64  `db:"revenue_kobo"`
+		Orders      int    `db:"orders"`
+	}
+	rows, err := s.db.QueryxContext(ctx, `
+		SELECT
+			TO_CHAR(DATE(created_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS date,
+			COALESCE(SUM(CASE WHEN status != 'cancelled' THEN total_kobo ELSE 0 END), 0) AS revenue_kobo,
+			COUNT(*)::int AS orders
+		FROM orders
+		WHERE store_id = $1
+		  AND created_at >= NOW() - (INTERVAL '1 day' * $2::int)
+		GROUP BY DATE(created_at AT TIME ZONE 'UTC')
+		ORDER BY date ASC`, storeID, days)
+	if err != nil {
+		return nil, fmt.Errorf("revenue trend: %w", err)
+	}
+	defer rows.Close()
+
+	// Index the db rows by date
+	byDate := map[string]dto.RevenueTrendPoint{}
+	for rows.Next() {
+		var r row
+		if err := rows.StructScan(&r); err != nil {
+			continue
+		}
+		byDate[r.Date] = dto.RevenueTrendPoint{Date: r.Date, RevenueKobo: r.RevenueKobo, Orders: r.Orders}
+	}
+
+	// Fill every day in the window so the chart has no gaps
+	out := make([]dto.RevenueTrendPoint, days)
+	for i := range out {
+		d := time.Now().UTC().AddDate(0, 0, -(days-1-i)).Format("2006-01-02")
+		if p, ok := byDate[d]; ok {
+			out[i] = p
+		} else {
+			out[i] = dto.RevenueTrendPoint{Date: d}
+		}
+	}
+	return out, nil
 }
 
 func (s *OrdersService) GetTopProducts(ctx context.Context, storeID uuid.UUID, limit int) ([]dto.TopProductResp, error) {

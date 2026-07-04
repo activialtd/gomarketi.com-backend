@@ -18,8 +18,14 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 		middleware.UserContext(),
 	)
 
-	// Public route — no auth required
+	// Public routes — no auth required
 	pub := r.Group("/v1/catalogue/public")
+	// Query-param routes used by the storefront API client
+	pub.GET("/products", h.ListPublicProductsByQuery)
+	pub.GET("/products/:product_id", h.GetPublicProductByID)
+	pub.GET("/categories", h.ListPublicCategories)
+	pub.GET("/collections", h.ListPublicCollections)
+	// Legacy path-param routes (kept for compatibility)
 	pub.GET("/stores/:store_id/products", h.ListPublicProducts)
 	pub.GET("/stores/:store_id/products/:product_id", h.GetPublicProduct)
 

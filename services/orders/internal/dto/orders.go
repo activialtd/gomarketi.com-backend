@@ -113,11 +113,21 @@ type CustomerListResp struct {
 // AnalyticsOverviewResp is returned by GET /v1/analytics/overview.
 // All monetary values are in kobo to match the absolute rules.
 type AnalyticsOverviewResp struct {
-	TotalRevenueKobo int64 `json:"total_revenue_kobo"`
-	TotalOrders      int32 `json:"total_orders"`
-	TotalCustomers   int32 `json:"total_customers"`
-	PendingOrders    int32 `json:"pending_orders"`
-	LowStockProducts int32 `json:"low_stock_products"`
+	TotalRevenueKobo    int64 `json:"total_revenue_kobo"`
+	TotalOrders         int32 `json:"total_orders"`
+	TotalCustomers      int32 `json:"total_customers"`
+	PendingOrders       int32 `json:"pending_orders"`
+	LowStockProducts    int32 `json:"low_stock_products"`
+	TotalDiscountsKobo  int64 `json:"total_discounts_kobo"`
+	TotalExpensesKobo   int64 `json:"total_expenses_kobo"`
+	StorefrontVisits30d int64 `json:"storefront_visits_30d"`
+}
+
+// RevenueTrendPoint is one day's aggregated revenue for the trend chart.
+type RevenueTrendPoint struct {
+	Date        string `json:"date"`         // "2026-07-03"
+	RevenueKobo int64  `json:"revenue_kobo"`
+	Orders      int    `json:"orders"`
 }
 
 // TopProductResp is a single entry in the top-selling products list,
@@ -159,6 +169,100 @@ type WithdrawReq struct {
 	BankName      string `json:"bank_name"      validate:"required"`
 	AccountNumber string `json:"account_number" validate:"required,len=10"`
 	AccountName   string `json:"account_name"   validate:"required"`
+}
+
+// ── Cart email ────────────────────────────────────────────────────────────────
+
+// CartEmailItem is one line item for SendCartEmailReq.
+type CartEmailItem struct {
+	Name      string `json:"name"       validate:"required"`
+	ImageURL  string `json:"image_url"`
+	Quantity  int32  `json:"quantity"   validate:"required,min=1"`
+	PriceKobo int64  `json:"price_kobo" validate:"min=1"`
+}
+
+// SendCartEmailReq is the body for POST /v1/orders/public/cart-email.
+// Fired when the customer clicks Pay — before payment completes — so they
+// have a copy of what they ordered even if the browser closes mid-flow.
+type SendCartEmailReq struct {
+	Email        string          `json:"email"         validate:"required,email"`
+	CustomerName string          `json:"customer_name" validate:"required"`
+	StoreSlug    string          `json:"store_slug"    validate:"required"`
+	StoreName    string          `json:"store_name"    validate:"required"`
+	Items        []CartEmailItem `json:"items"         validate:"required,min=1,dive"`
+	TotalKobo    int64           `json:"total_kobo"    validate:"min=1"`
+}
+
+// ── Visit tracking ────────────────────────────────────────────────────────────
+
+// TrackVisitReq is the body for POST /v1/orders/public/visit.
+type TrackVisitReq struct {
+	StoreID   string `json:"store_id"   validate:"required,uuid"`
+	SessionID string `json:"session_id" validate:"required"`
+	Page      string `json:"page"`
+}
+
+// ── Newsletter ────────────────────────────────────────────────────────────────
+
+// SubscribeReq is the body for POST /v1/orders/public/subscribe.
+type SubscribeReq struct {
+	StoreID string `json:"store_id" validate:"required,uuid"`
+	Email   string `json:"email"    validate:"required,email"`
+	Name    string `json:"name"`
+}
+
+// SubscriberResp is a single newsletter subscriber.
+type SubscriberResp struct {
+	ID           string  `json:"id"`
+	Email        string  `json:"email"`
+	Name         string  `json:"name"`
+	SubscribedAt string  `json:"subscribed_at"`
+	Unsubscribed bool    `json:"unsubscribed"`
+}
+
+// SubscriberListResp wraps a paginated subscriber list.
+type SubscriberListResp struct {
+	Subscribers []SubscriberResp `json:"subscribers"`
+	Total       int64            `json:"total"`
+	Page        int              `json:"page"`
+	PerPage     int              `json:"per_page"`
+}
+
+// CreateCampaignReq is the body for POST /v1/campaigns.
+type CreateCampaignReq struct {
+	Subject  string `json:"subject"   validate:"required"`
+	BodyHTML string `json:"body_html" validate:"required"`
+}
+
+// CampaignResp is a single email campaign.
+type CampaignResp struct {
+	ID             string  `json:"id"`
+	Subject        string  `json:"subject"`
+	Status         string  `json:"status"`
+	RecipientsCount int    `json:"recipients_count"`
+	CreatedAt      string  `json:"created_at"`
+	SentAt         *string `json:"sent_at,omitempty"`
+}
+
+// CampaignListResp wraps a list of campaigns.
+type CampaignListResp struct {
+	Campaigns []CampaignResp `json:"campaigns"`
+}
+
+// ── Payment gateways ──────────────────────────────────────────────────────────
+
+// PaymentGatewayResp describes one payment method for a store.
+type PaymentGatewayResp struct {
+	Gateway   string         `json:"gateway"`
+	Enabled   bool           `json:"enabled"`
+	Config    map[string]any `json:"config"`
+	UpdatedAt string         `json:"updated_at"`
+}
+
+// UpsertPaymentGatewayReq is the body for PUT /v1/store/payment-gateways/:gateway.
+type UpsertPaymentGatewayReq struct {
+	Enabled bool           `json:"enabled"`
+	Config  map[string]any `json:"config"`
 }
 
 // ── Shared ────────────────────────────────────────────────────────────────────

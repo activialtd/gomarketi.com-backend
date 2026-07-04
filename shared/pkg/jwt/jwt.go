@@ -52,6 +52,11 @@ type Claims struct {
 	// DeviceID identifies the client device for this session. Carried in the
 	// refresh_tokens row so device-specific revocation is possible.
 	DeviceID string `json:"device_id,omitempty"`
+
+	// StaffRole is set only for staff tokens issued by the staff login endpoint.
+	// Possible values: manager, fulfillment, support, analytics_only.
+	// Empty for vendor and buyer tokens.
+	StaffRole string `json:"staff_role,omitempty"`
 }
 
 // Manager issues and validates JWTs using RS256.

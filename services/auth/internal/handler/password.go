@@ -43,3 +43,22 @@ func (h *Handler) Login(c *gin.Context) {
 	h.setRefreshCookie(c, rawToken)
 	c.JSON(http.StatusOK, resp)
 }
+
+// StaffLogin godoc
+// POST /v1/auth/staff/login — separate endpoint for store staff members.
+// Staff tokens include StaffRole claim and StoreIDs set to their single store.
+// No refresh token is issued (staff sessions are short-lived).
+func (h *Handler) StaffLogin(c *gin.Context) {
+	var req dto.LoginReq
+	if !h.bind(c, &req) {
+		return
+	}
+
+	resp, err := h.svc.StaffLogin(c.Request.Context(), req)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
+}

@@ -70,6 +70,28 @@ func (s *Store) QueryStoreIDs(ctx context.Context, userID string) []string {
 	return ids
 }
 
+// StaffRow holds the fields needed for staff login.
+type StaffRow struct {
+	ID           string
+	StoreID      string
+	Email        string
+	Role         string
+	PasswordHash string
+	IsActive     bool
+}
+
+// QueryStaffByEmail looks up a store_staff record by email for login.
+// Returns ErrNoRows if not found (caller should treat as not found).
+func (s *Store) QueryStaffByEmail(ctx context.Context, email string) (StaffRow, error) {
+	var r StaffRow
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id::text, store_id::text, email, role,
+			COALESCE(password_hash, ''), is_active
+		 FROM store_staff WHERE email = $1 LIMIT 1`, email).
+		Scan(&r.ID, &r.StoreID, &r.Email, &r.Role, &r.PasswordHash, &r.IsActive)
+	return r, err
+}
+
 // NormaliseErr converts sql.ErrNoRows to an apperrors.NotFound so the service
 // layer does not need to import database/sql to distinguish not-found cases.
 func NormaliseErr(err error, resourceName string) error {

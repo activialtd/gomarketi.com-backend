@@ -1,45 +1,76 @@
 package handler
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 )
 
-// StreamEvents godoc
-// GET /v1/orders/events
+var wsUpgrader = websocket.Upgrader{
+	HandshakeTimeout: 5 * time.Second,
+	ReadBufferSize:   256,
+	WriteBufferSize:  4096,
+	// CORS is enforced by the gateway — the orders service trusts X-User-ID.
+	CheckOrigin: func(r *http.Request) bool { return true },
+}
+
+// wsMessage is the JSON envelope sent to WebSocket clients.
+type wsMessage struct {
+	Type string          `json:"type"`
+	ID   string          `json:"id"`
+	Data json.RawMessage `json:"data"`
+}
+
+// WsEvents godoc
+// GET /v1/orders/ws
 //
-// Long-lived SSE stream for the vendor dashboard.
+// WebSocket stream for the vendor dashboard.
 // Sends order_created, order_updated, wallet_updated events in real time.
 //
-// Auth: access token passed as ?token= query param (EventSource can't send headers).
-// Replay: send Last-Event-ID header to receive any events missed since disconnect.
-func (h *Handler) StreamEvents(c *gin.Context) {
+// Auth: access token passed as ?token= query param (browser WebSocket cannot send headers).
+// Replay: pass ?last_id= to replay events missed since last disconnect.
+func (h *Handler) WsEvents(c *gin.Context) {
 	storeID, ok := h.callerStoreID(c)
 	if !ok {
 		return
 	}
 
-	lastEventID := c.GetHeader("Last-Event-ID")
+	lastEventID := c.Query("last_id")
 
-	c.Header("Content-Type", "text/event-stream")
-	c.Header("Cache-Control", "no-cache")
-	c.Header("Connection", "keep-alive")
-	c.Header("X-Accel-Buffering", "no") // disable nginx/Railway proxy buffering
+	conn, err := wsUpgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		// Upgrade already wrote the HTTP error response.
+		h.log.Error().Err(err).Msg("ws: upgrade failed")
+		return
+	}
+	defer conn.Close()
 
 	ctx := c.Request.Context()
 	events, unsub := h.broker.Subscribe(ctx, storeID.String(), lastEventID)
 	defer unsub()
 
-	// Initial confirmation with current server timestamp as the event ID.
-	// Client stores this as Last-Event-ID for future reconnects.
-	connID := fmt.Sprintf("%d", time.Now().UnixMilli())
-	fmt.Fprintf(c.Writer, "id: %s\nevent: connected\ndata: {}\n\n", connID)
-	c.Writer.Flush()
+	// Read pump — gorilla requires that reads and writes happen in separate
+	// goroutines. This one drives control-frame handling (pong, close) and
+	// signals when the client has gone away via readDone.
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		conn.SetReadLimit(512)
+		_ = conn.SetReadDeadline(time.Now().Add(70 * time.Second))
+		conn.SetPongHandler(func(string) error {
+			return conn.SetReadDeadline(time.Now().Add(70 * time.Second))
+		})
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
 
-	// Heartbeat: keeps connection alive through proxies that close idle
-	// connections after 30–60s. Does not advance Last-Event-ID.
 	ticker := time.NewTicker(25 * time.Second)
 	defer ticker.Stop()
 
@@ -49,14 +80,23 @@ func (h *Handler) StreamEvents(c *gin.Context) {
 			if !ok {
 				return
 			}
-			// Emit id: so the browser auto-tracks Last-Event-ID for reconnects.
-			fmt.Fprintf(c.Writer, "id: %s\nevent: %s\ndata: %s\n\n", ev.ID, ev.Type, ev.Data)
-			c.Writer.Flush()
+			var raw json.RawMessage
+			if err := json.Unmarshal([]byte(ev.Data), &raw); err != nil {
+				raw = json.RawMessage(fmt.Sprintf("%q", ev.Data))
+			}
+			_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := conn.WriteJSON(wsMessage{Type: ev.Type, ID: ev.ID, Data: raw}); err != nil {
+				return
+			}
 
 		case <-ticker.C:
-			// Heartbeat — no id: so it doesn't shift the client's Last-Event-ID.
-			fmt.Fprintf(c.Writer, ": heartbeat\n\n")
-			c.Writer.Flush()
+			_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
+
+		case <-readDone:
+			return
 
 		case <-ctx.Done():
 			return

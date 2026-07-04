@@ -94,8 +94,10 @@ func run(log zerolog.Logger) error {
 				return
 			}
 
-			// EventSource API cannot send headers — accept token as query param for SSE.
-			if r.Header.Get("Accept") == "text/event-stream" && r.Header.Get("Authorization") == "" {
+			// WebSocket and EventSource cannot send custom headers — accept token
+			// as ?token= query param and promote it to Authorization before auth.
+			isWS := strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
+			if isWS && r.Header.Get("Authorization") == "" {
 				if tok := r.URL.Query().Get("token"); tok != "" {
 					r.Header.Set("Authorization", "Bearer "+tok)
 				}
@@ -125,12 +127,6 @@ func run(log zerolog.Logger) error {
 				}
 			}
 
-			// For SSE connections, clear the write deadline — they stay open indefinitely.
-			if r.Header.Get("Accept") == "text/event-stream" {
-				if rc := http.NewResponseController(w); rc != nil {
-					_ = rc.SetWriteDeadline(time.Time{})
-				}
-			}
 			proxy.ServeHTTP(w, r)
 		}
 
@@ -441,6 +437,10 @@ func newProxy(target string, log zerolog.Logger) *httputil.ReverseProxy {
 	targetURL, _ := url.ParseRequestURI(target)
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
 
+	// Flush every write immediately so SSE events and other streamed responses
+	// reach the client without buffering. -1 means "flush after each write."
+	proxy.FlushInterval = -1
+
 	// Wrap the default transport with retry-on-transient-error logic.
 	// Handles EOF / connection-reset that occur when an upstream service
 	// restarts or when Neon's serverless DB wakes from idle.
@@ -544,7 +544,7 @@ func setCORS(w http.ResponseWriter, r *http.Request, allowed []string) {
 		return
 	}
 	for _, o := range allowed {
-		if strings.TrimSpace(o) == origin {
+		if originMatches(strings.TrimSpace(o), origin) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
@@ -553,6 +553,26 @@ func setCORS(w http.ResponseWriter, r *http.Request, allowed []string) {
 			return
 		}
 	}
+}
+
+// originMatches returns true if origin matches pattern exactly, or if pattern
+// uses a leading "*." wildcard (e.g. "http://*.localhost:3001" matches
+// "http://cobi.localhost:3001"). Only a single wildcard at the start of the
+// host is supported — this covers the store-subdomain local dev case.
+func originMatches(pattern, origin string) bool {
+	if pattern == origin {
+		return true
+	}
+	// Pattern: http://*.example.com:PORT or https://*.example.com
+	const wildcard = "*."
+	i := strings.Index(pattern, "://"+wildcard)
+	if i < 0 {
+		return false
+	}
+	// scheme must match exactly
+	scheme := pattern[:i]
+	suffix := pattern[i+3+len(wildcard)-1:] // everything from "." onward → ".example.com:PORT"
+	return strings.HasPrefix(origin, scheme+"://") && strings.HasSuffix(origin, suffix)
 }
 
 func getenv(key, fallback string) string {

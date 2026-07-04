@@ -10,6 +10,51 @@ import (
 	"github.com/activialtd/gomarketi.com-backend/services/catalogue/internal/dto"
 )
 
+// ListPublicProductsByQuery godoc
+// GET /v1/catalogue/public/products?store_id=&page=1&per_page=24&category_id=&q=
+// Storefront-facing: store_id comes from a query param instead of the path.
+func (h *Handler) ListPublicProductsByQuery(c *gin.Context) {
+	storeID, err := uuid.Parse(c.Query("store_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.ErrorResp{Error: "store_id query param is required"})
+		return
+	}
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "24"))
+
+	var catID *string
+	if v := c.Query("category_id"); v != "" {
+		catID = &v
+	}
+	var q *string
+	if v := c.Query("q"); v != "" {
+		q = &v
+	}
+
+	resp, err := h.svc.ListProducts(c.Request.Context(), storeID, page, perPage, catID, q, true)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+// GetPublicProductByID godoc
+// GET /v1/catalogue/public/products/:product_id — no auth, published only, no store_id in path
+func (h *Handler) GetPublicProductByID(c *gin.Context) {
+	productID, err := uuid.Parse(c.Param("product_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.ErrorResp{Error: "invalid product_id"})
+		return
+	}
+	resp, err := h.svc.GetPublicProductByID(c.Request.Context(), productID)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
 // GetPublicProduct godoc
 // GET /v1/catalogue/public/stores/:store_id/products/:product_id — no auth, published only
 func (h *Handler) GetPublicProduct(c *gin.Context) {

@@ -4,9 +4,26 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/activialtd/gomarketi.com-backend/services/catalogue/internal/dto"
 )
+
+// ListPublicCollections godoc
+// GET /v1/catalogue/public/collections?store_id= — no auth
+func (h *Handler) ListPublicCollections(c *gin.Context) {
+	storeID, err := uuid.Parse(c.Query("store_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.ErrorResp{Error: "store_id query param is required"})
+		return
+	}
+	resp, err := h.svc.ListCollections(c.Request.Context(), storeID)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, resp)
+}
 
 // GET /v1/catalogue/collections
 func (h *Handler) ListCollections(c *gin.Context) {

@@ -1,12 +1,14 @@
 package handler
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/dto"
+	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/email"
 )
 
 // ListOrders godoc
@@ -132,6 +134,44 @@ func (h *Handler) CreateOrder(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, resp)
+}
+
+// SendCartInvoice godoc
+// POST /v1/orders/public/cart-email — no auth.
+// Fires immediately when the customer clicks Pay (before Paystack opens).
+// Sends a cart summary email so the customer has a record even if they abandon.
+func (h *Handler) SendCartInvoice(c *gin.Context) {
+	var req dto.SendCartEmailReq
+	if !h.bind(c, &req) {
+		return
+	}
+
+	items := make([]email.InvoiceItem, len(req.Items))
+	for i, it := range req.Items {
+		items[i] = email.InvoiceItem{
+			Name:      it.Name,
+			ImageURL:  it.ImageURL,
+			Quantity:  int(it.Quantity),
+			PriceKobo: it.PriceKobo,
+		}
+	}
+
+	// Fire async — never block the checkout flow on email delivery.
+	go func() {
+		if err := email.SendCartSummary(
+			context.Background(),
+			req.Email,
+			req.CustomerName,
+			req.StoreSlug,
+			req.StoreName,
+			req.TotalKobo,
+			items,
+		); err != nil {
+			h.log.Warn().Err(err).Str("email", req.Email).Msg("cart summary email failed")
+		}
+	}()
+
+	c.JSON(http.StatusAccepted, gin.H{"ok": true})
 }
 
 // ListAbandonedCarts godoc

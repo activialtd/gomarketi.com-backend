@@ -20,13 +20,43 @@ import (
 	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/dto"
 )
 
-const (
-	supabaseEndpoint   = "https://bbwhtjkuulnumskupeul.storage.supabase.co/storage/v1/s3"
-	supabaseRegion     = "eu-west-1"
-	supabaseBucket     = "gomarket-storefronts"
-	supabasePublicBase = "https://bbwhtjkuulnumskupeul.supabase.co/storage/v1/object/public/gomarket-storefronts"
-	maxUploadSize      = 5 << 20 // 5 MB
-)
+const maxUploadSize = 5 << 20 // 5 MB
+
+// supabaseS3Config reads Supabase Storage config from environment variables.
+// Required: SUPABASE_S3_ENDPOINT, SUPABASE_S3_BUCKET, SUPABASE_S3_ACCESS_KEY_ID, SUPABASE_S3_SECRET_ACCESS_KEY
+// Optional: SUPABASE_S3_REGION (defaults to "eu-west-1"), SUPABASE_PUBLIC_URL
+func supabaseS3Config() (endpoint, region, bucket, publicBase, accessKey, secretKey string, ok bool) {
+	endpoint   = os.Getenv("SUPABASE_S3_ENDPOINT")
+	region     = os.Getenv("SUPABASE_S3_REGION")
+	bucket     = os.Getenv("SUPABASE_S3_BUCKET")
+	publicBase = strings.TrimRight(os.Getenv("SUPABASE_PUBLIC_URL"), "/")
+	accessKey  = os.Getenv("SUPABASE_S3_ACCESS_KEY_ID")
+	secretKey  = os.Getenv("SUPABASE_S3_SECRET_ACCESS_KEY")
+	if region == "" {
+		region = "eu-west-1"
+	}
+	ok = endpoint != "" && bucket != "" && accessKey != "" && secretKey != ""
+	return
+}
+
+// newSupabaseClient builds an S3-compatible client pointed at Supabase Storage.
+func newSupabaseClient(ctx context.Context, endpoint, region, accessKey, secretKey string) (*s3.Client, error) {
+	cfg, err := config.LoadDefaultConfig(ctx,
+		config.WithRegion(region),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(accessKey, secretKey, "")),
+		config.WithEndpointResolverWithOptions(aws.EndpointResolverWithOptionsFunc(
+			func(service, region string, options ...interface{}) (aws.Endpoint, error) {
+				return aws.Endpoint{URL: endpoint, HostnameImmutable: true}, nil
+			},
+		)),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("aws config: %w", err)
+	}
+	return s3.NewFromConfig(cfg, func(o *s3.Options) {
+		o.UsePathStyle = true // Supabase requires path-style URLs
+	}), nil
+}
 
 // UploadStoreAsset godoc
 // POST /v1/storefront/stores/upload
@@ -91,84 +121,45 @@ func (h *Handler) UploadStoreAsset(c *gin.Context) {
 	// Path: {storeID}/{type}/{timestamp}{ext}
 	key := fmt.Sprintf("%s/%s/%d%s", store.ID, assetType, time.Now().UnixMilli(), ext)
 
-	if err := uploadToSupabase(c.Request.Context(), key, contentType, f, fh.Size); err != nil {
+	publicURL, err := uploadToSupabase(c.Request.Context(), key, contentType, f, fh.Size)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.ErrorResp{Error: "upload failed: " + err.Error()})
 		return
 	}
 
-	publicURL := supabasePublicBase + "/" + key
 	c.JSON(http.StatusOK, gin.H{"url": publicURL, "type": assetType})
 }
 
-func uploadToSupabase(ctx context.Context, key, contentType string, body io.Reader, size int64) error {
-	accessKeyID := envOrDefault("SUPABASE_S3_ACCESS_KEY_ID", "2002cd992364cde93f00389dc99fd422")
-	secretKey := envOrDefault("SUPABASE_S3_SECRET_ACCESS_KEY", "c4325e5c4d1ab55ea1dbdb0310a2a4ee66be0269d4bba06274af6aca27198d32")
-
-	cfg, err := config.LoadDefaultConfig(ctx,
-		config.WithRegion(supabaseRegion),
-		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(accessKeyID, secretKey, "")),
-		config.WithEndpointResolverWithOptions(aws.EndpointResolverWithOptionsFunc(
-			func(service, region string, options ...interface{}) (aws.Endpoint, error) {
-				return aws.Endpoint{URL: supabaseEndpoint, HostnameImmutable: true}, nil
-			},
-		)),
-	)
-	if err != nil {
-		return fmt.Errorf("aws config: %w", err)
+func uploadToSupabase(ctx context.Context, key, contentType string, body io.Reader, size int64) (string, error) {
+	endpoint, region, bucket, publicBase, accessKey, secretKey, ok := supabaseS3Config()
+	if !ok {
+		return "", fmt.Errorf("storage not configured: set SUPABASE_S3_ENDPOINT, SUPABASE_S3_BUCKET, SUPABASE_S3_ACCESS_KEY_ID, SUPABASE_S3_SECRET_ACCESS_KEY")
 	}
 
-	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
-		o.UsePathStyle = true // Supabase requires path-style URLs
-	})
+	client, err := newSupabaseClient(ctx, endpoint, region, accessKey, secretKey)
+	if err != nil {
+		return "", err
+	}
 
-	_, err = client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:        aws.String(supabaseBucket),
+	if _, err = client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:        aws.String(bucket),
 		Key:           aws.String(key),
 		Body:          body,
 		ContentType:   aws.String(contentType),
 		ContentLength: aws.Int64(size),
 		CacheControl:  aws.String("public, max-age=31536000"),
-	})
-	return err
-}
-
-func envOrDefault(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
-}
-
-// r2Client returns an S3-compatible client pointed at Cloudflare R2.
-// Returns nil if R2 is not configured (optional in dev).
-func r2Client() *s3.Client {
-	accountID := os.Getenv("R2_ACCOUNT_ID")
-	accessKey := os.Getenv("R2_ACCESS_KEY_ID")
-	secretKey := os.Getenv("R2_SECRET_ACCESS_KEY")
-	if accountID == "" || accessKey == "" || secretKey == "" {
-		return nil
-	}
-	endpoint := fmt.Sprintf("https://%s.r2.cloudflarestorage.com", accountID)
-
-	cfg, err := config.LoadDefaultConfig(context.Background(),
-		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(accessKey, secretKey, "")),
-		config.WithRegion("auto"),
-	)
-	if err != nil {
-		return nil
+	}); err != nil {
+		return "", err
 	}
 
-	return s3.NewFromConfig(cfg, func(o *s3.Options) {
-		o.BaseEndpoint = aws.String(endpoint)
-		o.UsePathStyle = true
-	})
+	return publicBase + "/" + key, nil
 }
 
 // PresignUpload godoc
 // POST /v1/storefront/uploads/presign
-// Returns a presigned PUT URL so the client can upload directly to R2.
+// Returns a presigned PUT URL so the client can upload directly to Supabase Storage.
 func (h *Handler) PresignUpload(c *gin.Context) {
-	_, ok := h.callerID(c) // requires authenticated user
+	userID, ok := h.callerID(c)
 	if !ok {
 		return
 	}
@@ -178,34 +169,28 @@ func (h *Handler) PresignUpload(c *gin.Context) {
 		return
 	}
 
-	bucket := os.Getenv("R2_BUCKET")
-	publicURL := strings.TrimRight(os.Getenv("R2_PUBLIC_URL"), "/")
-
-	if bucket == "" || publicURL == "" {
+	endpoint, region, bucket, publicBase, accessKey, secretKey, configured := supabaseS3Config()
+	if !configured {
 		c.JSON(http.StatusServiceUnavailable, dto.ErrorResp{Error: "file storage not configured"})
 		return
 	}
 
-	client := r2Client()
-	if client == nil {
-		c.JSON(http.StatusServiceUnavailable, dto.ErrorResp{Error: "file storage not configured"})
+	client, err := newSupabaseClient(c.Request.Context(), endpoint, region, accessKey, secretKey)
+	if err != nil {
+		h.writeError(c, err)
 		return
 	}
 
-	// Build a store-scoped key for multi-tenant isolation
 	purpose := req.Purpose
 	if purpose == "" {
 		purpose = "files"
 	}
 	ext := filepath.Ext(req.Filename)
 
-	// Look up the vendor's store to namespace uploads correctly
-	userID, ok := h.callerID(c)
-	if !ok {
-		return
-	}
 	var storeID string
-	_ = h.svc.DB().QueryRowContext(context.Background(), `SELECT id FROM stores WHERE vendor_id=$1 AND is_active=TRUE LIMIT 1`, userID).Scan(&storeID)
+	_ = h.svc.DB().QueryRowContext(c.Request.Context(),
+		`SELECT id FROM stores WHERE vendor_id=$1 AND is_active=TRUE LIMIT 1`, userID,
+	).Scan(&storeID)
 
 	var key string
 	if storeID != "" {
@@ -215,12 +200,11 @@ func (h *Handler) PresignUpload(c *gin.Context) {
 	}
 
 	presigner := s3.NewPresignClient(client)
-	presigned, err := presigner.PresignPutObject(context.Background(),
+	presigned, err := presigner.PresignPutObject(c.Request.Context(),
 		&s3.PutObjectInput{
-			Bucket:        aws.String(bucket),
-			Key:           aws.String(key),
-			ContentType:   aws.String(req.ContentType),
-			ContentLength: aws.Int64(req.Size),
+			Bucket:      aws.String(bucket),
+			Key:         aws.String(key),
+			ContentType: aws.String(req.ContentType),
 		},
 		s3.WithPresignExpires(15*time.Minute),
 	)
@@ -231,7 +215,7 @@ func (h *Handler) PresignUpload(c *gin.Context) {
 
 	c.JSON(http.StatusOK, dto.PresignUploadResp{
 		UploadURL: presigned.URL,
-		PublicURL: fmt.Sprintf("%s/%s", publicURL, key),
+		PublicURL: fmt.Sprintf("%s/%s", publicBase, key),
 		Key:       key,
 		ExpiresIn: 900,
 	})

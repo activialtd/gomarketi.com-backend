@@ -100,6 +100,23 @@ func (s *CatalogueService) CreateProduct(ctx context.Context, storeID uuid.UUID,
 	return rowToProduct(r), nil
 }
 
+// GetPublicProductByID returns a product by ID alone — only if it is published.
+// Used by the storefront API which has no store_id in the path.
+func (s *CatalogueService) GetPublicProductByID(ctx context.Context, productID uuid.UUID) (dto.ProductResp, error) {
+	var r productRow
+	err := s.db.QueryRowxContext(ctx, `
+		SELECT id, store_id, name, description, category_id, price_kobo, stock, sku,
+		       images, tags, is_digital, is_published, created_at, updated_at
+		FROM products WHERE id=$1 AND is_published=TRUE`, productID).StructScan(&r)
+	if errors.Is(err, sql.ErrNoRows) {
+		return dto.ProductResp{}, apperrors.NotFound("product not found")
+	}
+	if err != nil {
+		return dto.ProductResp{}, fmt.Errorf("get public product: %w", err)
+	}
+	return rowToProduct(r), nil
+}
+
 func (s *CatalogueService) GetProduct(ctx context.Context, storeID uuid.UUID, productID uuid.UUID) (dto.ProductResp, error) {
 	var r productRow
 	err := s.db.QueryRowxContext(ctx, `

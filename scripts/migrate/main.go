@@ -21,7 +21,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/lib/pq"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 const (
@@ -45,7 +45,7 @@ func main() {
 		log.Fatal("DATABASE_URL is not set — export it or add it to .env")
 	}
 
-	db, err := sql.Open("postgres", dsn)
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		log.Fatalf("opening connection: %v", err)
 	}

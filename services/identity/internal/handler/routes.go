@@ -51,5 +51,12 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 		vendor.GET("/banks", h.ListVendorBanks)
 		vendor.POST("/banks/:id/set-primary", h.SetPrimaryVendorBank)
 		vendor.DELETE("/banks/:id", h.DeleteVendorBank)
+
+		// Staff management (owner/manager only — role gate is enforced by the frontend)
+		staff := v1.Group("/vendor/staff")
+		staff.GET("", h.ListStaff)
+		staff.POST("", h.CreateStaff)
+		staff.PATCH("/:id", h.UpdateStaff)
+		staff.DELETE("/:id", h.DeleteStaff)
 	}
 }

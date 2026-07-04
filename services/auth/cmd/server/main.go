@@ -125,7 +125,7 @@ func run(log zerolog.Logger) error {
 			return fmt.Errorf("mailgun client: %w", err)
 		}
 		log.Info().Msg("using Mailgun emailer")
-	default:
+	case viper.GetString("SMTP_HOST") != "":
 		emailer, err = email.NewSMTPClient(email.SMTPConfig{
 			Host:     viper.GetString("SMTP_HOST"),
 			Port:     viper.GetString("SMTP_PORT"),
@@ -137,6 +137,10 @@ func run(log zerolog.Logger) error {
 			return fmt.Errorf("smtp client: %w", err)
 		}
 		log.Info().Str("host", viper.GetString("SMTP_HOST")).Msg("using SMTP emailer")
+	default:
+		// No email provider configured — print OTP to stdout for local dev.
+		emailer = email.NewConsoleEmailer(log)
+		log.Warn().Msg("no email provider configured — OTP codes will be printed to the terminal (dev mode only)")
 	}
 
 	// ── OAuth verifiers ───────────────────────────────────────────────────────

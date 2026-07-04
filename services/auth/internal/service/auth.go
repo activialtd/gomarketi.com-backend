@@ -567,6 +567,46 @@ func (s *AuthService) issueRefreshToken(
 	return raw, nil
 }
 
+// StaffLogin authenticates a store staff member with email + password.
+// Issues a JWT with StoreIDs set to the staff's store and StaffRole populated.
+func (s *AuthService) StaffLogin(ctx context.Context, req dto.LoginReq) (dto.AuthResp, error) {
+	staff, err := s.store.QueryStaffByEmail(ctx, req.Email)
+	if err != nil {
+		return dto.AuthResp{}, apperrors.Unauthorized("invalid email or password")
+	}
+	if !staff.IsActive {
+		return dto.AuthResp{}, apperrors.Unauthorized("this staff account has been disabled")
+	}
+	if staff.PasswordHash == "" {
+		return dto.AuthResp{}, apperrors.BadRequest("password not set for this staff account — contact your store owner")
+	}
+	if err = bcrypt.CompareHashAndPassword([]byte(staff.PasswordHash), []byte(req.Password)); err != nil {
+		return dto.AuthResp{}, apperrors.Unauthorized("invalid email or password")
+	}
+
+	claims := sharedjwt.Claims{
+		IsBuyer:   false,
+		IsVendor:  false,
+		StoreIDs:  []string{staff.StoreID},
+		StaffRole: staff.Role,
+	}
+	accessToken, err := s.jwt.IssueAccessToken(staff.ID, claims)
+	if err != nil {
+		return dto.AuthResp{}, apperrors.Internal(fmt.Errorf("issue staff token: %w", err))
+	}
+
+	email := staff.Email
+	return dto.AuthResp{
+		AccessToken: accessToken,
+		User: dto.UserDTO{
+			ID:      staff.ID,
+			Email:   &email,
+			IsBuyer: false,
+			IsVendor: false,
+		},
+	}, nil
+}
+
 func (s *AuthService) issueAccessToken(ctx context.Context, user db.User, isBuyer, isVendor bool) (string, error) {
 	// Embed store IDs so the gateway reads them directly from the JWT claim —
 	// no storefront HTTP lookup needed for users who already have a store.

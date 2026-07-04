@@ -11,7 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jmoiron/sqlx"
-	_ "github.com/lib/pq"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/rs/zerolog"
 	"github.com/spf13/viper"
 
@@ -96,7 +96,7 @@ func run(log zerolog.Logger) error {
 }
 
 func connectDB(dsn string, log zerolog.Logger) (*sqlx.DB, error) {
-	db, err := sqlx.Open("postgres", dsn)
+	db, err := sqlx.Open("pgx", dsn)
 	if err != nil {
 		return nil, err
 	}

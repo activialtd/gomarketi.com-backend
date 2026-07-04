@@ -53,7 +53,7 @@ func Migrate(ctx context.Context, db *sqlx.DB) error {
 			return fmt.Errorf("apply %s: %w", name, err)
 		}
 
-		if _, err := db.ExecContext(ctx, `INSERT INTO _migrations (name) VALUES ($1)`, name); err != nil {
+		if _, err := db.ExecContext(ctx, `INSERT INTO _migrations (name) VALUES ($1) ON CONFLICT (name) DO NOTHING`, name); err != nil {
 			return fmt.Errorf("record %s: %w", name, err)
 		}
 	}
