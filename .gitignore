@@ -28,10 +28,14 @@ bin/
 # Ignore compiled binaries named "server" at repo root or one level deep,
 # but NOT cmd/server source directories (which are Go package entry points)
 /server
+services/gateway/server
 scripts/migrate/migrate
 *.test
 coverage.out
 coverage.html
+
+# ── Local-only scripts with embedded credentials — never commit ──────────────
+scripts/seed-cobi/
 
 # ── macOS ─────────────────────────────────────────────────────────────────────
 .DS_Store
