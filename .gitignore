@@ -78,9 +78,13 @@ logs/
 **/.terraform/
 *.tfstate
 *.tfstate.backup
+*.tfplan
 *.tfvars
 !*.tfvars.example
-.terraform.lock.hcl
+# infrastructure/terraform/environments/*.tfvars hold only non-secret
+# metadata (environment name, region, CLI profile) — safe and necessary to
+# commit for reproducibility. Real secrets live in SSM Parameter Store.
+!infrastructure/terraform/environments/*.tfvars
 .vercel
 
 # ── Railway env files — contain real secrets, never commit ────────────────────

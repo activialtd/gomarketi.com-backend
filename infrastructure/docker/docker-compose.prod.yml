@@ -1,0 +1,156 @@
+# Runs on the single EC2 instance (see infrastructure/terraform/ec2.tf).
+# Variables in ${...} come from /opt/gomarketi/.env (written by Terraform
+# user_data at first boot, environment-specific constants only — never
+# secrets). Per-service secrets come from ./env/<service>.env (written by
+# fetch-env.sh from SSM Parameter Store at deploy time).
+#
+# Usage on the instance:
+#   cd /opt/gomarketi && ./fetch-env.sh && docker compose -f docker-compose.prod.yml up -d
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+    networks: [gomarketi]
+    depends_on: [gateway]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    networks: [gomarketi]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  auth:
+    image: ${ECR_REGISTRY}/gomarketi-auth:${IMAGE_TAG:-initial}
+    restart: unless-stopped
+    env_file: [./env/auth.env]
+    environment:
+      PORT: "8080"
+      ENV: ${ENVIRONMENT}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS}
+      JWT_ACCESS_TTL_SECONDS: "900"
+      JWT_REFRESH_TTL_SECONDS: "2592000"
+      BREVO_FROM: "noreply@gomarketi.com"
+      BREVO_FROM_NAME: "GoMarketi"
+    networks: [gomarketi]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  identity:
+    image: ${ECR_REGISTRY}/gomarketi-identity:${IMAGE_TAG:-initial}
+    restart: unless-stopped
+    env_file: [./env/identity.env]
+    environment:
+      PORT: "8081"
+      ENV: ${ENVIRONMENT}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS}
+      SMILE_ID_SANDBOX: ${SMILE_ID_SANDBOX:-true}
+    networks: [gomarketi]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  storefront:
+    image: ${ECR_REGISTRY}/gomarketi-storefront:${IMAGE_TAG:-initial}
+    restart: unless-stopped
+    env_file: [./env/storefront.env]
+    environment:
+      PORT: "8082"
+      ENV: ${ENVIRONMENT}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS}
+      STORE_DOMAIN: "gomarketi.com"
+    networks: [gomarketi]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8082/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  catalogue:
+    image: ${ECR_REGISTRY}/gomarketi-catalogue:${IMAGE_TAG:-initial}
+    restart: unless-stopped
+    env_file: [./env/catalogue.env]
+    environment:
+      PORT: "8083"
+      ENV: ${ENVIRONMENT}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS}
+    networks: [gomarketi]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8083/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  orders:
+    image: ${ECR_REGISTRY}/gomarketi-orders:${IMAGE_TAG:-initial}
+    restart: unless-stopped
+    env_file: [./env/orders.env]
+    environment:
+      PORT: "8084"
+      ENV: ${ENVIRONMENT}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS}
+    networks: [gomarketi]
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8084/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  gateway:
+    image: ${ECR_REGISTRY}/gomarketi-gateway:${IMAGE_TAG:-initial}
+    restart: unless-stopped
+    env_file: [./env/gateway.env]
+    environment:
+      PORT: "8080"
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS}
+      UPSTREAM_AUTH: "http://auth:8080"
+      UPSTREAM_STOREFRONT: "http://storefront:8082"
+      UPSTREAM_IDENTITY: "http://identity:8081"
+      UPSTREAM_CATALOGUE: "http://catalogue:8083"
+      UPSTREAM_ORDERS: "http://orders:8084"
+    networks: [gomarketi]
+    depends_on:
+      auth: { condition: service_healthy }
+      storefront: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+networks:
+  gomarketi:
+
+volumes:
+  redis_data:
+  caddy_data:
+  caddy_config:

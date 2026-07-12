@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# First-boot setup only (cloud-init runs this once). Ongoing deploys use
+# /opt/gomarketi/deploy.sh via SSM Run Command, not this script.
+set -euo pipefail
+
+# ── Swap: 1GB RAM is tight for 6 Go services + Redis + Caddy under load ──────
+if [ ! -f /swapfile ]; then
+  fallocate -l 2G /swapfile
+  chmod 600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+  echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+
+# ── Docker + Compose plugin ───────────────────────────────────────────────────
+dnf install -y docker
+systemctl enable --now docker
+
+mkdir -p /usr/local/lib/docker/cli-plugins
+COMPOSE_VERSION="v2.29.7"
+curl -SL "https://github.com/docker/compose/releases/download/$${COMPOSE_VERSION}/docker-compose-linux-x86_64" \
+  -o /usr/local/lib/docker/cli-plugins/docker-compose
+chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+
+command -v aws >/dev/null 2>&1 || dnf install -y awscli
+
+# ── Application files ──────────────────────────────────────────────────────────
+mkdir -p /opt/gomarketi
+cd /opt/gomarketi
+
+cat > docker-compose.prod.yml <<'COMPOSE_EOF'
+${docker_compose}
+COMPOSE_EOF
+
+cat > Caddyfile <<'CADDY_EOF'
+${caddyfile}
+CADDY_EOF
+
+cat > fetch-env.sh <<'FETCHENV_EOF'
+${fetch_env_sh}
+FETCHENV_EOF
+chmod +x fetch-env.sh
+
+cat > .env <<ENV_EOF
+GOMARKETI_ENV=${environment}
+ENVIRONMENT=${environment}
+AWS_REGION=${region}
+ECR_REGISTRY=${ecr_registry}
+IMAGE_TAG=initial
+ALLOWED_ORIGINS=https://gomarketi.com,https://www.gomarketi.com
+SMILE_ID_SANDBOX=%{ if environment == "production" }false%{ else }true%{ endif }
+SITE_ADDRESS=:80
+ENV_EOF
+
+cat > deploy.sh <<'DEPLOY_EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cd /opt/gomarketi
+set -a
+source .env
+set +a
+aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+./fetch-env.sh
+docker compose -f docker-compose.prod.yml pull
+docker compose -f docker-compose.prod.yml up -d --remove-orphans
+DEPLOY_EOF
+chmod +x deploy.sh
+
+# ── systemd unit: stack self-heals on instance reboot ─────────────────────────
+cat > /etc/systemd/system/gomarketi.service <<'UNIT_EOF'
+[Unit]
+Description=GoMarketi Docker Compose stack
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/gomarketi
+ExecStart=/opt/gomarketi/deploy.sh
+
+[Install]
+WantedBy=multi-user.target
+UNIT_EOF
+
+systemctl daemon-reload
+systemctl enable gomarketi.service
+systemctl start gomarketi.service
