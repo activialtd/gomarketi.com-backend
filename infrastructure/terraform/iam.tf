@@ -36,7 +36,7 @@ data "aws_iam_policy_document" "instance_extra" {
       "ecr:GetDownloadUrlForLayer",
       "ecr:BatchCheckLayerAvailability",
     ]
-    resources = [for r in aws_ecr_repository.services : r.arn]
+    resources = [for r in data.aws_ecr_repository.services : r.arn]
   }
 
   statement {

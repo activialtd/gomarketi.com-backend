@@ -1,7 +1,7 @@
 locals {
   name_prefix = "gomarketi-${var.environment}"
 
-  ecr_repo_urls = { for k, repo in aws_ecr_repository.services : k => repo.repository_url }
+  ecr_repo_urls = { for k, repo in data.aws_ecr_repository.services : k => repo.repository_url }
 
   # SSM parameter keys expected per service (gomarketi/<env>/<service>/<KEY>)
   # — operators populate the actual values manually (see README.md).

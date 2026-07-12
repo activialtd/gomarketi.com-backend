@@ -14,6 +14,11 @@ reverse-proxies to `gateway`. Redis never leaves the instance's internal
 Docker network. No SSH — shell access via SSM Session Manager, deploys via
 SSM Run Command.
 
+ECR repositories are account-global (not per-environment) — the same
+image tag gets promoted from staging to production rather than rebuilding
+per environment — so they live in their own Terraform state
+(`shared/`), not the staging/production root module.
+
 ## One-time setup (already done)
 
 - IAM user `terraform-gomarketi`, policy `gomarketi-terraform-policy` (EC2 +
@@ -21,6 +26,13 @@ SSM Run Command.
   `gomarketi-terraform`.
 - State backend: S3 bucket `gomarketi-terraform-state-336617737576` +
   DynamoDB table `gomarketi-terraform-lock` (via `bootstrap/`).
+- Shared ECR repos (via `shared/`, state key `shared/terraform.tfstate`):
+
+  ```bash
+  cd infrastructure/terraform/shared
+  terraform init -backend-config=../environments/shared-state.backend.hcl
+  terraform apply
+  ```
 
 ## Usage
 
