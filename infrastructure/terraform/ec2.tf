@@ -20,6 +20,11 @@ resource "aws_instance" "main" {
   vpc_security_group_ids = [aws_security_group.instance.id]
   iam_instance_profile   = aws_iam_instance_profile.instance.name
 
+  # user_data only runs on first boot — force a clean instance replacement
+  # whenever it changes, rather than silently updating the stored attribute
+  # without re-running it.
+  user_data_replace_on_change = true
+
   root_block_device {
     volume_size = var.root_volume_size_gb
     volume_type = "gp3"

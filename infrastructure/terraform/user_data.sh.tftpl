@@ -3,6 +3,11 @@
 # /opt/gomarketi/deploy.sh via SSM Run Command, not this script.
 set -euo pipefail
 
+# ── SSM Agent: shell access + CI deploys depend on this being registered ─────
+# Pre-installed on Amazon Linux 2023, but enable/start explicitly as a
+# defensive no-op in case a given AMI variant doesn't have it running yet.
+systemctl enable --now amazon-ssm-agent || (dnf install -y amazon-ssm-agent && systemctl enable --now amazon-ssm-agent)
+
 # ── Swap: 1GB RAM is tight for 6 Go services + Redis + Caddy under load ──────
 if [ ! -f /swapfile ]; then
   fallocate -l 2G /swapfile
@@ -73,12 +78,16 @@ Description=GoMarketi Docker Compose stack
 After=docker.service network-online.target
 Requires=docker.service
 Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=10
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/opt/gomarketi
 ExecStart=/opt/gomarketi/deploy.sh
+Restart=on-failure
+RestartSec=15
 
 [Install]
 WantedBy=multi-user.target
