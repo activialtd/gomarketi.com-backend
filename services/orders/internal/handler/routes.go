@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"net/http"
+
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog"
 
@@ -10,6 +12,12 @@ import (
 // Register mounts all orders, CRM, and analytics routes onto r.
 // All routes require an authenticated vendor with at least one store (injected by Envoy).
 func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []string) {
+	// Health check — load balancer target group probe. Registered before any
+	// middleware so it never depends on CORS/auth/recovery being healthy.
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+
 	r.Use(
 		middleware.Recovery(log),
 		middleware.RequestID(),
