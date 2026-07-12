@@ -4,6 +4,10 @@
 # secrets). Per-service secrets come from ./env/<service>.env (written by
 # fetch-env.sh from SSM Parameter Store at deploy time).
 #
+# Each service has its own IMAGE_TAG_<SERVICE> var (not one shared
+# IMAGE_TAG) so CI can bump and redeploy a single service without needing
+# every other service's image pushed under the same tag.
+#
 # Usage on the instance:
 #   cd /opt/gomarketi && ./fetch-env.sh && docker compose -f docker-compose.prod.yml up -d
 
@@ -36,7 +40,7 @@ services:
       retries: 5
 
   auth:
-    image: ${ECR_REGISTRY}/gomarketi-auth:${IMAGE_TAG:-initial}
+    image: ${ECR_REGISTRY}/gomarketi-auth:${IMAGE_TAG_AUTH:-initial}
     restart: unless-stopped
     env_file: [./env/auth.env]
     environment:
@@ -56,7 +60,7 @@ services:
       start_period: 10s
 
   identity:
-    image: ${ECR_REGISTRY}/gomarketi-identity:${IMAGE_TAG:-initial}
+    image: ${ECR_REGISTRY}/gomarketi-identity:${IMAGE_TAG_IDENTITY:-initial}
     restart: unless-stopped
     env_file: [./env/identity.env]
     environment:
@@ -73,7 +77,7 @@ services:
       start_period: 10s
 
   storefront:
-    image: ${ECR_REGISTRY}/gomarketi-storefront:${IMAGE_TAG:-initial}
+    image: ${ECR_REGISTRY}/gomarketi-storefront:${IMAGE_TAG_STOREFRONT:-initial}
     restart: unless-stopped
     env_file: [./env/storefront.env]
     environment:
@@ -90,7 +94,7 @@ services:
       start_period: 10s
 
   catalogue:
-    image: ${ECR_REGISTRY}/gomarketi-catalogue:${IMAGE_TAG:-initial}
+    image: ${ECR_REGISTRY}/gomarketi-catalogue:${IMAGE_TAG_CATALOGUE:-initial}
     restart: unless-stopped
     env_file: [./env/catalogue.env]
     environment:
@@ -106,7 +110,7 @@ services:
       start_period: 10s
 
   orders:
-    image: ${ECR_REGISTRY}/gomarketi-orders:${IMAGE_TAG:-initial}
+    image: ${ECR_REGISTRY}/gomarketi-orders:${IMAGE_TAG_ORDERS:-initial}
     restart: unless-stopped
     env_file: [./env/orders.env]
     environment:
@@ -125,7 +129,7 @@ services:
       start_period: 10s
 
   gateway:
-    image: ${ECR_REGISTRY}/gomarketi-gateway:${IMAGE_TAG:-initial}
+    image: ${ECR_REGISTRY}/gomarketi-gateway:${IMAGE_TAG_GATEWAY:-initial}
     restart: unless-stopped
     env_file: [./env/gateway.env]
     environment:

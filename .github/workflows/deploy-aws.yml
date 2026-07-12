@@ -1,0 +1,153 @@
+name: Deploy Backend (AWS)
+
+on:
+  push:
+    branches: [main, staging]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        required: true
+        default: production
+        type: choice
+        options: [production, staging]
+      services:
+        description: Services to deploy (comma-separated, or "all")
+        required: false
+        default: all
+
+permissions:
+  id-token: write # required for OIDC -> AWS
+  contents: read
+
+env:
+  AWS_REGION: eu-west-1
+  AWS_ROLE_ARN: arn:aws:iam::336617737576:role/gomarketi-github-actions-deploy
+  ECR_REGISTRY: 336617737576.dkr.ecr.eu-west-1.amazonaws.com
+
+jobs:
+  # ── Detect which services changed ─────────────────────────────────────────
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      services: ${{ steps.set.outputs.services }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect changed services (push)
+        id: filter
+        if: github.event_name == 'push'
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            auth:
+              - 'services/auth/**'
+              - 'shared/pkg/**'
+            identity:
+              - 'services/identity/**'
+              - 'shared/pkg/**'
+            catalogue:
+              - 'services/catalogue/**'
+              - 'shared/pkg/**'
+            orders:
+              - 'services/orders/**'
+              - 'shared/pkg/**'
+            storefront:
+              - 'services/storefront/**'
+              - 'shared/pkg/**'
+            gateway:
+              - 'services/gateway/**'
+              - 'shared/pkg/**'
+
+      - name: Set services to deploy
+        id: set
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            INPUT="${{ github.event.inputs.services }}"
+            if [ "$INPUT" = "all" ] || [ -z "$INPUT" ]; then
+              echo 'services=["auth","identity","storefront","catalogue","orders","gateway"]' >> $GITHUB_OUTPUT
+            else
+              ARRAY=$(echo "$INPUT" | tr ',' '\n' | jq -R . | jq -sc .)
+              echo "services=$ARRAY" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "services=${{ steps.filter.outputs.changes }}" >> $GITHUB_OUTPUT
+          fi
+
+  # ── Build, push to ECR, deploy via SSM Run Command ─────────────────────────
+  deploy:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.services != '[]' && needs.detect-changes.outputs.services != ''
+    runs-on: ubuntu-latest
+    environment: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.environment) || (github.ref_name == 'main' && 'production') || 'staging' }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJson(needs.detect-changes.outputs.services) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine target environment
+        id: env
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "name=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.ref_name }}" = "main" ]; then
+            echo "name=production" >> $GITHUB_OUTPUT
+          else
+            echo "name=staging" >> $GITHUB_OUTPUT
+          fi
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push ${{ matrix.service }}
+        run: |
+          docker build -f services/${{ matrix.service }}/Dockerfile \
+            -t "$ECR_REGISTRY/gomarketi-${{ matrix.service }}:${{ github.sha }}" .
+          docker push "$ECR_REGISTRY/gomarketi-${{ matrix.service }}:${{ github.sha }}"
+
+      - name: Resolve target instance ID
+        id: instance
+        run: |
+          ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=gomarketi-${{ steps.env.outputs.name }}-instance" "Name=instance-state-name,Values=running" \
+            --query 'Reservations[0].Instances[0].InstanceId' --output text)
+          echo "id=$ID" >> $GITHUB_OUTPUT
+
+      - name: Deploy ${{ matrix.service }} via SSM
+        run: |
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "${{ steps.instance.outputs.id }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "commands=[\"/opt/gomarketi/deploy-service.sh ${{ matrix.service }} ${{ github.sha }}\"]" \
+            --query 'Command.CommandId' --output text)
+
+          for i in $(seq 1 30); do
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$CMD_ID" \
+              --instance-id "${{ steps.instance.outputs.id }}" \
+              --query 'Status' --output text 2>/dev/null || echo "Pending")
+            echo "attempt $i: $STATUS"
+            case "$STATUS" in
+              Success) exit 0 ;;
+              Failed|Cancelled|TimedOut)
+                aws ssm get-command-invocation \
+                  --command-id "$CMD_ID" \
+                  --instance-id "${{ steps.instance.outputs.id }}"
+                exit 1
+                ;;
+            esac
+            sleep 10
+          done
+          echo "timed out waiting for deploy command"
+          exit 1
+
+      - name: Summary
+        run: echo "✅ gomarketi-${{ matrix.service }} deployed to ${{ steps.env.outputs.name }} (${{ github.sha }})"

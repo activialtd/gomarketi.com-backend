@@ -32,12 +32,13 @@ resource "aws_instance" "main" {
   }
 
   user_data = templatefile("${path.module}/user_data.sh.tftpl", {
-    environment    = var.environment
-    region         = var.region
-    ecr_registry   = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.region}.amazonaws.com"
-    docker_compose = file("${path.module}/../docker/docker-compose.prod.yml")
-    caddyfile      = file("${path.module}/../docker/Caddyfile")
-    fetch_env_sh   = file("${path.module}/../docker/fetch-env.sh")
+    environment       = var.environment
+    region            = var.region
+    ecr_registry      = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.region}.amazonaws.com"
+    docker_compose    = file("${path.module}/../docker/docker-compose.prod.yml")
+    caddyfile         = file("${path.module}/../docker/Caddyfile")
+    fetch_env_sh      = file("${path.module}/../docker/fetch-env.sh")
+    deploy_service_sh = file("${path.module}/../docker/deploy-service.sh")
   })
 
   metadata_options {

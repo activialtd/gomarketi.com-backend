@@ -17,7 +17,16 @@ SSM Run Command.
 ECR repositories are account-global (not per-environment) — the same
 image tag gets promoted from staging to production rather than rebuilding
 per environment — so they live in their own Terraform state
-(`shared/`), not the staging/production root module.
+(`shared/`), not the staging/production root module. `shared/` also owns
+the GitHub OIDC provider + `gomarketi-github-actions-deploy` IAM role that
+CI assumes to build/push images and trigger deploys via SSM.
+
+**Gotcha:** that role's `ssm:SendCommand` permission is scoped to the
+*current* staging/production instance ARNs (looked up by `Name` tag at
+`terraform apply` time). Whenever an instance gets replaced (e.g. a
+`user_data` change forces `user_data_replace_on_change`), its ID changes —
+re-run `terraform apply` in `shared/` afterward, or CI's deploy step will
+get `AccessDenied` against the new instance.
 
 ## One-time setup (already done)
 

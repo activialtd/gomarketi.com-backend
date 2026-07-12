@@ -105,3 +105,134 @@ output "repository_urls" {
 output "repository_arns" {
   value = { for k, r in aws_ecr_repository.services : k => r.arn }
 }
+
+# ── GitHub OIDC: lets CI assume an AWS role without any long-lived keys ──────
+
+variable "github_repo" {
+  description = "GitHub repo allowed to assume the deploy role, as org/repo."
+  type        = string
+  default     = "activialtd/gomarketi.com-backend"
+}
+
+resource "aws_iam_openid_connect_provider" "github" {
+  url             = "https://token.actions.githubusercontent.com"
+  client_id_list  = ["sts.amazonaws.com"]
+  thumbprint_list = ["6938fd4d98bab03faadb97b34396831e3780aea1", "1c58a3a8518e8759bf075b76b750d4f2df264fcd"]
+}
+
+data "aws_iam_policy_document" "github_actions_assume" {
+  statement {
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+    principals {
+      type        = "Federated"
+      identifiers = [aws_iam_openid_connect_provider.github.arn]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+    condition {
+      test     = "StringLike"
+      variable = "token.actions.githubusercontent.com:sub"
+      values   = ["repo:${var.github_repo}:*"]
+    }
+  }
+}
+
+resource "aws_iam_role" "github_actions_deploy" {
+  name               = "gomarketi-github-actions-deploy"
+  assume_role_policy = data.aws_iam_policy_document.github_actions_assume.json
+}
+
+# Both staging and production instances are targetable by this one role —
+# the workflow picks the instance ID at runtime based on which branch/
+# environment triggered it.
+data "aws_instance" "staging" {
+  filter {
+    name   = "tag:Name"
+    values = ["gomarketi-staging-instance"]
+  }
+  filter {
+    name   = "instance-state-name"
+    values = ["running"]
+  }
+}
+
+data "aws_instance" "production" {
+  filter {
+    name   = "tag:Name"
+    values = ["gomarketi-production-instance"]
+  }
+  filter {
+    name   = "instance-state-name"
+    values = ["running"]
+  }
+}
+
+data "aws_iam_policy_document" "github_actions_deploy" {
+  statement {
+    sid       = "EcrAuth"
+    actions   = ["ecr:GetAuthorizationToken"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid = "EcrPush"
+    actions = [
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:PutImage",
+      "ecr:InitiateLayerUpload",
+      "ecr:UploadLayerPart",
+      "ecr:CompleteLayerUpload",
+      "ecr:BatchGetImage",
+      "ecr:GetDownloadUrlForLayer",
+    ]
+    resources = [for r in aws_ecr_repository.services : r.arn]
+  }
+
+  statement {
+    sid       = "ResolveInstanceId"
+    actions   = ["ec2:DescribeInstances"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid = "DeployViaSsm"
+    actions = [
+      "ssm:SendCommand",
+    ]
+    resources = [
+      "arn:aws:ssm:*:*:document/AWS-RunShellScript",
+      data.aws_instance.staging.arn,
+      data.aws_instance.production.arn,
+    ]
+  }
+
+  statement {
+    sid = "ReadCommandResults"
+    actions = [
+      "ssm:GetCommandInvocation",
+      "ssm:ListCommandInvocations",
+    ]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "github_actions_deploy" {
+  name   = "ecr-push-and-ssm-deploy"
+  role   = aws_iam_role.github_actions_deploy.id
+  policy = data.aws_iam_policy_document.github_actions_deploy.json
+}
+
+output "github_actions_role_arn" {
+  value = aws_iam_role.github_actions_deploy.arn
+}
+
+output "staging_instance_id" {
+  value = data.aws_instance.staging.id
+}
+
+output "production_instance_id" {
+  value = data.aws_instance.production.id
+}

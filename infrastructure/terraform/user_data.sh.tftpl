@@ -46,12 +46,22 @@ ${fetch_env_sh}
 FETCHENV_EOF
 chmod +x fetch-env.sh
 
+cat > deploy-service.sh <<'DEPLOYSVC_EOF'
+${deploy_service_sh}
+DEPLOYSVC_EOF
+chmod +x deploy-service.sh
+
 cat > .env <<ENV_EOF
 GOMARKETI_ENV=${environment}
 ENVIRONMENT=${environment}
 AWS_REGION=${region}
 ECR_REGISTRY=${ecr_registry}
-IMAGE_TAG=initial
+IMAGE_TAG_AUTH=initial
+IMAGE_TAG_IDENTITY=initial
+IMAGE_TAG_STOREFRONT=initial
+IMAGE_TAG_CATALOGUE=initial
+IMAGE_TAG_ORDERS=initial
+IMAGE_TAG_GATEWAY=initial
 ALLOWED_ORIGINS=https://gomarketi.com,https://www.gomarketi.com
 SMILE_ID_SANDBOX=%{ if environment == "production" }false%{ else }true%{ endif }
 SITE_ADDRESS=:80
