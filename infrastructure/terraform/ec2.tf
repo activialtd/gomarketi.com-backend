@@ -35,6 +35,7 @@ resource "aws_instance" "main" {
     environment       = var.environment
     region            = var.region
     ecr_registry      = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.region}.amazonaws.com"
+    allowed_origins   = local.allowed_origins
     docker_compose    = file("${path.module}/../docker/docker-compose.prod.yml")
     caddyfile         = file("${path.module}/../docker/Caddyfile")
     fetch_env_sh      = file("${path.module}/../docker/fetch-env.sh")

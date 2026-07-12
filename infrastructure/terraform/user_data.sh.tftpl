@@ -62,7 +62,7 @@ IMAGE_TAG_STOREFRONT=initial
 IMAGE_TAG_CATALOGUE=initial
 IMAGE_TAG_ORDERS=initial
 IMAGE_TAG_GATEWAY=initial
-ALLOWED_ORIGINS=https://gomarketi.com,https://www.gomarketi.com
+ALLOWED_ORIGINS=${allowed_origins}
 SMILE_ID_SANDBOX=%{ if environment == "production" }false%{ else }true%{ endif }
 SITE_ADDRESS=:80
 ENV_EOF

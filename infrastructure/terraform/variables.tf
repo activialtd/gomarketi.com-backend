@@ -66,6 +66,12 @@ variable "services" {
   }
 }
 
+variable "additional_allowed_origins" {
+  description = "Extra CORS origins beyond https://gomarketi.com and https://www.gomarketi.com — e.g. frontend local dev / Vercel preview URLs for staging."
+  type        = list(string)
+  default     = []
+}
+
 variable "image_tag" {
   description = "Docker image tag the instance's docker-compose stack pulls. CI updates the running containers via SSM Run Command after pushing a new tag; this var is mainly a reference default for the initial deploy."
   type        = string

@@ -1,6 +1,11 @@
 locals {
   name_prefix = "gomarketi-${var.environment}"
 
+  allowed_origins = join(",", concat(
+    ["https://gomarketi.com", "https://www.gomarketi.com"],
+    var.additional_allowed_origins,
+  ))
+
   ecr_repo_urls = { for k, repo in data.aws_ecr_repository.services : k => repo.repository_url }
 
   # SSM parameter keys expected per service (gomarketi/<env>/<service>/<KEY>)
@@ -43,7 +48,7 @@ locals {
   service_plain_env = {
     auth = {
       ENV                     = var.environment
-      ALLOWED_ORIGINS         = "https://gomarketi.com,https://www.gomarketi.com"
+      ALLOWED_ORIGINS         = local.allowed_origins
       JWT_ACCESS_TTL_SECONDS  = "900"
       JWT_REFRESH_TTL_SECONDS = "2592000"
       BREVO_FROM              = "noreply@gomarketi.com"
@@ -51,24 +56,24 @@ locals {
     }
     identity = {
       ENV              = var.environment
-      ALLOWED_ORIGINS  = "https://gomarketi.com,https://www.gomarketi.com"
+      ALLOWED_ORIGINS  = local.allowed_origins
       SMILE_ID_SANDBOX = var.environment == "production" ? "false" : "true"
     }
     storefront = {
       ENV             = var.environment
-      ALLOWED_ORIGINS = "https://gomarketi.com,https://www.gomarketi.com"
+      ALLOWED_ORIGINS = local.allowed_origins
       STORE_DOMAIN    = "gomarketi.com"
     }
     catalogue = {
       ENV             = var.environment
-      ALLOWED_ORIGINS = "https://gomarketi.com,https://www.gomarketi.com"
+      ALLOWED_ORIGINS = local.allowed_origins
     }
     orders = {
       ENV             = var.environment
-      ALLOWED_ORIGINS = "https://gomarketi.com,https://www.gomarketi.com"
+      ALLOWED_ORIGINS = local.allowed_origins
     }
     gateway = {
-      ALLOWED_ORIGINS     = "https://gomarketi.com,https://www.gomarketi.com"
+      ALLOWED_ORIGINS     = local.allowed_origins
       UPSTREAM_AUTH       = "http://auth:${var.services["auth"].port}"
       UPSTREAM_STOREFRONT = "http://storefront:${var.services["storefront"].port}"
       UPSTREAM_IDENTITY   = "http://identity:${var.services["identity"].port}"
