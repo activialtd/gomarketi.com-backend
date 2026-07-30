@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,17 +16,45 @@ import (
 	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
 	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/dto"
 	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/email"
+	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/vercel"
 )
 
 type StorefrontService struct {
 	db          *sqlx.DB
 	log         zerolog.Logger
 	emailer     email.WelcomeMailer
+	domains     vercel.Registrar
 	storeDomain string
 }
 
-func New(db *sqlx.DB, emailer email.WelcomeMailer, storeDomain string, log zerolog.Logger) *StorefrontService {
-	return &StorefrontService{db: db, emailer: emailer, storeDomain: storeDomain, log: log}
+func New(db *sqlx.DB, emailer email.WelcomeMailer, domains vercel.Registrar, storeDomain string, log zerolog.Logger) *StorefrontService {
+	return &StorefrontService{db: db, emailer: emailer, domains: domains, storeDomain: storeDomain, log: log}
+}
+
+// ── Slug validation ─────────────────────────────────────────────────────────
+// Slugs become live subdomains ({slug}.gomarketi.com) via Vercel domain
+// registration, so they must be DNS-safe: lowercase letters/numbers/hyphens,
+// no leading/trailing hyphen. Also blocks slugs that would collide with a
+// platform subdomain already in use.
+
+var slugPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$`)
+
+var reservedSlugs = map[string]bool{
+	"www": true, "api": true, "vendor": true, "admin": true, "app": true,
+	"mail": true, "cdn": true, "ftp": true, "staging": true, "blog": true,
+	"support": true, "help": true, "status": true, "docs": true,
+	"staging-vendor": true, "api-staging": true,
+}
+
+func validateSlugFormat(slug string) error {
+	if !slugPattern.MatchString(slug) {
+		return apperrors.Wrap(http.StatusBadRequest,
+			"slug must be lowercase letters, numbers, and hyphens only, and can't start or end with a hyphen", nil)
+	}
+	if reservedSlugs[slug] {
+		return apperrors.Wrap(http.StatusBadRequest, "this slug is reserved", nil)
+	}
+	return nil
 }
 
 func (s *StorefrontService) DB() *sqlx.DB { return s.db }
@@ -40,6 +69,10 @@ func (s *StorefrontService) CreateStore(ctx context.Context, userID uuid.UUID, r
 	}
 	if !isNotFound(err) {
 		return dto.StoreResp{}, fmt.Errorf("check existing store: %w", err)
+	}
+
+	if err := validateSlugFormat(req.Slug); err != nil {
+		return dto.StoreResp{}, err
 	}
 
 	// Check slug is free.
@@ -88,6 +121,21 @@ func (s *StorefrontService) CreateStore(ctx context.Context, userID uuid.UUID, r
 		}()
 	}
 
+	// Register {slug}.{storeDomain} on Vercel asynchronously — DNS routing
+	// already works via the *.{storeDomain} wildcard, but Vercel only issues
+	// a working SSL certificate for domains explicitly registered on the
+	// project, so without this the store loads over plain HTTP until
+	// someone adds it by hand.
+	storeSlug := resp.Slug
+	storeSubdomain := storeSlug + "." + s.storeDomain
+	go func() {
+		ctx3, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if domainErr := s.domains.AddDomain(ctx3, storeSubdomain); domainErr != nil {
+			s.log.Warn().Err(domainErr).Str("domain", storeSubdomain).Msg("vercel domain registration failed")
+		}
+	}()
+
 	return resp, nil
 }
 
@@ -132,6 +180,9 @@ func (s *StorefrontService) UpdateStore(ctx context.Context, userID uuid.UUID, s
 }
 
 func (s *StorefrontService) CheckSlugAvailable(ctx context.Context, slug string) (dto.SlugCheckResp, error) {
+	if validateSlugFormat(slug) != nil {
+		return dto.SlugCheckResp{Slug: slug, Available: false}, nil
+	}
 	var taken bool
 	_ = s.db.QueryRowContext(ctx, `SELECT TRUE FROM stores WHERE slug=$1`, slug).Scan(&taken)
 	return dto.SlugCheckResp{Slug: slug, Available: !taken}, nil

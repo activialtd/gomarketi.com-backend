@@ -19,6 +19,7 @@ import (
 	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/email"
 	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/handler"
 	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/service"
+	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/vercel"
 )
 
 func main() {
@@ -88,7 +89,26 @@ func run(log zerolog.Logger) error {
 		storeDomain = "gomarketi.com"
 	}
 
-	svc := service.New(db, welcomeMailer, storeDomain, log)
+	var domainRegistrar vercel.Registrar
+	if token := viper.GetString("VERCEL_API_TOKEN"); token != "" {
+		vc, vcErr := vercel.New(vercel.Config{
+			APIToken:  token,
+			ProjectID: viper.GetString("VERCEL_PROJECT_ID"),
+			TeamID:    viper.GetString("VERCEL_TEAM_ID"),
+		})
+		if vcErr != nil {
+			log.Warn().Err(vcErr).Msg("vercel domain registration: config invalid, using noop")
+			domainRegistrar = vercel.NoopRegistrar{}
+		} else {
+			domainRegistrar = vc
+			log.Info().Msg("vercel domain registration: enabled")
+		}
+	} else {
+		domainRegistrar = vercel.NoopRegistrar{}
+		log.Warn().Msg("vercel domain registration: no VERCEL_API_TOKEN, using noop")
+	}
+
+	svc := service.New(db, welcomeMailer, domainRegistrar, storeDomain, log)
 	h := handler.New(svc)
 	r := gin.New()
 

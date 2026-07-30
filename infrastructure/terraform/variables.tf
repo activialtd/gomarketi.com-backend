@@ -27,9 +27,9 @@ variable "instance_type" {
 }
 
 variable "root_volume_size_gb" {
-  description = "Root EBS volume size in GB — kept under the 30GB free-tier allowance."
+  description = "Root EBS volume size in GB. Amazon Linux 2023's AMI snapshot size has grown past 20GB, so this must stay at 30 (still within the free-tier EBS allowance) or the AMI's own snapshot will reject a smaller volume outright."
   type        = number
-  default     = 20
+  default     = 30
 }
 
 variable "services" {
