@@ -7,16 +7,17 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/rs/zerolog"
 
-	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
 	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/dto"
 	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/email"
 	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/vercel"
+	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
 )
 
 type StorefrontService struct {
@@ -222,6 +223,148 @@ func (s *StorefrontService) GetStoreByDomain(ctx context.Context, domain string)
 		return dto.StoreResp{}, fmt.Errorf("get store by domain: %w", err)
 	}
 	return rowToResp(row), nil
+}
+
+// ── Search ────────────────────────────────────────────────────────────────────
+
+// categoryKeywords maps free-text search phrases to store categories, so a
+// query like "men's wear" resolves to the "fashion" category. Matching is a
+// simple case-insensitive substring check — no NLP/ML, just enough to cover
+// how people actually phrase a shopping search.
+var categoryKeywords = map[string][]string{
+	"fashion":     {"cloth", "wear", "dress", "shirt", "trouser", "fashion", "outfit", "men's", "mens", "women's", "womens", "shoe", "sneaker", "kaftan", "ankara"},
+	"thrift":      {"thrift", "okrika", "bend down", "bend-down", "second hand", "second-hand", "used cloth"},
+	"jewelry":     {"jewel", "gold", "necklace", "ring", "bracelet", "earring", "accessor"},
+	"electronics": {"gadget", "phone", "laptop", "electronic", "charger", "earpiece", "tech", "television", " tv ", "computer"},
+	"food":        {"food", "restaurant", "eat", "meal", "kitchen", "suya", "amala", "jollof"},
+	"groceries":   {"grocery", "groceries", "provision", "foodstuff", "food stuff", "rice", "beans", "cooking oil", "spaghetti"},
+	"beauty":      {"beauty", "makeup", "make-up", "cosmetic", "skincare", "perfume", "wig"},
+	"home":        {"furniture", "home decor", "kitchenware", "appliance"},
+}
+
+// matchCategories returns every store category whose keyword set appears in
+// the query. Returns nil if nothing matched — the caller falls back to a
+// free-text name search in that case.
+func matchCategories(q string) []string {
+	q = " " + strings.ToLower(q) + " "
+	var matched []string
+	for category, keywords := range categoryKeywords {
+		for _, kw := range keywords {
+			if strings.Contains(q, kw) {
+				matched = append(matched, category)
+				break
+			}
+		}
+	}
+	return matched
+}
+
+type storeSearchRow struct {
+	ID           uuid.UUID       `db:"id"`
+	Name         string          `db:"name"`
+	Slug         string          `db:"slug"`
+	Category     string          `db:"category"`
+	Tagline      sql.NullString  `db:"tagline"`
+	LogoURL      sql.NullString  `db:"logo_url"`
+	HeroImageURL sql.NullString  `db:"hero_image_url"`
+	Address      sql.NullString  `db:"address"`
+	City         sql.NullString  `db:"city"`
+	State        sql.NullString  `db:"state"`
+	DistanceKm   sql.NullFloat64 `db:"distance_km"`
+}
+
+// SearchStores finds stores by free-text query and/or explicit category,
+// optionally sorted by distance from a buyer's location. Powers the
+// consumer-app text and voice search.
+func (s *StorefrontService) SearchStores(ctx context.Context, req dto.StoreSearchReq) ([]dto.StoreSearchResp, error) {
+	limit := req.Limit
+	if limit <= 0 || limit > 50 {
+		limit = 20
+	}
+
+	var categoryList []string
+	if req.Category != nil && *req.Category != "" {
+		categoryList = []string{*req.Category}
+	} else if req.Q != nil && *req.Q != "" {
+		categoryList = matchCategories(*req.Q)
+	}
+
+	hasLoc := req.Lat != nil && req.Lng != nil
+	radiusKm := 25.0
+	if req.RadiusKm != nil && *req.RadiusKm > 0 {
+		radiusKm = *req.RadiusKm
+	}
+
+	selectDistance := "NULL::float8 AS distance_km"
+	orderBy := "created_at DESC"
+	whereParts := []string{"is_active = TRUE"}
+	var args []interface{}
+	argN := 1
+
+	if hasLoc {
+		selectDistance = fmt.Sprintf(
+			"ST_Distance(coordinates::geography, ST_SetSRID(ST_MakePoint($%d,$%d),4326)::geography) / 1000 AS distance_km",
+			argN, argN+1)
+		args = append(args, *req.Lng, *req.Lat)
+		whereParts = append(whereParts, fmt.Sprintf(
+			"(coordinates IS NULL OR ST_DWithin(coordinates::geography, ST_SetSRID(ST_MakePoint($%d,$%d),4326)::geography, $%d))",
+			argN, argN+1, argN+2))
+		args = append(args, radiusKm*1000)
+		argN += 3
+		orderBy = "(coordinates IS NULL) ASC, distance_km ASC NULLS LAST"
+	}
+
+	if len(categoryList) > 0 {
+		whereParts = append(whereParts, fmt.Sprintf("category = ANY($%d)", argN))
+		args = append(args, categoryList)
+		argN++
+	} else if req.Q != nil && *req.Q != "" {
+		whereParts = append(whereParts, fmt.Sprintf("(name ILIKE $%d OR tagline ILIKE $%d)", argN, argN))
+		args = append(args, "%"+*req.Q+"%")
+		argN++
+	}
+
+	args = append(args, limit)
+	query := fmt.Sprintf(`
+		SELECT id, name, slug, category, tagline, logo_url, hero_image_url, address, city, state,
+		       %s
+		FROM stores
+		WHERE %s
+		ORDER BY %s
+		LIMIT $%d`,
+		selectDistance, strings.Join(whereParts, " AND "), orderBy, argN)
+
+	rows, err := s.db.QueryxContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("search stores: %w", err)
+	}
+	defer rows.Close()
+
+	out := []dto.StoreSearchResp{}
+	for rows.Next() {
+		var r storeSearchRow
+		if err := rows.StructScan(&r); err != nil {
+			return nil, fmt.Errorf("scan store: %w", err)
+		}
+		item := dto.StoreSearchResp{
+			ID:           r.ID.String(),
+			Name:         r.Name,
+			Slug:         r.Slug,
+			Category:     r.Category,
+			Tagline:      nullToPtr(r.Tagline),
+			LogoURL:      nullToPtr(r.LogoURL),
+			HeroImageURL: nullToPtr(r.HeroImageURL),
+			Address:      nullToPtr(r.Address),
+			City:         nullToPtr(r.City),
+			State:        nullToPtr(r.State),
+		}
+		if r.DistanceKm.Valid {
+			d := r.DistanceKm.Float64
+			item.DistanceKm = &d
+		}
+		out = append(out, item)
+	}
+	return out, nil
 }
 
 // ── Staff ─────────────────────────────────────────────────────────────────────

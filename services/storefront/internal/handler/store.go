@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -103,6 +104,52 @@ func (h *Handler) GetStoreByDomain(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, resp)
+}
+
+// SearchStores godoc
+// GET /v1/storefront/public/stores/search?q=&category=&lat=&lng=&radius_km=&limit=
+// No auth required — powers the consumer-app search/voice-search flow.
+func (h *Handler) SearchStores(c *gin.Context) {
+	req := dto.StoreSearchReq{Limit: 20}
+
+	if q := c.Query("q"); q != "" {
+		req.Q = &q
+	}
+	if category := c.Query("category"); category != "" {
+		req.Category = &category
+	}
+	if lat, ok := queryFloat(c, "lat"); ok {
+		req.Lat = &lat
+	}
+	if lng, ok := queryFloat(c, "lng"); ok {
+		req.Lng = &lng
+	}
+	if radiusKm, ok := queryFloat(c, "radius_km"); ok {
+		req.RadiusKm = &radiusKm
+	}
+	if limit, ok := queryFloat(c, "limit"); ok && limit > 0 {
+		req.Limit = int(limit)
+	}
+
+	resp, err := h.svc.SearchStores(c.Request.Context(), req)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+func queryFloat(c *gin.Context, key string) (float64, bool) {
+	raw := c.Query(key)
+	if raw == "" {
+		return 0, false
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
 }
 
 // LogView godoc

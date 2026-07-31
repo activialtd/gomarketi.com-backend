@@ -10,7 +10,7 @@ import "encoding/json"
 type CreateStoreReq struct {
 	Name         string  `json:"name"          validate:"required,min=2,max=200"`
 	Slug         string  `json:"slug"          validate:"required,min=2,max=40"`
-	Category     string  `json:"category"      validate:"required,oneof=fashion beauty food electronics home health sports books auto kids jewelry digital agriculture art other"`
+	Category     string  `json:"category"      validate:"required,oneof=fashion beauty food electronics home health sports books auto kids jewelry digital agriculture art other groceries thrift"`
 	Currency     string  `json:"currency"      validate:"required,oneof=NGN USD"`
 	TeamSize     *string `json:"team_size"     validate:"omitempty,oneof=solo 2-10 11-50 51-200 200+"`
 	SupportPhone *string `json:"support_phone" validate:"omitempty,min=7,max=20"`
@@ -34,28 +34,53 @@ type UpdateStoreReq struct {
 
 // StoreResp is returned for any store read or write operation.
 type StoreResp struct {
-	ID              string          `json:"id"`
-	VendorID        string          `json:"vendor_id"`
-	Name            string          `json:"name"`
-	Slug            string          `json:"slug"`
-	Category        string          `json:"category"`
-	Currency        string          `json:"currency"`
-	TeamSize        *string         `json:"team_size,omitempty"`
-	StaffRange      *string         `json:"staff_range,omitempty"`
-	Tagline         *string         `json:"tagline,omitempty"`
-	LogoURL         *string         `json:"logo_url,omitempty"`
-	HeroImageURL    *string         `json:"hero_image_url,omitempty"`
-	SiteDescription *string         `json:"site_description,omitempty"`
-	SocialLinks     json.RawMessage `json:"social_links,omitempty"`
-	SupportPhone    *string         `json:"support_phone,omitempty"`
-	Address         *string         `json:"address,omitempty"`
-	City            *string         `json:"city,omitempty"`
-	State           *string         `json:"state,omitempty"`
+	ID                 string          `json:"id"`
+	VendorID           string          `json:"vendor_id"`
+	Name               string          `json:"name"`
+	Slug               string          `json:"slug"`
+	Category           string          `json:"category"`
+	Currency           string          `json:"currency"`
+	TeamSize           *string         `json:"team_size,omitempty"`
+	StaffRange         *string         `json:"staff_range,omitempty"`
+	Tagline            *string         `json:"tagline,omitempty"`
+	LogoURL            *string         `json:"logo_url,omitempty"`
+	HeroImageURL       *string         `json:"hero_image_url,omitempty"`
+	SiteDescription    *string         `json:"site_description,omitempty"`
+	SocialLinks        json.RawMessage `json:"social_links,omitempty"`
+	SupportPhone       *string         `json:"support_phone,omitempty"`
+	Address            *string         `json:"address,omitempty"`
+	City               *string         `json:"city,omitempty"`
+	State              *string         `json:"state,omitempty"`
 	CustomDomain       *string         `json:"custom_domain,omitempty"`
 	CustomDomainStatus string          `json:"custom_domain_status,omitempty"`
 	ThemeConfig        json.RawMessage `json:"theme_config,omitempty"` // raw JSON
 	IsActive           bool            `json:"is_active"`
 	CreatedAt          string          `json:"created_at"`
+}
+
+// StoreSearchReq is the query params for GET /v1/storefront/public/stores/search.
+type StoreSearchReq struct {
+	Q        *string  `form:"q"`
+	Category *string  `form:"category" validate:"omitempty,oneof=fashion beauty food electronics home health sports books auto kids jewelry digital agriculture art other groceries thrift"`
+	Lat      *float64 `form:"lat"      validate:"omitempty,min=-90,max=90"`
+	Lng      *float64 `form:"lng"      validate:"omitempty,min=-180,max=180"`
+	RadiusKm *float64 `form:"radius_km" validate:"omitempty,min=0"`
+	Limit    int      `form:"limit"`
+}
+
+// StoreSearchResp is a single store result from the search endpoint.
+type StoreSearchResp struct {
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	Slug         string   `json:"slug"`
+	Category     string   `json:"category"`
+	Tagline      *string  `json:"tagline,omitempty"`
+	LogoURL      *string  `json:"logo_url,omitempty"`
+	HeroImageURL *string  `json:"hero_image_url,omitempty"`
+	Address      *string  `json:"address,omitempty"`
+	City         *string  `json:"city,omitempty"`
+	State        *string  `json:"state,omitempty"`
+	DistanceKm   *float64 `json:"distance_km,omitempty"`
 }
 
 // SlugCheckResp is returned by GET /v1/storefront/slugs/check.
