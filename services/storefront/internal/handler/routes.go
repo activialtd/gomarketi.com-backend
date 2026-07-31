@@ -32,6 +32,7 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 		pub.GET("/stores/by-domain", h.GetStoreByDomain)
 		pub.GET("/stores/search", h.SearchStores)
 		pub.GET("/stores/:slug", h.GetStorePublic)
+		pub.GET("/markets", h.ListMarkets)
 		pub.POST("/log", h.LogView)
 	}
 

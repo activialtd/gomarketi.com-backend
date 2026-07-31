@@ -130,6 +130,12 @@ func (h *Handler) SearchStores(c *gin.Context) {
 	if limit, ok := queryFloat(c, "limit"); ok && limit > 0 {
 		req.Limit = int(limit)
 	}
+	if offset, ok := queryFloat(c, "offset"); ok && offset > 0 {
+		req.Offset = int(offset)
+	}
+	if marketID := c.Query("market_id"); marketID != "" {
+		req.MarketID = &marketID
+	}
 
 	resp, err := h.svc.SearchStores(c.Request.Context(), req)
 	if err != nil {
@@ -150,6 +156,28 @@ func queryFloat(c *gin.Context, key string) (float64, bool) {
 		return 0, false
 	}
 	return v, true
+}
+
+// ListMarkets godoc
+// GET /v1/storefront/public/markets?state=&city= — no auth required.
+// Populates the vendor-web "which market is your store in?" dropdown, and
+// the consumer-app "Popular Markets" browse tab.
+func (h *Handler) ListMarkets(c *gin.Context) {
+	var req dto.MarketReq
+	if state := c.Query("state"); state != "" {
+		req.State = &state
+	}
+	if city := c.Query("city"); city != "" {
+		req.City = &city
+	}
+
+	resp, err := h.svc.ListMarkets(c.Request.Context(), req)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
 }
 
 // LogView godoc

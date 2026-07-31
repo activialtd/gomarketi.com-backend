@@ -29,6 +29,7 @@ type UpdateStoreReq struct {
 	Address         *string         `json:"address"          validate:"omitempty,max=500"`
 	City            *string         `json:"city"             validate:"omitempty,max=100"`
 	State           *string         `json:"state"            validate:"omitempty,max=100"`
+	MarketID        *string         `json:"market_id"        validate:"omitempty,uuid"`
 	ThemeConfig     json.RawMessage `json:"theme_config"` // raw JSON, stored as JSONB
 }
 
@@ -51,6 +52,8 @@ type StoreResp struct {
 	Address            *string         `json:"address,omitempty"`
 	City               *string         `json:"city,omitempty"`
 	State              *string         `json:"state,omitempty"`
+	MarketID           *string         `json:"market_id,omitempty"`
+	MarketName         *string         `json:"market_name,omitempty"`
 	CustomDomain       *string         `json:"custom_domain,omitempty"`
 	CustomDomainStatus string          `json:"custom_domain_status,omitempty"`
 	ThemeConfig        json.RawMessage `json:"theme_config,omitempty"` // raw JSON
@@ -65,7 +68,9 @@ type StoreSearchReq struct {
 	Lat      *float64 `form:"lat"      validate:"omitempty,min=-90,max=90"`
 	Lng      *float64 `form:"lng"      validate:"omitempty,min=-180,max=180"`
 	RadiusKm *float64 `form:"radius_km" validate:"omitempty,min=0"`
+	MarketID *string  `form:"market_id" validate:"omitempty,uuid"`
 	Limit    int      `form:"limit"`
+	Offset   int      `form:"offset"`
 }
 
 // StoreSearchResp is a single store result from the search endpoint.
@@ -80,7 +85,30 @@ type StoreSearchResp struct {
 	Address      *string  `json:"address,omitempty"`
 	City         *string  `json:"city,omitempty"`
 	State        *string  `json:"state,omitempty"`
+	MarketID     *string  `json:"market_id,omitempty"`
+	MarketName   *string  `json:"market_name,omitempty"`
 	DistanceKm   *float64 `json:"distance_km,omitempty"`
+}
+
+// StoreSearchListResp wraps a page of search results with pagination info,
+// so the client can prefetch the next page before the user scrolls to it.
+type StoreSearchListResp struct {
+	Stores  []StoreSearchResp `json:"stores"`
+	HasMore bool              `json:"has_more"`
+}
+
+// MarketReq is the query params for GET /v1/storefront/public/markets.
+type MarketReq struct {
+	State *string `form:"state"`
+	City  *string `form:"city"`
+}
+
+// MarketResp is a single major market (e.g. Balogun Market).
+type MarketResp struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	City  string `json:"city"`
+	State string `json:"state"`
 }
 
 // SlugCheckResp is returned by GET /v1/storefront/slugs/check.
