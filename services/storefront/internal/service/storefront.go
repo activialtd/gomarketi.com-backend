@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
+	"github.com/lib/pq"
 	"github.com/rs/zerolog"
 
 	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/dto"
@@ -309,9 +310,9 @@ func matchCity(q string) []string {
 }
 
 type marketRow struct {
-	ID      uuid.UUID `db:"id"`
-	Name    string    `db:"name"`
-	Aliases []string  `db:"aliases"`
+	ID      uuid.UUID      `db:"id"`
+	Name    string         `db:"name"`
+	Aliases pq.StringArray `db:"aliases"`
 }
 
 // matchMarket finds the single named market (e.g. "Balogun Market") a query
