@@ -22,8 +22,7 @@ func (h *Handler) AuthGoogle(c *gin.Context) {
 		return
 	}
 
-	h.setRefreshCookie(c, rawToken)
-	c.JSON(http.StatusOK, resp)
+	h.respondWithAuth(c, http.StatusOK, resp, rawToken)
 }
 
 // AuthApple godoc
@@ -40,6 +39,5 @@ func (h *Handler) AuthApple(c *gin.Context) {
 		return
 	}
 
-	h.setRefreshCookie(c, rawToken)
-	c.JSON(http.StatusOK, resp)
+	h.respondWithAuth(c, http.StatusOK, resp, rawToken)
 }

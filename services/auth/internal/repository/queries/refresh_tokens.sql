@@ -31,3 +31,11 @@ UPDATE refresh_tokens
 SET revoked_at = now()
 WHERE family_id = $1
   AND revoked_at IS NULL;
+
+-- RevokeAllRefreshTokensForUser is used after a password reset — every
+-- existing session (every device, every family) is logged out for safety.
+-- name: RevokeAllRefreshTokensForUser :exec
+UPDATE refresh_tokens
+SET revoked_at = now()
+WHERE user_id = $1
+  AND revoked_at IS NULL;

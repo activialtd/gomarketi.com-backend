@@ -32,6 +32,10 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 			auth.POST("/register", h.Register)
 			auth.POST("/login", h.Login)
 
+			password := auth.Group("/password")
+			password.POST("/forgot", h.ForgotPassword)
+			password.POST("/reset", h.ResetPassword)
+
 			// Staff login — separate from vendor/buyer login
 			staff := auth.Group("/staff")
 			staff.POST("/login", h.StaffLogin)

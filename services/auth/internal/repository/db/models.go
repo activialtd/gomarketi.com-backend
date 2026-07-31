@@ -31,33 +31,34 @@ type User struct {
 
 // AuthIdentity mirrors the auth_identities table.
 type AuthIdentity struct {
-	ID                 uuid.UUID      `json:"id"`
-	UserID             uuid.UUID      `json:"user_id"`
-	Provider           string         `json:"provider"`
-	ProviderUid        string         `json:"provider_uid"`
-	ProviderEmail      sql.NullString `json:"provider_email"`
-	ProviderName       sql.NullString `json:"provider_name"`
-	ProviderAvatar     sql.NullString `json:"provider_avatar"`
-	AccessToken        sql.NullString `json:"access_token"`
-	RefreshToken       sql.NullString `json:"refresh_token"`
-	TokenExpiresAt     sql.NullTime   `json:"token_expires_at"`
-	AppleNameCaptured  bool           `json:"apple_name_captured"`
-	IsPrimary          bool           `json:"is_primary"`
-	LastUsedAt         sql.NullTime   `json:"last_used_at"`
-	CreatedAt          time.Time      `json:"created_at"`
-	UpdatedAt          time.Time      `json:"updated_at"`
+	ID                uuid.UUID      `json:"id"`
+	UserID            uuid.UUID      `json:"user_id"`
+	Provider          string         `json:"provider"`
+	ProviderUid       string         `json:"provider_uid"`
+	ProviderEmail     sql.NullString `json:"provider_email"`
+	ProviderName      sql.NullString `json:"provider_name"`
+	ProviderAvatar    sql.NullString `json:"provider_avatar"`
+	AccessToken       sql.NullString `json:"access_token"`
+	RefreshToken      sql.NullString `json:"refresh_token"`
+	TokenExpiresAt    sql.NullTime   `json:"token_expires_at"`
+	AppleNameCaptured bool           `json:"apple_name_captured"`
+	IsPrimary         bool           `json:"is_primary"`
+	LastUsedAt        sql.NullTime   `json:"last_used_at"`
+	CreatedAt         time.Time      `json:"created_at"`
+	UpdatedAt         time.Time      `json:"updated_at"`
 }
 
 // OtpSession mirrors the otp_sessions table.
 type OtpSession struct {
-	ID           uuid.UUID      `json:"id"`
-	Email        string         `json:"email"`
-	SessionToken string         `json:"session_token"`
-	OtpHash      string         `json:"otp_hash"`
-	Attempts     int32          `json:"attempts"`
-	ExpiresAt    time.Time      `json:"expires_at"`
-	UsedAt       sql.NullTime   `json:"used_at"`
-	CreatedAt    time.Time      `json:"created_at"`
+	ID           uuid.UUID    `json:"id"`
+	Email        string       `json:"email"`
+	SessionToken string       `json:"session_token"`
+	OtpHash      string       `json:"otp_hash"`
+	Attempts     int32        `json:"attempts"`
+	ExpiresAt    time.Time    `json:"expires_at"`
+	UsedAt       sql.NullTime `json:"used_at"`
+	CreatedAt    time.Time    `json:"created_at"`
+	Purpose      string       `json:"purpose"`
 }
 
 // RefreshToken mirrors the refresh_tokens table.

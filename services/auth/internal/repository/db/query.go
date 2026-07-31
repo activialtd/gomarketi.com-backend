@@ -149,6 +149,13 @@ func (q *Queries) UpdateLastLogin(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
+const updatePasswordHash = `UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1`
+
+func (q *Queries) UpdatePasswordHash(ctx context.Context, id uuid.UUID, passwordHash string) error {
+	_, err := q.db.ExecContext(ctx, updatePasswordHash, id, passwordHash)
+	return err
+}
+
 // ── auth_identities ───────────────────────────────────────────────────────────
 
 const getIdentityByProviderUID = `
@@ -191,17 +198,17 @@ func (q *Queries) UpsertEmailIdentity(ctx context.Context, userID uuid.UUID, pro
 }
 
 type CreateOAuthIdentityParams struct {
-	UserID             uuid.UUID
-	Provider           string
-	ProviderUID        string
-	ProviderEmail      sql.NullString
-	ProviderName       sql.NullString
-	ProviderAvatar     sql.NullString
-	AccessToken        sql.NullString
-	RefreshToken       sql.NullString
-	TokenExpiresAt     sql.NullTime
-	AppleNameCaptured  bool
-	IsPrimary          bool
+	UserID            uuid.UUID
+	Provider          string
+	ProviderUID       string
+	ProviderEmail     sql.NullString
+	ProviderName      sql.NullString
+	ProviderAvatar    sql.NullString
+	AccessToken       sql.NullString
+	RefreshToken      sql.NullString
+	TokenExpiresAt    sql.NullTime
+	AppleNameCaptured bool
+	IsPrimary         bool
 }
 
 const createOAuthIdentity = `
@@ -269,20 +276,21 @@ type CreateOTPSessionParams struct {
 	SessionToken string
 	OtpHash      string
 	ExpiresAt    time.Time
+	Purpose      string
 }
 
 const createOTPSession = `
-INSERT INTO otp_sessions (email, session_token, otp_hash, expires_at)
-VALUES ($1, $2, $3, $4)
-RETURNING id, email, session_token, otp_hash, attempts, expires_at, used_at, created_at`
+INSERT INTO otp_sessions (email, session_token, otp_hash, expires_at, purpose)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, email, session_token, otp_hash, attempts, expires_at, used_at, created_at, purpose`
 
 func (q *Queries) CreateOTPSession(ctx context.Context, arg CreateOTPSessionParams) (OtpSession, error) {
-	row := q.db.QueryRowContext(ctx, createOTPSession, arg.Email, arg.SessionToken, arg.OtpHash, arg.ExpiresAt)
+	row := q.db.QueryRowContext(ctx, createOTPSession, arg.Email, arg.SessionToken, arg.OtpHash, arg.ExpiresAt, arg.Purpose)
 	return scanOTPSession(row)
 }
 
 const getOTPSessionByToken = `
-SELECT id, email, session_token, otp_hash, attempts, expires_at, used_at, created_at
+SELECT id, email, session_token, otp_hash, attempts, expires_at, used_at, created_at, purpose
 FROM otp_sessions WHERE session_token = $1`
 
 func (q *Queries) GetOTPSessionByToken(ctx context.Context, token string) (OtpSession, error) {
@@ -292,7 +300,7 @@ func (q *Queries) GetOTPSessionByToken(ctx context.Context, token string) (OtpSe
 
 const incrementOTPAttempts = `
 UPDATE otp_sessions SET attempts = attempts + 1 WHERE id = $1
-RETURNING id, email, session_token, otp_hash, attempts, expires_at, used_at, created_at`
+RETURNING id, email, session_token, otp_hash, attempts, expires_at, used_at, created_at, purpose`
 
 func (q *Queries) IncrementOTPAttempts(ctx context.Context, id uuid.UUID) (OtpSession, error) {
 	row := q.db.QueryRowContext(ctx, incrementOTPAttempts, id)
@@ -308,7 +316,7 @@ func (q *Queries) MarkOTPSessionUsed(ctx context.Context, id uuid.UUID) error {
 
 func scanOTPSession(row *sql.Row) (OtpSession, error) {
 	var s OtpSession
-	err := row.Scan(&s.ID, &s.Email, &s.SessionToken, &s.OtpHash, &s.Attempts, &s.ExpiresAt, &s.UsedAt, &s.CreatedAt)
+	err := row.Scan(&s.ID, &s.Email, &s.SessionToken, &s.OtpHash, &s.Attempts, &s.ExpiresAt, &s.UsedAt, &s.CreatedAt, &s.Purpose)
 	return s, err
 }
 
@@ -386,6 +394,13 @@ const revokeTokenFamily = `UPDATE refresh_tokens SET revoked_at = now() WHERE fa
 
 func (q *Queries) RevokeTokenFamily(ctx context.Context, familyID uuid.UUID) error {
 	_, err := q.db.ExecContext(ctx, revokeTokenFamily, familyID)
+	return err
+}
+
+const revokeAllRefreshTokensForUser = `UPDATE refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`
+
+func (q *Queries) RevokeAllRefreshTokensForUser(ctx context.Context, userID uuid.UUID) error {
+	_, err := q.db.ExecContext(ctx, revokeAllRefreshTokensForUser, userID)
 	return err
 }
 

@@ -33,19 +33,31 @@ func NewResendClient(cfg ResendConfig) (*ResendClient, error) {
 }
 
 func (c *ResendClient) SendOTP(ctx context.Context, to, otp string) error {
+	return c.sendCode(ctx, to, "Your GoMarketi verification code",
+		"Verify your email",
+		"Use the code below to complete your sign-in. It expires in 10 minutes.", otp)
+}
+
+func (c *ResendClient) SendPasswordReset(ctx context.Context, to, otp string) error {
+	return c.sendCode(ctx, to, "Reset your GoMarketi password",
+		"Reset your password",
+		"Use the code below to reset your password. It expires in 10 minutes.", otp)
+}
+
+func (c *ResendClient) sendCode(ctx context.Context, to, subject, heading, instructions, otp string) error {
 	payload := map[string]any{
 		"from":    c.cfg.From,
 		"to":      []string{to},
-		"subject": "Your GoMarketi verification code",
+		"subject": subject,
 		"html": fmt.Sprintf(`
 <div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px">
-  <h2 style="color:#1a7a42;margin-bottom:8px">Verify your email</h2>
-  <p style="color:#555;margin-bottom:24px">Use the code below to complete your sign-in. It expires in 10 minutes.</p>
+  <h2 style="color:#1a7a42;margin-bottom:8px">%s</h2>
+  <p style="color:#555;margin-bottom:24px">%s</p>
   <div style="background:#f0faf3;border:1px solid #22c55e33;border-radius:12px;padding:24px;text-align:center">
     <span style="font-size:36px;font-weight:800;letter-spacing:8px;color:#1a7a42">%s</span>
   </div>
   <p style="color:#999;font-size:12px;margin-top:24px">If you didn't request this, you can safely ignore this email.</p>
-</div>`, otp),
+</div>`, heading, instructions, otp),
 	}
 
 	body, err := json.Marshal(payload)
