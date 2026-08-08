@@ -94,8 +94,8 @@ func run(log zerolog.Logger) error {
 				return
 			}
 
-			// WebSocket and EventSource cannot send custom headers — accept token
-			// as ?token= query param and promote it to Authorization before auth.
+			// Browser WebSocket cannot send custom headers — accept token as
+			// ?token= query param and promote it to Authorization before auth.
 			isWS := strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
 			if isWS && r.Header.Get("Authorization") == "" {
 				if tok := r.URL.Query().Get("token"); tok != "" {
