@@ -29,6 +29,7 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 	// Public — no auth.
 	pub := r.Group("/v1/orders/public")
 	pub.POST("", h.CreateOrder)
+	pub.POST("/checkout", h.CreateCheckout)             // multi-store cart: one payment, one order per vendor
 	pub.GET("/:id", h.GetPublicOrder)                   // customer order tracking — gated by email param
 	pub.POST("/visit", h.TrackVisit)                    // lightweight storefront page-view beacon
 	pub.POST("/subscribe", h.Subscribe)                 // storefront newsletter opt-in

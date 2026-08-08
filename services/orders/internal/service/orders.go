@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jmoiron/sqlx"
 	"github.com/rs/zerolog"
 
@@ -162,64 +163,83 @@ func (s *OrdersService) UpdateOrderStatus(ctx context.Context, storeID uuid.UUID
 // customerUUID derives a stable UUID from store+email so repeat buyers
 // collapse into a single CRM customer record instead of one row per order.
 // Storefront buyers aren't authenticated accounts, so email is the only
-// durable identity we have at checkout time.
+// durable identity we have at checkout time. Deliberately store-scoped: one
+// buyer gets a separate CRM identity per vendor, so this must be called once
+// per store, never hoisted above a multi-store loop.
 func customerUUID(storeID uuid.UUID, email string) uuid.UUID {
 	return uuid.NewSHA1(storeID, []byte(strings.ToLower(strings.TrimSpace(email))))
 }
 
-// CreateOrder is called by the storefront checkout after a (simulated)
-// successful Paystack charge. It creates the order, its line items, and
-// credits the vendor's wallet for the full amount in a single transaction.
-func (s *OrdersService) CreateOrder(ctx context.Context, req dto.CreateOrderReq) (dto.OrderResp, error) {
-	storeID, err := uuid.Parse(req.StoreID)
-	if err != nil {
-		return dto.OrderResp{}, apperrors.BadRequest("invalid store_id")
-	}
+// isUniqueViolation reports whether err is a PostgreSQL unique-constraint
+// violation (SQLSTATE 23505). This service connects via pgx (sqlx.Open("pgx", ...)),
+// so errors surface as *pgconn.PgError — NOT *pq.Error, the type the auth and
+// catalogue services check for the same purpose. Auth actually connects via
+// lib/pq's "postgres" driver, so that check is correct there; catalogue
+// connects via pgx like this service does, so its equivalent check is
+// silently dead code. Verified against a real Postgres before trusting this.
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
 
+// claimPaymentReference inserts a row that can only ever exist once per
+// payment_reference, inside the same transaction as the order writes it
+// guards — so a committed claim guarantees the corresponding order(s) exist,
+// and a crash between the two is impossible. A conflict means this
+// reference has already been spent; the caller should roll back and look up
+// what was created rather than creating a duplicate.
+//
+// This MUST be a direct INSERT, never a SELECT-then-INSERT: Postgres
+// serializes concurrent inserts of the same key under READ COMMITTED, so the
+// bare INSERT is what actually makes this replay-safe. A check-then-insert
+// reopens the exact race this exists to close.
+func claimPaymentReference(ctx context.Context, tx *sqlx.Tx, ref string, amountKobo int64) error {
+	_, err := tx.ExecContext(ctx,
+		`INSERT INTO checkout_payments (payment_reference, amount_kobo) VALUES ($1,$2)`,
+		ref, amountKobo,
+	)
+	if err != nil && isUniqueViolation(err) {
+		return apperrors.Conflict("payment reference already used")
+	}
+	return err
+}
+
+// insertOrderTx inserts one order, its line items, and the vendor's wallet
+// credit, all within the given transaction. Shared by CreateOrder (one
+// store) and CreateCheckout (N stores, one per vendor, sharing one payment).
+func insertOrderTx(ctx context.Context, tx *sqlx.Tx, storeID uuid.UUID, customerName, customerEmail, deliveryAddress string, items []dto.CreateOrderItem, paymentRef string) (uuid.UUID, int64, error) {
 	var totalKobo int64
-	for _, it := range req.Items {
+	for _, it := range items {
 		totalKobo += it.PriceKobo * int64(it.Quantity)
 	}
 	if totalKobo <= 0 {
-		return dto.OrderResp{}, apperrors.BadRequest("order total must be greater than zero")
+		return uuid.Nil, 0, apperrors.BadRequest("order total must be greater than zero")
 	}
 
-	// Verify the Paystack charge before touching the database.
-	// In dev mode (no PAYSTACK_SECRET_KEY) this is a no-op with a log warning.
-	if err := s.verifyPaystackTransaction(ctx, req.PaymentRef, totalKobo); err != nil {
-		return dto.OrderResp{}, err
-	}
-
-	custID := customerUUID(storeID, req.CustomerEmail)
-
-	tx, err := s.db.BeginTxx(ctx, nil)
-	if err != nil {
-		return dto.OrderResp{}, fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck
+	custID := customerUUID(storeID, customerEmail)
 
 	var orderID uuid.UUID
-	err = tx.QueryRowContext(ctx, `
-		INSERT INTO orders (store_id, customer_id, customer_name, customer_email, status, total_kobo, delivery_address)
-		VALUES ($1,$2,$3,$4,'confirmed',$5,$6)
+	err := tx.QueryRowContext(ctx, `
+		INSERT INTO orders (store_id, customer_id, customer_name, customer_email, status, total_kobo, delivery_address, payment_reference)
+		VALUES ($1,$2,$3,$4,'confirmed',$5,$6,$7)
 		RETURNING id`,
-		storeID, custID, req.CustomerName, req.CustomerEmail, totalKobo, req.DeliveryAddress,
+		storeID, custID, customerName, customerEmail, totalKobo, deliveryAddress, paymentRef,
 	).Scan(&orderID)
 	if err != nil {
-		return dto.OrderResp{}, fmt.Errorf("insert order: %w", err)
+		return uuid.Nil, 0, fmt.Errorf("insert order: %w", err)
 	}
 
-	for _, it := range req.Items {
+	for _, it := range items {
 		productID, err := uuid.Parse(it.ProductID)
 		if err != nil {
-			return dto.OrderResp{}, apperrors.BadRequest("invalid product_id in items")
+			return uuid.Nil, 0, apperrors.BadRequest("invalid product_id in items")
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO order_items (order_id, product_id, name, image_url, quantity, price_kobo)
 			VALUES ($1,$2,$3,$4,$5,$6)`,
 			orderID, productID, it.Name, it.ImageURL, it.Quantity, it.PriceKobo,
 		); err != nil {
-			return dto.OrderResp{}, fmt.Errorf("insert order item: %w", err)
+			return uuid.Nil, 0, fmt.Errorf("insert order item: %w", err)
 		}
 	}
 
@@ -227,24 +247,27 @@ func (s *OrdersService) CreateOrder(ctx context.Context, req dto.CreateOrderReq)
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO wallet_transactions (store_id, type, amount_kobo, description, reference, order_id, status)
 		VALUES ($1,'credit',$2,$3,$4,$5,'completed')`,
-		storeID, totalKobo, fmt.Sprintf("Sale — order #%s", orderID.String()[:8]), req.PaymentRef, orderID,
+		storeID, totalKobo, fmt.Sprintf("Sale — order #%s", orderID.String()[:8]), paymentRef, orderID,
 	); err != nil {
-		return dto.OrderResp{}, fmt.Errorf("credit wallet: %w", err)
+		return uuid.Nil, 0, fmt.Errorf("credit wallet: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
-		return dto.OrderResp{}, fmt.Errorf("commit: %w", err)
-	}
+	return orderID, totalKobo, nil
+}
 
-	// Notify any open SSE dashboard connections.
+// notifyOrderCreated fires the post-commit side effects for one newly
+// created order: the SSE broadcast to the vendor's dashboard, the customer
+// invoice email, and the vendor alert email. All three fire asynchronously
+// and never block the caller, matching CreateOrder's original behavior.
+func (s *OrdersService) notifyOrderCreated(storeID, orderID uuid.UUID, totalKobo int64, customerName, customerEmail, customerPhone, deliveryAddress, storeSlug, storeName string, items []dto.CreateOrderItem) {
+	// Notify any open SSE/WebSocket dashboard connections.
 	go s.broker.Publish(storeID.String(), sse.Event{
 		Type: "order_created",
 		Data: fmt.Sprintf(`{"order_id":%q,"total_kobo":%d}`, orderID, totalKobo),
 	})
 
-	// Send invoice email to customer asynchronously — never block checkout on email delivery.
-	invoiceItems := make([]email.InvoiceItem, len(req.Items))
-	for i, it := range req.Items {
+	invoiceItems := make([]email.InvoiceItem, len(items))
+	for i, it := range items {
 		invoiceItems[i] = email.InvoiceItem{
 			Name:      it.Name,
 			ImageURL:  it.ImageURL,
@@ -252,19 +275,18 @@ func (s *OrdersService) CreateOrder(ctx context.Context, req dto.CreateOrderReq)
 			PriceKobo: it.PriceKobo,
 		}
 	}
-	storeSlug := req.StoreSlug
-	storeName := req.StoreName
 	if storeName == "" {
 		storeName = "GoMarketi Store"
 	}
 	orderIDStr := orderID.String()
 
-	if req.CustomerEmail != "" {
+	// Send invoice email to customer asynchronously — never block checkout on email delivery.
+	if customerEmail != "" {
 		go func() {
 			if err := email.SendInvoice(
 				context.Background(),
-				req.CustomerEmail,
-				req.CustomerName,
+				customerEmail,
+				customerName,
 				orderIDStr,
 				storeSlug,
 				storeName,
@@ -288,18 +310,192 @@ func (s *OrdersService) CreateOrder(ctx context.Context, req dto.CreateOrderReq)
 			vendorEmail,
 			storeName,
 			orderIDStr,
-			req.CustomerName,
-			req.CustomerEmail,
-			req.CustomerPhone,
-			req.DeliveryAddress,
+			customerName,
+			customerEmail,
+			customerPhone,
+			deliveryAddress,
 			totalKobo,
 			invoiceItems,
 		); err != nil {
 			s.log.Warn().Err(err).Str("order_id", orderIDStr).Msg("vendor alert email failed")
 		}
 	}()
+}
+
+// findOrdersByPaymentRef returns every order created against a given
+// payment_reference, oldest first — used to answer a replayed checkout
+// request with what actually happened, instead of erroring on a purchase
+// that already succeeded (e.g. a dropped response on a flaky connection).
+func (s *OrdersService) findOrdersByPaymentRef(ctx context.Context, ref string) ([]dto.OrderResp, error) {
+	rows, err := s.db.QueryxContext(ctx, `
+		SELECT id, store_id, customer_id, customer_name, customer_email,
+		       status, total_kobo, delivery_address, created_at, updated_at
+		FROM orders WHERE payment_reference=$1 ORDER BY created_at ASC`, ref)
+	if err != nil {
+		return nil, fmt.Errorf("find orders by payment_reference: %w", err)
+	}
+	defer rows.Close()
+
+	orders := make([]dto.OrderResp, 0)
+	for rows.Next() {
+		var r orderRow
+		if err := rows.StructScan(&r); err != nil {
+			return nil, err
+		}
+		o := rowToOrder(r)
+		o.PaymentRef = ref
+		o.Items = s.loadItems(ctx, r.ID)
+		orders = append(orders, o)
+	}
+	return orders, nil
+}
+
+// CreateOrder is called by the storefront checkout after a (simulated)
+// successful Paystack charge. It creates the order, its line items, and
+// credits the vendor's wallet for the full amount in a single transaction.
+// A replayed payment_reference returns the original order instead of
+// erroring or double-crediting.
+func (s *OrdersService) CreateOrder(ctx context.Context, req dto.CreateOrderReq) (dto.OrderResp, error) {
+	storeID, err := uuid.Parse(req.StoreID)
+	if err != nil {
+		return dto.OrderResp{}, apperrors.BadRequest("invalid store_id")
+	}
+
+	var totalKobo int64
+	for _, it := range req.Items {
+		totalKobo += it.PriceKobo * int64(it.Quantity)
+	}
+	if totalKobo <= 0 {
+		return dto.OrderResp{}, apperrors.BadRequest("order total must be greater than zero")
+	}
+
+	// Verify the Paystack charge before touching the database.
+	// In dev mode (no PAYSTACK_SECRET_KEY) this is a no-op with a log warning.
+	if err := s.verifyPaystackTransaction(ctx, req.PaymentRef, totalKobo); err != nil {
+		return dto.OrderResp{}, err
+	}
+
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return dto.OrderResp{}, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if err := claimPaymentReference(ctx, tx, req.PaymentRef, totalKobo); err != nil {
+		if apperrors.IsConflict(err) {
+			_ = tx.Rollback()
+			if existing, findErr := s.findOrdersByPaymentRef(ctx, req.PaymentRef); findErr == nil && len(existing) > 0 {
+				return existing[0], nil
+			}
+			return dto.OrderResp{}, err
+		}
+		return dto.OrderResp{}, fmt.Errorf("claim payment reference: %w", err)
+	}
+
+	orderID, insertedTotal, err := insertOrderTx(ctx, tx, storeID, req.CustomerName, req.CustomerEmail, req.DeliveryAddress, req.Items, req.PaymentRef)
+	if err != nil {
+		return dto.OrderResp{}, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return dto.OrderResp{}, fmt.Errorf("commit: %w", err)
+	}
+
+	s.notifyOrderCreated(storeID, orderID, insertedTotal, req.CustomerName, req.CustomerEmail, req.CustomerPhone, req.DeliveryAddress, req.StoreSlug, req.StoreName, req.Items)
 
 	return s.GetOrder(ctx, storeID, orderID)
+}
+
+// CreateCheckout is called by the consumer app when a cart spans more than
+// one vendor store. One Paystack charge (req.PaymentRef) is verified once
+// against the sum of every store's items, then one order is created per
+// store inside a single transaction — either all of them land or none do.
+// A replayed payment_reference returns the original orders instead of
+// erroring or double-crediting.
+func (s *OrdersService) CreateCheckout(ctx context.Context, req dto.CreateCheckoutReq) ([]dto.OrderResp, error) {
+	var grandTotal int64
+	for _, so := range req.Stores {
+		for _, it := range so.Items {
+			grandTotal += it.PriceKobo * int64(it.Quantity)
+		}
+	}
+	if grandTotal <= 0 {
+		return nil, apperrors.BadRequest("order total must be greater than zero")
+	}
+
+	// Cheap latency/cost optimization for an obvious replay (e.g. a
+	// double-tapped Pay button) — NOT the idempotency guard itself, which is
+	// the transactional claim below. Skipping this check would still be correct.
+	var alreadyClaimed bool
+	_ = s.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM checkout_payments WHERE payment_reference=$1)`,
+		req.PaymentRef,
+	).Scan(&alreadyClaimed)
+	if alreadyClaimed {
+		if existing, err := s.findOrdersByPaymentRef(ctx, req.PaymentRef); err == nil && len(existing) > 0 {
+			return existing, nil
+		}
+	}
+
+	// Verify the Paystack charge once, against the full multi-store total.
+	if err := s.verifyPaystackTransaction(ctx, req.PaymentRef, grandTotal); err != nil {
+		return nil, err
+	}
+
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if err := claimPaymentReference(ctx, tx, req.PaymentRef, grandTotal); err != nil {
+		if apperrors.IsConflict(err) {
+			_ = tx.Rollback()
+			if existing, findErr := s.findOrdersByPaymentRef(ctx, req.PaymentRef); findErr == nil && len(existing) > 0 {
+				return existing, nil
+			}
+			return nil, err
+		}
+		return nil, fmt.Errorf("claim payment reference: %w", err)
+	}
+
+	type createdOrder struct {
+		storeID   uuid.UUID
+		orderID   uuid.UUID
+		totalKobo int64
+		storeSlug string
+		storeName string
+		items     []dto.CreateOrderItem
+	}
+	created := make([]createdOrder, 0, len(req.Stores))
+
+	for _, so := range req.Stores {
+		storeID, err := uuid.Parse(so.StoreID)
+		if err != nil {
+			return nil, apperrors.BadRequest("invalid store_id")
+		}
+		orderID, subTotal, err := insertOrderTx(ctx, tx, storeID, req.CustomerName, req.CustomerEmail, req.DeliveryAddress, so.Items, req.PaymentRef)
+		if err != nil {
+			return nil, err
+		}
+		created = append(created, createdOrder{storeID, orderID, subTotal, so.StoreSlug, so.StoreName, so.Items})
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+
+	resp := make([]dto.OrderResp, 0, len(created))
+	for _, c := range created {
+		s.notifyOrderCreated(c.storeID, c.orderID, c.totalKobo, req.CustomerName, req.CustomerEmail, req.CustomerPhone, req.DeliveryAddress, c.storeSlug, c.storeName, c.items)
+		o, err := s.GetOrder(ctx, c.storeID, c.orderID)
+		if err != nil {
+			return nil, err
+		}
+		resp = append(resp, o)
+	}
+
+	return resp, nil
 }
 
 // getVendorEmail returns the email of the user who owns the given store.

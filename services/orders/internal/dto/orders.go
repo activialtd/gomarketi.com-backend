@@ -35,6 +35,7 @@ type OrderResp struct {
 	Items           []OrderItem `json:"items"`
 	TotalKobo       int64       `json:"total_kobo"`
 	DeliveryAddress string      `json:"delivery_address"`
+	PaymentRef      string      `json:"payment_reference,omitempty"`
 	CreatedAt       string      `json:"created_at"`
 	UpdatedAt       string      `json:"updated_at"`
 }
@@ -68,6 +69,35 @@ type CreateOrderReq struct {
 	DeliveryAddress string            `json:"delivery_address"`
 	Items           []CreateOrderItem `json:"items"             validate:"required,min=1,dive"`
 	PaymentRef      string            `json:"payment_reference" validate:"required"`
+}
+
+// CreateCheckoutStoreOrder is one vendor's slice of a multi-store checkout —
+// same shape as CreateOrderReq but without its own payment_reference, since
+// one payment covers every store in the checkout.
+type CreateCheckoutStoreOrder struct {
+	StoreID   string            `json:"store_id"   validate:"required,uuid"`
+	StoreSlug string            `json:"store_slug"`
+	StoreName string            `json:"store_name"`
+	Items     []CreateOrderItem `json:"items"       validate:"required,min=1,dive"`
+}
+
+// CreateCheckoutReq is the body for POST /v1/orders/public/checkout — used
+// when a single checkout spans more than one vendor store. One Paystack
+// charge (payment_reference) is verified once against the sum of every
+// store's items, then one order per store is created atomically.
+type CreateCheckoutReq struct {
+	CustomerName    string                     `json:"customer_name"     validate:"required"`
+	CustomerEmail   string                     `json:"customer_email"    validate:"required,email"`
+	CustomerPhone   string                     `json:"customer_phone"`
+	DeliveryAddress string                     `json:"delivery_address"`
+	PaymentRef      string                     `json:"payment_reference" validate:"required"`
+	Stores          []CreateCheckoutStoreOrder `json:"stores"            validate:"required,min=1,dive"`
+}
+
+// CreateCheckoutResp returns one order per store in the same order the
+// request's Stores array was given in.
+type CreateCheckoutResp struct {
+	Orders []OrderResp `json:"orders"`
 }
 
 // UpdateOrderStatusReq is the body for PATCH /v1/orders/:id/status.
