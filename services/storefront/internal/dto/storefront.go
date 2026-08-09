@@ -92,9 +92,24 @@ type StoreSearchResp struct {
 
 // StoreSearchListResp wraps a page of search results with pagination info,
 // so the client can prefetch the next page before the user scrolls to it.
+//
+// MatchType/RemainingQuery expose the query-parsing SearchStores already
+// does internally to filter its own results — the consumer app's product
+// search reuses this same call to resolve which stores are eligible
+// (a named vendor, a named market, or the nearest N by distance) before
+// ever calling catalogue's cross-vendor product search. See matchVendor,
+// matchMarket, matchCity, stripMatchedPhrase.
 type StoreSearchListResp struct {
 	Stores  []StoreSearchResp `json:"stores"`
 	HasMore bool              `json:"has_more"`
+	// MatchType is "vendor" | "market" | "city" | "distance" | "none".
+	MatchType       string  `json:"match_type"`
+	MatchedStoreID  *string `json:"matched_store_id,omitempty"`
+	MatchedMarketID *string `json:"matched_market_id,omitempty"`
+	// RemainingQuery is Q with the matched vendor/market/city phrase (and a
+	// leading connector word, if any) stripped out — the product term(s)
+	// left over, safe to pass to a product-name search.
+	RemainingQuery string `json:"remaining_query"`
 }
 
 // MarketReq is the query params for GET /v1/storefront/public/markets.

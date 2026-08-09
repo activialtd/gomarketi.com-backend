@@ -298,15 +298,17 @@ var cityAliases = map[string][]string{
 }
 
 // matchCity returns the stores.city value(s) to filter by if the query
-// names a general area, or nil if it doesn't.
-func matchCity(q string) []string {
+// names a general area, plus the matched keyword itself (for stripping it
+// back out of the query to isolate the product term) — or ("", nil) if
+// nothing matched.
+func matchCity(q string) (keyword string, cities []string) {
 	q = " " + strings.ToLower(q) + " "
-	for keyword, cities := range cityAliases {
-		if strings.Contains(q, keyword) {
-			return cities
+	for kw, c := range cityAliases {
+		if strings.Contains(q, kw) {
+			return kw, c
 		}
 	}
-	return nil
+	return "", nil
 }
 
 type marketRow struct {
@@ -341,6 +343,107 @@ func (s *StorefrontService) matchMarket(ctx context.Context, q string) (*marketR
 	return nil, nil
 }
 
+type vendorNameRow struct {
+	ID   uuid.UUID `db:"id"`
+	Name string    `db:"name"`
+}
+
+// vendorMatch pairs the matched store with the actual substring that
+// matched it — the full name, or (see matchVendor's second pass) just its
+// first word — so the caller strips exactly that text back out of the
+// query, not the store's full name regardless of what was actually typed.
+type vendorMatch struct {
+	Store  vendorNameRow
+	Phrase string
+}
+
+// matchVendor finds the single specific vendor store a query names. This is
+// the highest-priority tier — more specific than a named market — so a
+// query naming both a vendor and a market still resolves to just that
+// vendor, and the cross-vendor carousel is suppressed entirely for it
+// (that's the caller's job once it sees MatchType == "vendor").
+//
+// Two passes, most to least precise:
+//  1. The query contains the store's full name verbatim ("...at TechHub
+//     Store"). Word-boundary padded on BOTH the query and the candidate
+//     name — matchMarket only pads the query side, which is a real gap: it
+//     would treat a market literally named "co" as matching any query
+//     containing "co" as a substring of a longer word (e.g. "coffee").
+//  2. Nothing matched the full name — fall back to just the store's first
+//     word ("...at techhub"). This is how people actually reference a
+//     vendor in a short search query; requiring the full name would make
+//     this tier fire on almost nothing in practice (confirmed by testing
+//     "iphone at techhub" against a store literally named "TechHub Store"
+//     — pass 1 alone misses it entirely). Riskier since a single word
+//     matches more broadly, so it's a distinct, lower-priority pass rather
+//     than loosening pass 1's own matching.
+//
+// Both passes skip candidate strings under 4 characters (blunt guard
+// against short-name false positives) and prefer the longest match if
+// several candidates match within the same pass.
+func (s *StorefrontService) matchVendor(ctx context.Context, q string) (*vendorMatch, error) {
+	var vendors []vendorNameRow
+	if err := s.db.SelectContext(ctx, &vendors, `SELECT id, name FROM stores WHERE is_active = TRUE`); err != nil {
+		return nil, fmt.Errorf("load vendors: %w", err)
+	}
+
+	padded := " " + strings.ToLower(q) + " "
+
+	var best *vendorNameRow
+	for i := range vendors {
+		v := &vendors[i]
+		name := strings.ToLower(v.Name)
+		if len(name) < 4 {
+			continue
+		}
+		if strings.Contains(padded, " "+name+" ") && (best == nil || len(name) > len(strings.ToLower(best.Name))) {
+			best = v
+		}
+	}
+	if best != nil {
+		return &vendorMatch{Store: *best, Phrase: best.Name}, nil
+	}
+
+	var bestWord *vendorNameRow
+	var bestWordText string
+	for i := range vendors {
+		v := &vendors[i]
+		first, _, _ := strings.Cut(strings.ToLower(v.Name), " ")
+		if len(first) < 4 {
+			continue
+		}
+		if strings.Contains(padded, " "+first+" ") && len(first) > len(bestWordText) {
+			bestWord = v
+			bestWordText = first
+		}
+	}
+	if bestWord != nil {
+		return &vendorMatch{Store: *bestWord, Phrase: bestWordText}, nil
+	}
+
+	return nil, nil
+}
+
+// stripMatchedPhrase removes a matched vendor/market/city phrase from the
+// query — plus one leading connector word, if present immediately before
+// it — leaving the product term(s) to search catalogue with. Without this,
+// a query like "iphone at techhub" would never ILIKE-match a product named
+// "iPhone 14": "iphone at techhub" isn't a substring of any product name,
+// but the stripped remainder "iphone" is.
+func stripMatchedPhrase(q, phrase string) string {
+	if phrase == "" {
+		return strings.TrimSpace(q)
+	}
+	withConnector := regexp.MustCompile(`(?i)\b(in|at|near|from)\s+` + regexp.QuoteMeta(phrase) + `\b`)
+	remaining := withConnector.ReplaceAllString(q, "")
+	if remaining == q {
+		bare := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(phrase) + `\b`)
+		remaining = bare.ReplaceAllString(q, "")
+	}
+	remaining = regexp.MustCompile(`\s+`).ReplaceAllString(remaining, " ")
+	return strings.TrimSpace(remaining)
+}
+
 type storeSearchRow struct {
 	ID           uuid.UUID       `db:"id"`
 	Name         string          `db:"name"`
@@ -359,9 +462,14 @@ type storeSearchRow struct {
 
 // SearchStores finds stores by free-text query and/or explicit category,
 // optionally sorted by distance from a buyer's location. Powers the
-// consumer-app text and voice search.
+// consumer-app text and voice search, including resolving which stores are
+// eligible for a cross-vendor product search (see MatchType/RemainingQuery
+// on the response).
 //
 // Location precision, most to least specific:
+//  0. a specific vendor named in the query ("...at TechHub Store") —
+//     filters to exactly that store. Most specific tier: even if a market
+//     is also named, the vendor wins.
 //  1. explicit market_id, or a named market recognized in the query
 //     ("...in balogun") — filters to exactly that market, no distance
 //     fallback, even if that returns zero results.
@@ -386,22 +494,53 @@ func (s *StorefrontService) SearchStores(ctx context.Context, req dto.StoreSearc
 		categoryList = matchCategories(*req.Q)
 	}
 
-	var matchedMarketID string
-	if req.MarketID != nil && *req.MarketID != "" {
-		matchedMarketID = *req.MarketID
-	} else if req.Q != nil && *req.Q != "" {
-		m, err := s.matchMarket(ctx, *req.Q)
+	var matchedStoreID, matchedPhrase string
+	if req.Q != nil && *req.Q != "" {
+		v, err := s.matchVendor(ctx, *req.Q)
 		if err != nil {
 			return dto.StoreSearchListResp{}, err
 		}
-		if m != nil {
-			matchedMarketID = m.ID.String()
+		if v != nil {
+			matchedStoreID = v.Store.ID.String()
+			matchedPhrase = v.Phrase
+		}
+	}
+
+	var matchedMarketID string
+	if matchedStoreID == "" {
+		if req.MarketID != nil && *req.MarketID != "" {
+			matchedMarketID = *req.MarketID
+		} else if req.Q != nil && *req.Q != "" {
+			m, err := s.matchMarket(ctx, *req.Q)
+			if err != nil {
+				return dto.StoreSearchListResp{}, err
+			}
+			if m != nil {
+				matchedMarketID = m.ID.String()
+				matchedPhrase = m.Name
+				// The query may contain an alias rather than the market's
+				// canonical name — prefer whichever string actually appears,
+				// so stripMatchedPhrase removes the right text.
+				lowerQ := strings.ToLower(*req.Q)
+				if !strings.Contains(lowerQ, strings.ToLower(m.Name)) {
+					for _, alias := range m.Aliases {
+						if strings.Contains(lowerQ, strings.ToLower(alias)) {
+							matchedPhrase = alias
+							break
+						}
+					}
+				}
+			}
 		}
 	}
 
 	var matchedCities []string
-	if matchedMarketID == "" && req.Q != nil && *req.Q != "" {
-		matchedCities = matchCity(*req.Q)
+	var matchedCityKeyword string
+	if matchedStoreID == "" && matchedMarketID == "" && req.Q != nil && *req.Q != "" {
+		matchedCityKeyword, matchedCities = matchCity(*req.Q)
+		if matchedCityKeyword != "" {
+			matchedPhrase = matchedCityKeyword
+		}
 	}
 
 	hasLoc := req.Lat != nil && req.Lng != nil
@@ -415,16 +554,24 @@ func (s *StorefrontService) SearchStores(ctx context.Context, req dto.StoreSearc
 	whereParts := []string{"is_active = TRUE"}
 	var args []interface{}
 	argN := 1
+	matchType := "none"
 
 	switch {
+	case matchedStoreID != "":
+		whereParts = append(whereParts, fmt.Sprintf("id = $%d::uuid", argN))
+		args = append(args, matchedStoreID)
+		argN++
+		matchType = "vendor"
 	case matchedMarketID != "":
 		whereParts = append(whereParts, fmt.Sprintf("market_id = $%d::uuid", argN))
 		args = append(args, matchedMarketID)
 		argN++
+		matchType = "market"
 	case len(matchedCities) > 0:
 		whereParts = append(whereParts, fmt.Sprintf("city = ANY($%d)", argN))
 		args = append(args, matchedCities)
 		argN++
+		matchType = "city"
 	case hasLoc:
 		selectDistance = fmt.Sprintf(
 			"ST_Distance(coordinates::geography, ST_SetSRID(ST_MakePoint($%d,$%d),4326)::geography) / 1000 AS distance_km",
@@ -436,13 +583,14 @@ func (s *StorefrontService) SearchStores(ctx context.Context, req dto.StoreSearc
 		args = append(args, radiusKm*1000)
 		argN += 3
 		orderBy = "(coordinates IS NULL) ASC, distance_km ASC NULLS LAST"
+		matchType = "distance"
 	}
 
 	if len(categoryList) > 0 {
 		whereParts = append(whereParts, fmt.Sprintf("category = ANY($%d)", argN))
 		args = append(args, categoryList)
 		argN++
-	} else if matchedMarketID == "" && len(matchedCities) == 0 && req.Q != nil && *req.Q != "" {
+	} else if matchedStoreID == "" && matchedMarketID == "" && len(matchedCities) == 0 && req.Q != nil && *req.Q != "" {
 		whereParts = append(whereParts, fmt.Sprintf("(name ILIKE $%d OR tagline ILIKE $%d)", argN, argN))
 		args = append(args, "%"+*req.Q+"%")
 		argN++
@@ -498,7 +646,22 @@ func (s *StorefrontService) SearchStores(ctx context.Context, req dto.StoreSearc
 	if hasMore {
 		out = out[:limit]
 	}
-	return dto.StoreSearchListResp{Stores: out, HasMore: hasMore}, nil
+
+	resp := dto.StoreSearchListResp{
+		Stores:    out,
+		HasMore:   hasMore,
+		MatchType: matchType,
+	}
+	if req.Q != nil {
+		resp.RemainingQuery = stripMatchedPhrase(*req.Q, matchedPhrase)
+	}
+	if matchedStoreID != "" {
+		resp.MatchedStoreID = &matchedStoreID
+	}
+	if matchedMarketID != "" {
+		resp.MatchedMarketID = &matchedMarketID
+	}
+	return resp, nil
 }
 
 // ListMarkets returns major markets, optionally filtered by state and/or

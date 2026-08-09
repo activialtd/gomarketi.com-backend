@@ -30,6 +30,7 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 	pub := r.Group("/v1/catalogue/public")
 	// Query-param routes used by the storefront API client
 	pub.GET("/products", h.ListPublicProductsByQuery)
+	pub.GET("/products/search", h.SearchPublicProducts) // cross-vendor — registered before the :product_id wildcard
 	pub.GET("/products/:product_id", h.GetPublicProductByID)
 	pub.GET("/categories", h.ListPublicCategories)
 	pub.GET("/collections", h.ListPublicCollections)
@@ -51,6 +52,9 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 		product.DELETE("", h.DeleteProduct)
 		product.POST("/publish", h.PublishProduct)
 		product.POST("/unpublish", h.UnpublishProduct)
+
+		// Canonical product typeahead for the create/edit product form
+		v1.GET("/canonical-products/search", h.SearchCanonicalProducts)
 
 		// Categories (MERCHANT.CATEGORIES dashboard section)
 		categories := v1.Group("/categories")
