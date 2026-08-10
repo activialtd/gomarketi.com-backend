@@ -8,6 +8,7 @@ package middleware
 
 import (
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -22,18 +23,52 @@ import (
 // originating from an allowed origin. Non-matching origins receive no CORS
 // headers (not an error — the browser enforces the restriction).
 //
+// Every configured origin also implicitly allows its subdomains — every
+// vendor's storefront lives on its own subdomain (e.g. cobi.gomarketi.com),
+// so a bare "https://gomarketi.com" entry must cover the whole *.gomarketi.com
+// fleet, not just the apex, or checkout (which calls the orders service
+// cross-origin from the storefront) breaks for every vendor.
+//
 // allowedOrigins should come from config, e.g.:
 //   - development: ["http://localhost:3000"]
 //   - production:  ["https://gomarketi.com", "https://app.gomarketi.com"]
+type originSuffix struct {
+	scheme string // e.g. "https://"
+	host   string // e.g. ".gomarketi.com" — leading dot enforces a real subdomain boundary
+}
+
 func CORS(allowedOrigins []string) gin.HandlerFunc {
 	set := make(map[string]struct{}, len(allowedOrigins))
+	var suffixes []originSuffix
 	for _, o := range allowedOrigins {
 		set[o] = struct{}{}
+		if u, err := url.Parse(o); err == nil && u.Host != "" {
+			suffixes = append(suffixes, originSuffix{scheme: u.Scheme + "://", host: "." + u.Host})
+		}
+	}
+
+	originAllowed := func(origin string) bool {
+		if origin == "" {
+			return false
+		}
+		if _, ok := set[origin]; ok {
+			return true
+		}
+		for _, s := range suffixes {
+			// Matches "scheme://<subdomain>.host" for any non-empty subdomain
+			// — origin must be strictly longer than scheme+host so there's
+			// at least one character in the subdomain label.
+			if strings.HasPrefix(origin, s.scheme) && strings.HasSuffix(origin, s.host) &&
+				len(origin) > len(s.scheme)+len(s.host) {
+				return true
+			}
+		}
+		return false
 	}
 
 	return func(c *gin.Context) {
 		origin := c.GetHeader("Origin")
-		if _, ok := set[origin]; ok {
+		if originAllowed(origin) {
 			c.Header("Access-Control-Allow-Origin", origin)
 			c.Header("Vary", "Origin")
 		}
