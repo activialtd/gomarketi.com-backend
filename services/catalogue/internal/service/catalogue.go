@@ -15,6 +15,7 @@ import (
 	"github.com/rs/zerolog"
 
 	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
+	"github.com/activialtd/gomarketi.com-backend/shared/pkg/planlimits"
 	"github.com/activialtd/gomarketi.com-backend/services/catalogue/internal/dto"
 )
 
@@ -160,6 +161,23 @@ func (s *CatalogueService) SearchProducts(ctx context.Context, storeIDs []string
 // before this feature shipped are not retroactively linked (no backfill,
 // see the migration's comment) — they stay NULL until edited.
 func (s *CatalogueService) CreateProduct(ctx context.Context, storeID uuid.UUID, req dto.CreateProductReq) (dto.ProductResp, error) {
+	limits, err := planlimits.ForStoreID(ctx, s.db, storeID)
+	if err != nil {
+		return dto.ProductResp{}, fmt.Errorf("resolve plan limits: %w", err)
+	}
+	if limits.ProductLimit != -1 {
+		var count int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM products WHERE store_id=$1`, storeID).Scan(&count); err != nil {
+			return dto.ProductResp{}, fmt.Errorf("count products: %w", err)
+		}
+		if count >= limits.ProductLimit {
+			return dto.ProductResp{}, apperrors.BadRequest(fmt.Sprintf("your plan allows up to %d products — upgrade to add more", limits.ProductLimit))
+		}
+	}
+	if maxImg := limits.MaxImagesPerProduct(); len(req.Images) > maxImg {
+		return dto.ProductResp{}, apperrors.BadRequest(fmt.Sprintf("your plan allows up to %d images per product", maxImg))
+	}
+
 	tx, err := s.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return dto.ProductResp{}, fmt.Errorf("begin tx: %w", err)

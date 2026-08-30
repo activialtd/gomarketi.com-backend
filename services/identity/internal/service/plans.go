@@ -12,6 +12,8 @@ import (
 
 	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
 	"github.com/activialtd/gomarketi.com-backend/services/identity/internal/dto"
+	"github.com/activialtd/gomarketi.com-backend/services/identity/internal/repository/db"
+	"github.com/activialtd/gomarketi.com-backend/services/identity/internal/paystack"
 )
 
 // ── Plans ──────────────────────────────────────────────────────────────────────
@@ -112,7 +114,72 @@ func (s *IdentityService) SelectPlan(ctx context.Context, userID uuid.UUID, req 
 		UPDATE vendor_profiles SET onboarding_step = 'plan_selected', updated_at = NOW()
 		WHERE id = $1 AND onboarding_step = 'account_created'`, vendor.ID)
 
+	// Best-effort Paystack Dedicated Virtual Account creation — Paystack
+	// downtime must never block onboarding. Fetch the identity fields
+	// synchronously since the request ctx dies once the response is written
+	// (same reason storefront.CreateStore's welcome-email goroutine pre-fetches
+	// email before spawning its own goroutine).
+	if !vendor.PaystackDVAAccountNumber.Valid {
+		user, userErr := s.store.Queries().GetUserByID(ctx, userID)
+		if userErr == nil && user.Email.Valid {
+			vendorID := vendor.ID
+			email := user.Email.String
+			fullName := user.FullName.String
+			phone := user.Phone.String
+			go s.provisionPaystackAccount(vendorID, email, fullName, phone)
+		}
+	}
+
 	return s.GetSubscription(ctx, userID)
+}
+
+// provisionPaystackAccount creates a Paystack Customer + Dedicated Virtual
+// Account for a vendor and persists the result. Any failure is logged and
+// swallowed — this must never affect the vendor's onboarding flow.
+func (s *IdentityService) provisionPaystackAccount(vendorID uuid.UUID, email, fullName, phone string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	first, last := paystack.SplitName(fullName)
+	customerCode, err := s.paystackClient.CreateCustomer(ctx, email, first, last, phone)
+	if err != nil {
+		s.log.Warn().Err(err).Str("vendor_id", vendorID.String()).Msg("paystack customer creation failed")
+		return
+	}
+
+	accNum, bankName, accName, err := s.paystackClient.CreateDedicatedAccount(ctx, customerCode)
+	if err != nil {
+		s.log.Warn().Err(err).Str("vendor_id", vendorID.String()).Msg("paystack DVA creation failed")
+		return
+	}
+
+	params := db.UpdateVendorPaystackAccountParams{
+		ID:            vendorID,
+		CustomerCode:  customerCode,
+		AccountNumber: accNum,
+		BankName:      bankName,
+		AccountName:   accName,
+	}
+	// The pooled Neon connection occasionally rejects a bind on this
+	// goroutine's write when it races other concurrent DB traffic
+	// (PgBouncer transaction-pooling + unnamed prepared statements) — a
+	// couple of quick retries absorb that without adding real latency to
+	// the (already async, off the request path) common case.
+	var persistErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if _, persistErr = s.store.Queries().UpdateVendorPaystackAccount(ctx, params); persistErr == nil {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if persistErr != nil {
+		s.log.Warn().Err(persistErr).Str("vendor_id", vendorID.String()).Msg("persist paystack DVA failed")
+		return
+	}
+
+	if err := s.mailer.SendAccountReady(ctx, email, fullName, bankName, accNum, accName); err != nil {
+		s.log.Warn().Err(err).Str("vendor_id", vendorID.String()).Msg("account ready email failed")
+	}
 }
 
 func (s *IdentityService) GetSubscription(ctx context.Context, userID uuid.UUID) (dto.SubscriptionResp, error) {
@@ -139,7 +206,17 @@ func (s *IdentityService) GetSubscription(ctx context.Context, userID uuid.UUID)
 	if err != nil {
 		return dto.SubscriptionResp{}, fmt.Errorf("get subscription: %w", err)
 	}
-	return subRowToResp(r), nil
+	resp := subRowToResp(r)
+	if vendor.PaystackDVAAccountNumber.Valid {
+		resp.PaystackAccountNumber = &vendor.PaystackDVAAccountNumber.String
+	}
+	if vendor.PaystackDVABankName.Valid {
+		resp.PaystackBankName = &vendor.PaystackDVABankName.String
+	}
+	if vendor.PaystackDVAAccountName.Valid {
+		resp.PaystackAccountName = &vendor.PaystackDVAAccountName.String
+	}
+	return resp, nil
 }
 
 // ── Row types ──────────────────────────────────────────────────────────────────

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -19,7 +20,27 @@ import (
 	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/email"
 	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/vercel"
 	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
+	"github.com/activialtd/gomarketi.com-backend/shared/pkg/planlimits"
 )
+
+// gatedTemplates maps a store template id to the plan slug required to use
+// it. Templates not listed here are available on every plan. Kept in sync
+// by hand with the frontend's PLAN_ORDER-driven template picker
+// (apps/vendor-web/components/store-setup/store-customization/StoreCustomize.tsx)
+// — no shared source of truth between Go and TS exists in this codebase.
+var gatedTemplates = map[string]string{
+	"lagos": "starter",
+}
+
+var planTier = map[string]int{"free": 0, "starter": 1, "growth": 2, "scale": 3}
+
+func planAllowsTemplate(planSlug, template string) bool {
+	required, gated := gatedTemplates[template]
+	if !gated {
+		return true
+	}
+	return planTier[planSlug] >= planTier[required]
+}
 
 type StorefrontService struct {
 	db          *sqlx.DB
@@ -82,6 +103,17 @@ func (s *StorefrontService) CreateStore(ctx context.Context, userID uuid.UUID, r
 	_ = s.db.QueryRowContext(ctx, `SELECT TRUE FROM stores WHERE slug=$1`, req.Slug).Scan(&taken)
 	if taken {
 		return dto.StoreResp{}, apperrors.Wrap(http.StatusConflict, "slug already taken", nil)
+	}
+
+	limits, err := planlimits.ForVendorUserID(ctx, s.db, userID)
+	if err != nil {
+		return dto.StoreResp{}, fmt.Errorf("resolve plan limits: %w", err)
+	}
+	if !limits.AllowsCurrency(req.Currency) {
+		return dto.StoreResp{}, apperrors.BadRequest("your plan does not support " + req.Currency + " — upgrade to unlock it")
+	}
+	if req.TeamSize != nil && !limits.AllowsTeamSize(*req.TeamSize) {
+		return dto.StoreResp{}, apperrors.BadRequest("your plan does not support a team size of " + *req.TeamSize + " — upgrade to unlock it")
 	}
 
 	var row storeRow
@@ -148,6 +180,21 @@ func (s *StorefrontService) GetMyStore(ctx context.Context, userID uuid.UUID) (d
 }
 
 func (s *StorefrontService) UpdateStore(ctx context.Context, userID uuid.UUID, storeID uuid.UUID, req dto.UpdateStoreReq) (dto.StoreResp, error) {
+	if req.ThemeConfig != nil {
+		var tc struct {
+			Template string `json:"template"`
+		}
+		if err := json.Unmarshal(req.ThemeConfig, &tc); err == nil && tc.Template != "" {
+			limits, err := planlimits.ForVendorUserID(ctx, s.db, userID)
+			if err != nil {
+				return dto.StoreResp{}, fmt.Errorf("resolve plan limits: %w", err)
+			}
+			if !planAllowsTemplate(limits.PlanSlug, tc.Template) {
+				return dto.StoreResp{}, apperrors.BadRequest("your plan does not support the \"" + tc.Template + "\" template — upgrade to unlock it")
+			}
+		}
+	}
+
 	var row storeRow
 	err := s.db.QueryRowxContext(ctx, `
 		UPDATE stores SET

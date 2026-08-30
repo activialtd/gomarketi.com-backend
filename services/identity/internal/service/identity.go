@@ -19,19 +19,23 @@ import (
 	"github.com/activialtd/gomarketi.com-backend/services/identity/internal/repository"
 	"github.com/activialtd/gomarketi.com-backend/services/identity/internal/repository/db"
 	"github.com/activialtd/gomarketi.com-backend/services/identity/internal/smileid"
+	"github.com/activialtd/gomarketi.com-backend/services/identity/internal/paystack"
+	identityemail "github.com/activialtd/gomarketi.com-backend/services/identity/internal/email"
 )
 
 // IdentityService implements all identity use-cases.
 type IdentityService struct {
-	store         *repository.Store
-	encryptionKey []byte
-	log           zerolog.Logger
-	kycClient     *smileid.Client
+	store          *repository.Store
+	encryptionKey  []byte
+	log            zerolog.Logger
+	kycClient      *smileid.Client
+	paystackClient *paystack.Client
+	mailer         identityemail.AccountMailer
 }
 
 // New creates an IdentityService.
-func New(store *repository.Store, encryptionKey []byte, kycClient *smileid.Client, log zerolog.Logger) *IdentityService {
-	return &IdentityService{store: store, encryptionKey: encryptionKey, kycClient: kycClient, log: log}
+func New(store *repository.Store, encryptionKey []byte, kycClient *smileid.Client, paystackClient *paystack.Client, mailer identityemail.AccountMailer, log zerolog.Logger) *IdentityService {
+	return &IdentityService{store: store, encryptionKey: encryptionKey, kycClient: kycClient, paystackClient: paystackClient, mailer: mailer, log: log}
 }
 
 // ── User profile ──────────────────────────────────────────────────────────────
