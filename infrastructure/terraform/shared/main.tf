@@ -48,7 +48,7 @@ variable "aws_profile" {
 
 variable "services" {
   type    = set(string)
-  default = ["auth", "identity", "storefront", "catalogue", "orders", "gateway"]
+  default = ["auth", "identity", "storefront", "catalogue", "orders", "gateway", "admin-api"]
 }
 
 resource "aws_ecr_repository" "services" {

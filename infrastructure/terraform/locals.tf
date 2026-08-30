@@ -19,7 +19,9 @@ locals {
       "GOOGLE_CLIENT_ID", "APPLE_BUNDLE_ID",
     ]
     identity = [
-      "DATABASE_URL", "ENCRYPTION_KEY", "SMILE_ID_PARTNER_ID", "SMILE_ID_API_KEY",
+      "DATABASE_URL", "DATABASE_URL_UNPOOLED", "ENCRYPTION_KEY",
+      "SMILE_ID_PARTNER_ID", "SMILE_ID_API_KEY", "PAYSTACK_SECRET_KEY",
+      "BREVO_API_KEY",
     ]
     storefront = [
       "DATABASE_URL", "BREVO_API_KEY",
@@ -42,6 +44,14 @@ locals {
     gateway = [
       "JWT_PUBLIC_KEY",
     ]
+    admin-api = [
+      # JWT_*_KEY_B64 are deliberately the same values already at
+      # auth/JWT_*_KEY_B64 — duplicated into this service's own SSM path
+      # rather than shared access, so admin-api's IAM/SSM scope doesn't
+      # need reach into the auth service's parameters. See
+      # services/admin-api/src/auth/jwt.ts.
+      "DATABASE_URL", "JWT_PRIVATE_KEY_B64", "JWT_PUBLIC_KEY_B64",
+    ]
   }
 
   # Plain (non-secret) env vars per service — same values used in
@@ -59,6 +69,8 @@ locals {
       ENV              = var.environment
       ALLOWED_ORIGINS  = local.allowed_origins
       SMILE_ID_SANDBOX = var.environment == "production" ? "false" : "true"
+      BREVO_FROM       = "noreply@gomarketi.com"
+      BREVO_FROM_NAME  = "GoMarketi"
     }
     storefront = {
       ENV             = var.environment
@@ -80,6 +92,11 @@ locals {
       UPSTREAM_IDENTITY   = "http://identity:${var.services["identity"].port}"
       UPSTREAM_CATALOGUE  = "http://catalogue:${var.services["catalogue"].port}"
       UPSTREAM_ORDERS     = "http://orders:${var.services["orders"].port}"
+      UPSTREAM_ADMIN      = "http://admin-api:${var.services["admin-api"].port}"
+    }
+    admin-api = {
+      ENV             = var.environment
+      ALLOWED_ORIGINS = local.allowed_origins
     }
   }
 

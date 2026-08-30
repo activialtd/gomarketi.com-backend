@@ -8,11 +8,14 @@ SERVICE="${1:?usage: deploy-service.sh <service> <tag>}"
 TAG="${2:?usage: deploy-service.sh <service> <tag>}"
 
 case "$SERVICE" in
-  auth|identity|storefront|catalogue|orders|gateway) ;;
+  auth|identity|storefront|catalogue|orders|gateway|admin-api) ;;
   *) echo "unknown service: $SERVICE" >&2; exit 1 ;;
 esac
 
-VAR_NAME="IMAGE_TAG_$(echo "$SERVICE" | tr '[:lower:]' '[:upper:]')"
+# Env var names can't contain hyphens (admin-api is the first service name
+# with one) — translate to underscores same as docker-compose.prod.yml's
+# IMAGE_TAG_ADMIN_API.
+VAR_NAME="IMAGE_TAG_$(echo "$SERVICE" | tr '[:lower:]-' '[:upper:]_')"
 
 cd "$(dirname "$0")"
 

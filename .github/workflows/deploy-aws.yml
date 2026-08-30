@@ -58,6 +58,8 @@ jobs:
             gateway:
               - 'services/gateway/**'
               - 'shared/pkg/**'
+            admin-api:
+              - 'services/admin-api/**'
 
       - name: Set services to deploy
         id: set
@@ -65,7 +67,7 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             INPUT="${{ github.event.inputs.services }}"
             if [ "$INPUT" = "all" ] || [ -z "$INPUT" ]; then
-              echo 'services=["auth","identity","storefront","catalogue","orders","gateway"]' >> $GITHUB_OUTPUT
+              echo 'services=["auth","identity","storefront","catalogue","orders","gateway","admin-api"]' >> $GITHUB_OUTPUT
             else
               ARRAY=$(echo "$INPUT" | tr ',' '\n' | jq -R . | jq -sc .)
               echo "services=$ARRAY" >> $GITHUB_OUTPUT

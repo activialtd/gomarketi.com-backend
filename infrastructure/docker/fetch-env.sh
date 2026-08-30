@@ -12,7 +12,7 @@ set -euo pipefail
 OUT_DIR="$(dirname "$0")/env"
 mkdir -p "$OUT_DIR"
 
-for svc in auth identity storefront catalogue orders gateway; do
+for svc in auth identity storefront catalogue orders gateway admin-api; do
   aws ssm get-parameters-by-path \
     --path "/gomarketi/${GOMARKETI_ENV}/${svc}" \
     --with-decryption \
@@ -28,4 +28,4 @@ for p in json.load(sys.stdin):
 ' > "${OUT_DIR}/${svc}.env"
 done
 
-echo "Wrote env files for: auth identity storefront catalogue orders gateway"
+echo "Wrote env files for: auth identity storefront catalogue orders gateway admin-api"
