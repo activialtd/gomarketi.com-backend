@@ -18,3 +18,7 @@ use ./services/orders
 use ./services/storefront
 
 use ./services/gateway
+
+// admin-api is a Node.js service (see services/admin-api/) — this is only
+// its one-off Go interop tool for the RS256 cross-language JWT smoke test.
+use ./services/admin-api/scripts/jwt-helper

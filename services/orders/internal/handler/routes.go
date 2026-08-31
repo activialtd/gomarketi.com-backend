@@ -2,16 +2,42 @@ package handler
 
 import (
 	"net/http"
+	"os"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jmoiron/sqlx"
 	"github.com/rs/zerolog"
 
+	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/dto"
 	"github.com/activialtd/gomarketi.com-backend/shared/pkg/middleware"
 )
 
+// requireInternalKey protects service-to-service routes that aren't part of
+// the public gateway surface (see admin-api's batch-dispatch flow, the only
+// caller of these today) — a shared-secret header, not a user JWT, and
+// deliberately reached by direct service networking, not through the
+// gateway. INTERNAL_API_KEY unset means the check is skipped with a loud
+// warning per request, matching this codebase's existing dev-mode-friendly
+// pattern for PAYSTACK_SECRET_KEY.
+func requireInternalKey(log zerolog.Logger) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		key := os.Getenv("INTERNAL_API_KEY")
+		if key == "" {
+			log.Warn().Msg("INTERNAL_API_KEY not set — internal routes are unprotected (dev mode)")
+			c.Next()
+			return
+		}
+		if c.GetHeader("X-Internal-Key") != key {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, dto.ErrorResp{Error: "invalid internal key"})
+			return
+		}
+		c.Next()
+	}
+}
+
 // Register mounts all orders, CRM, and analytics routes onto r.
 // All routes require an authenticated vendor with at least one store (injected by Envoy).
-func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []string) {
+func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []string, db *sqlx.DB) {
 	// Health check — load balancer target group probe. Registered before any
 	// middleware so it never depends on CORS/auth/recovery being healthy.
 	r.GET("/health", func(c *gin.Context) {
@@ -19,7 +45,7 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 	})
 
 	r.Use(
-		middleware.Recovery(log),
+		middleware.Recovery(log, db, "orders"),
 		middleware.RequestID(),
 		middleware.RequestLogger(log),
 		middleware.CORS(allowedOrigins),
@@ -31,16 +57,29 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 	pub.POST("", h.CreateOrder)
 	pub.POST("/checkout", h.CreateCheckout)             // multi-store cart: one payment, one order per vendor
 	pub.GET("/:id", h.GetPublicOrder)                   // customer order tracking — gated by email param
+	pub.POST("/:id/confirm-delivery", h.ConfirmDelivery) // buyer confirms receipt — releases vendor escrow
 	pub.POST("/visit", h.TrackVisit)                    // lightweight storefront page-view beacon
 	pub.POST("/subscribe", h.Subscribe)                 // storefront newsletter opt-in
 	pub.GET("/gateways/:store_id", h.GetPublicGateways) // active payment gateways for checkout
 	pub.POST("/cart-email", h.SendCartInvoice)          // pre-payment cart summary email
+
+	// Internal — service-to-service only, reached by direct networking (not
+	// the public gateway), protected by a shared secret instead of a user JWT.
+	internal := r.Group("/v1/orders/internal")
+	internal.Use(requireInternalKey(log))
+	internal.POST("/no-show-refund", h.NoShowRefund)
 
 	v1 := r.Group("/v1")
 	v1.Use(middleware.RequireUser())
 	{
 		// Real-time WebSocket stream — vendor dashboard subscribes once per session
 		v1.GET("/orders/ws", h.WsEvents)
+
+		// Buyer's own order history (consumer app) — RequireUser() only,
+		// deliberately not under the vendor-scoped orders group below since
+		// a buyer has no store (callerStoreID would always 403 them).
+		v1.GET("/orders/mine", h.GetMyOrders)
+		v1.GET("/orders/mine/:id", h.GetMyOrder)
 
 		// Orders (MERCHANT.ORDERS dashboard section)
 		orders := v1.Group("/orders")

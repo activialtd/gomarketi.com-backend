@@ -128,6 +128,22 @@ services:
       retries: 3
       start_period: 10s
 
+  admin-api:
+    image: ${ECR_REGISTRY}/gomarketi-admin-api:${IMAGE_TAG_ADMIN_API:-initial}
+    restart: unless-stopped
+    env_file: [./env/admin-api.env]
+    environment:
+      PORT: "8085"
+      ENV: ${ENVIRONMENT}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS}
+    networks: [gomarketi]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8085/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
   gateway:
     image: ${ECR_REGISTRY}/gomarketi-gateway:${IMAGE_TAG_GATEWAY:-initial}
     restart: unless-stopped
@@ -140,6 +156,7 @@ services:
       UPSTREAM_IDENTITY: "http://identity:8081"
       UPSTREAM_CATALOGUE: "http://catalogue:8083"
       UPSTREAM_ORDERS: "http://orders:8084"
+      UPSTREAM_ADMIN: "http://admin-api:8085"
     networks: [gomarketi]
     depends_on:
       auth: { condition: service_healthy }

@@ -63,6 +63,10 @@ variable "services" {
       port           = 8080
       container_path = "gateway"
     }
+    admin-api = {
+      port           = 8085
+      container_path = "admin-api"
+    }
   }
 }
 

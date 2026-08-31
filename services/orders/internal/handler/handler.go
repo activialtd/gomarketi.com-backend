@@ -55,6 +55,20 @@ func (h *Handler) callerStoreID(c *gin.Context) (uuid.UUID, bool) {
 	return storeID, true
 }
 
+// callerUserID reads the authenticated caller's user ID — buyer or vendor,
+// unlike callerStoreID which is vendor-only. Used by the buyer-facing
+// "my orders" routes, which are gated by RequireUser() but not
+// callerStoreID (a buyer has no store).
+func (h *Handler) callerUserID(c *gin.Context) (uuid.UUID, bool) {
+	raw := c.GetString(middleware.CtxKeyUserID)
+	id, err := uuid.Parse(raw)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, dto.ErrorResp{Error: "authentication required"})
+		return uuid.UUID{}, false
+	}
+	return id, true
+}
+
 func (h *Handler) pathUUID(c *gin.Context, param string) (uuid.UUID, bool) {
 	id, err := uuid.Parse(c.Param(param))
 	if err != nil {

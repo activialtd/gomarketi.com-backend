@@ -20,6 +20,8 @@ import (
 	"github.com/activialtd/gomarketi.com-backend/services/identity/internal/repository"
 	"github.com/activialtd/gomarketi.com-backend/services/identity/internal/service"
 	"github.com/activialtd/gomarketi.com-backend/services/identity/internal/smileid"
+	"github.com/activialtd/gomarketi.com-backend/services/identity/internal/paystack"
+	identityemail "github.com/activialtd/gomarketi.com-backend/services/identity/internal/email"
 )
 
 func main() {
@@ -34,7 +36,20 @@ func run(log zerolog.Logger) error {
 	viper.AutomaticEnv()
 	_ = viper.ReadInConfig()
 
-	dbURL := viper.GetString("DATABASE_URL")
+	// Prefer the unpooled connection string when available. This service's
+	// SelectPlan flow does a background-goroutine DB write (the Paystack DVA
+	// persist) that runs concurrently with normal request traffic — through
+	// Neon's pooled (PgBouncer transaction-mode) endpoint that combination
+	// intermittently trips "bind message supplies N parameters, but prepared
+	// statement requires M" (08P01), because PgBouncer can reassign the
+	// physical backend between this driver's Parse and Bind steps under
+	// concurrent load. The direct/unpooled endpoint doesn't have that
+	// reassignment, so it isn't affected. Falls back to DATABASE_URL when
+	// DATABASE_URL_UNPOOLED isn't set, so this is a no-op until configured.
+	dbURL := viper.GetString("DATABASE_URL_UNPOOLED")
+	if dbURL == "" {
+		dbURL = viper.GetString("DATABASE_URL")
+	}
 	if dbURL == "" {
 		return fmt.Errorf("DATABASE_URL is required")
 	}
@@ -66,7 +81,23 @@ func run(log zerolog.Logger) error {
 		log,
 	)
 
-	svc := service.New(store, encKey, kycClient, log)
+	// Paystack client for Dedicated Virtual Account creation — same secret key
+	// the orders service already reads via os.Getenv("PAYSTACK_SECRET_KEY").
+	// Runs in simulation mode when unset, same as smileid above.
+	paystackClient := paystack.New(viper.GetString("PAYSTACK_SECRET_KEY"), log)
+
+	// Account-ready emailer — same Brevo credentials storefront already uses
+	// for its welcome email. Falls back to a noop when unconfigured.
+	var accountMailer identityemail.AccountMailer
+	if apiKey := viper.GetString("BREVO_API_KEY"); apiKey != "" {
+		accountMailer = identityemail.NewBrevo(apiKey, viper.GetString("BREVO_FROM"), viper.GetString("BREVO_FROM_NAME"))
+		log.Info().Msg("account ready emails: Brevo")
+	} else {
+		accountMailer = identityemail.NoopMailer{}
+		log.Warn().Msg("account ready emails: no emailer configured, using noop")
+	}
+
+	svc := service.New(store, encKey, kycClient, paystackClient, accountMailer, log)
 
 	isProduction := viper.GetString("ENV") == "production"
 	if isProduction {
@@ -76,7 +107,7 @@ func run(log zerolog.Logger) error {
 	h := handler.New(svc)
 	r := gin.New()
 	allowedOrigins := viper.GetStringSlice("ALLOWED_ORIGINS")
-	handler.Register(r, h, log, allowedOrigins)
+	handler.Register(r, h, log, allowedOrigins, db)
 
 	port := viper.GetString("PORT")
 	if port == "" {

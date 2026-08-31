@@ -9,6 +9,12 @@ type OrderStatus string
 const (
 	OrderStatusPending   OrderStatus = "pending"
 	OrderStatusConfirmed OrderStatus = "confirmed"
+	// OrderStatusAtHub means the vendor has delivered this order's items to
+	// the central GoMarketi office (admin-confirmed hub intake).
+	OrderStatusAtHub OrderStatus = "at_hub"
+	// OrderStatusShipped means GoMarketi has dispatched the (possibly
+	// multi-vendor) consolidated batch from the hub to the customer — not
+	// that the vendor shipped it themselves.
 	OrderStatusShipped   OrderStatus = "shipped"
 	OrderStatusDelivered OrderStatus = "delivered"
 	OrderStatusCancelled OrderStatus = "cancelled"
@@ -24,20 +30,37 @@ type OrderItem struct {
 	PriceKobo int64  `json:"price_kobo"`
 }
 
+// EscrowStatus summarizes the held/released/reversed state of the vendor's
+// wallet credit for an order — derived from wallet_transactions.status, not
+// stored directly.
+type EscrowStatus string
+
+const (
+	EscrowHeld     EscrowStatus = "held"
+	EscrowReleased EscrowStatus = "released"
+	EscrowReversed EscrowStatus = "reversed"
+)
+
 // OrderResp is returned for any order read operation.
 type OrderResp struct {
-	ID              string      `json:"id"`
-	StoreID         string      `json:"store_id"`
-	CustomerID      string      `json:"customer_id"`
-	CustomerName    string      `json:"customer_name"`
-	CustomerEmail   string      `json:"customer_email"`
-	Status          OrderStatus `json:"status"`
-	Items           []OrderItem `json:"items"`
-	TotalKobo       int64       `json:"total_kobo"`
-	DeliveryAddress string      `json:"delivery_address"`
-	PaymentRef      string      `json:"payment_reference,omitempty"`
-	CreatedAt       string      `json:"created_at"`
-	UpdatedAt       string      `json:"updated_at"`
+	ID                  string       `json:"id"`
+	StoreID             string       `json:"store_id"`
+	CustomerID          string       `json:"customer_id"`
+	CustomerName        string       `json:"customer_name"`
+	CustomerEmail       string       `json:"customer_email"`
+	Status              OrderStatus  `json:"status"`
+	Items               []OrderItem  `json:"items"`
+	TotalKobo           int64        `json:"total_kobo"`
+	DeliveryAddress     string       `json:"delivery_address"`
+	PaymentRef          string       `json:"payment_reference,omitempty"`
+	HubReceivedAt       *string      `json:"hub_received_at,omitempty"`
+	DispatchedAt        *string      `json:"dispatched_at,omitempty"`
+	DeliveredAt         *string      `json:"delivered_at,omitempty"`
+	DeliveryConfirmedAt *string      `json:"delivery_confirmed_at,omitempty"`
+	CancelledReason     *string      `json:"cancelled_reason,omitempty"`
+	EscrowStatus        EscrowStatus `json:"escrow_status"`
+	CreatedAt           string       `json:"created_at"`
+	UpdatedAt           string       `json:"updated_at"`
 }
 
 // OrderListResp wraps a paginated list of orders.
@@ -101,9 +124,19 @@ type CreateCheckoutResp struct {
 }
 
 // UpdateOrderStatusReq is the body for PATCH /v1/orders/:id/status.
+// Deliberately restricted to confirmed/cancelled — under the hub
+// fulfillment model, at_hub/shipped/delivered are only ever set by admin
+// hub intake, admin batch dispatch, and buyer delivery confirmation
+// respectively, never by the vendor directly. This is a trust-boundary
+// safeguard: a vendor cannot self-report their way to an escrow release.
 type UpdateOrderStatusReq struct {
-	Status OrderStatus `json:"status" validate:"required,oneof=confirmed shipped delivered cancelled"`
+	Status OrderStatus `json:"status" validate:"required,oneof=confirmed cancelled"`
 	Note   *string     `json:"note"`
+}
+
+// ConfirmDeliveryReq is the body for POST /v1/orders/public/:id/confirm-delivery.
+type ConfirmDeliveryReq struct {
+	Email string `json:"email" validate:"required,email"`
 }
 
 // AbandonedCartResp is a single abandoned cart entry.

@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jmoiron/sqlx"
 	"github.com/rs/zerolog"
 
 	"github.com/activialtd/gomarketi.com-backend/shared/pkg/middleware"
@@ -11,7 +12,7 @@ import (
 
 // Register mounts all storefront routes onto r.
 // All routes require an authenticated vendor (X-User-ID header from Envoy).
-func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []string) {
+func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []string, db *sqlx.DB) {
 	// Health check — load balancer target group probe. Registered before any
 	// middleware so it never depends on CORS/auth/recovery being healthy.
 	r.GET("/health", func(c *gin.Context) {
@@ -19,7 +20,7 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 	})
 
 	r.Use(
-		middleware.Recovery(log),
+		middleware.Recovery(log, db, "storefront"),
 		middleware.RequestID(),
 		middleware.RequestLogger(log),
 		middleware.CORS(allowedOrigins),

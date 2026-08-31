@@ -26,6 +26,16 @@ type OrdersService struct {
 	broker *sse.Broker
 }
 
+// orderColumns is the shared SELECT list for every query that scans into
+// orderRow — keeps the hub/escrow columns and the wallet_status subquery
+// (escrow state — see EscrowStatus in rowToOrder) in exactly one place
+// instead of duplicated across five near-identical queries.
+const orderColumns = `id, store_id, customer_id, customer_name, customer_email, status,
+	total_kobo, delivery_address, payment_reference,
+	hub_received_at, dispatched_at, delivered_at, delivery_confirmed_at, cancelled_reason,
+	created_at, updated_at,
+	(SELECT wt.status FROM wallet_transactions wt WHERE wt.order_id = orders.id LIMIT 1) AS wallet_status`
+
 func New(db *sqlx.DB, log zerolog.Logger, broker *sse.Broker) *OrdersService {
 	return &OrdersService{db: db, log: log, broker: broker}
 }
@@ -63,7 +73,7 @@ func (s *OrdersService) ListOrders(ctx context.Context, storeID uuid.UUID, page,
 
 	listArgs := append(args, perPage, offset)
 	rows, err := s.db.QueryxContext(ctx,
-		`SELECT id, store_id, customer_id, customer_name, customer_email, status, total_kobo, delivery_address, created_at, updated_at `+
+		`SELECT `+orderColumns+` `+
 			base+fmt.Sprintf(` ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, i, i+1),
 		listArgs...)
 	if err != nil {
@@ -88,8 +98,7 @@ func (s *OrdersService) ListOrders(ctx context.Context, storeID uuid.UUID, page,
 func (s *OrdersService) GetPublicOrder(ctx context.Context, orderID uuid.UUID, email string) (dto.OrderResp, error) {
 	var r orderRow
 	err := s.db.QueryRowxContext(ctx, `
-		SELECT id, store_id, customer_id, customer_name, customer_email,
-		       status, total_kobo, delivery_address, created_at, updated_at
+		SELECT `+orderColumns+`
 		FROM orders WHERE id=$1 AND LOWER(customer_email)=LOWER($2)`, orderID, email).StructScan(&r)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.OrderResp{}, apperrors.NotFound("order not found")
@@ -102,11 +111,269 @@ func (s *OrdersService) GetPublicOrder(ctx context.Context, orderID uuid.UUID, e
 	return o, nil
 }
 
+// resolveUserEmail looks up the authenticated caller's own email directly
+// from the shared users table (owned by identity service, read here the
+// same way every other cross-service lookup in this codebase works — no
+// internal HTTP call). Used so GetMyOrders/GetMyOrder scope strictly to the
+// caller's own email server-side, rather than trusting a client-supplied
+// one like the public tracking endpoints do.
+func (s *OrdersService) resolveUserEmail(ctx context.Context, userID uuid.UUID) (string, error) {
+	var email sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT email FROM users WHERE id=$1`, userID).Scan(&email)
+	if errors.Is(err, sql.ErrNoRows) || !email.Valid || email.String == "" {
+		return "", apperrors.NotFound("no email on file for this account")
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolve user email: %w", err)
+	}
+	return email.String, nil
+}
+
+// GetMyOrders returns every order placed by the authenticated buyer,
+// grouped client-side by payment_reference into batches (a multi-vendor
+// cart checkout) — mirrors admin-api's batch view, just scoped to one buyer.
+func (s *OrdersService) GetMyOrders(ctx context.Context, userID uuid.UUID) ([]dto.OrderResp, error) {
+	email, err := s.resolveUserEmail(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := s.db.QueryxContext(ctx, `
+		SELECT `+orderColumns+`
+		FROM orders WHERE LOWER(customer_email)=LOWER($1) ORDER BY created_at DESC`, email)
+	if err != nil {
+		return nil, fmt.Errorf("list my orders: %w", err)
+	}
+	defer rows.Close()
+
+	orders := make([]dto.OrderResp, 0)
+	for rows.Next() {
+		var r orderRow
+		if err := rows.StructScan(&r); err != nil {
+			return nil, err
+		}
+		o := rowToOrder(r)
+		o.Items = s.loadItems(ctx, r.ID)
+		orders = append(orders, o)
+	}
+	return orders, nil
+}
+
+// GetMyOrder returns a single order, scoped to the authenticated buyer's own
+// (server-resolved) email — the same ownership model as GetMyOrders.
+func (s *OrdersService) GetMyOrder(ctx context.Context, userID uuid.UUID, orderID uuid.UUID) (dto.OrderResp, error) {
+	email, err := s.resolveUserEmail(ctx, userID)
+	if err != nil {
+		return dto.OrderResp{}, err
+	}
+	return s.GetPublicOrder(ctx, orderID, email)
+}
+
+// ConfirmDelivery is called by the buyer once their (possibly partial —
+// see batch dispatch) order has physically arrived, gated by email match —
+// the same trust model GetPublicOrder already uses, since orders service
+// has no real per-buyer JWT identity wired through checkout today. This is
+// the trigger that releases the vendor's held wallet credit: it only
+// succeeds from status='shipped' (GoMarketi has actually dispatched the
+// order from the hub — see the admin batch-dispatch flow), so a buyer can
+// never release funds for something that was never sent.
+func (s *OrdersService) ConfirmDelivery(ctx context.Context, orderID uuid.UUID, email string) (dto.OrderResp, error) {
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return dto.OrderResp{}, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var status string
+	err = tx.QueryRowContext(ctx,
+		`SELECT status FROM orders WHERE id=$1 AND LOWER(customer_email)=LOWER($2) FOR UPDATE`,
+		orderID, email,
+	).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return dto.OrderResp{}, apperrors.NotFound("order not found")
+	}
+	if err != nil {
+		return dto.OrderResp{}, fmt.Errorf("lock order: %w", err)
+	}
+	if status != string(dto.OrderStatusShipped) {
+		return dto.OrderResp{}, apperrors.BadRequest(
+			"this order can't be marked received yet — it hasn't been dispatched")
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE orders SET status=$1, delivered_at=NOW(), delivery_confirmed_at=NOW(), updated_at=NOW()
+		WHERE id=$2`,
+		dto.OrderStatusDelivered, orderID,
+	); err != nil {
+		return dto.OrderResp{}, fmt.Errorf("mark delivered: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE wallet_transactions SET status='completed', released_at=NOW()
+		WHERE order_id=$1 AND status='pending'`,
+		orderID,
+	); err != nil {
+		return dto.OrderResp{}, fmt.Errorf("release escrow: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return dto.OrderResp{}, fmt.Errorf("commit: %w", err)
+	}
+
+	return s.GetPublicOrder(ctx, orderID, email)
+}
+
+// NoShowRefund cancels one order in a batch and refunds the buyer for that
+// portion, because its vendor didn't deliver to the GoMarketi hub in time
+// for dispatch. Called by admin-api's batch-dispatch action (the one
+// internal service-to-service call in the hub/escrow feature, since this is
+// the only step that needs orders service's own Paystack secret key —
+// everything else admin-api does as a direct DB write). Idempotent: calling
+// it twice on an already-cancelled order is a no-op, not a double refund.
+func (s *OrdersService) NoShowRefund(ctx context.Context, orderID uuid.UUID) (dto.OrderResp, error) {
+	var status, paymentRef sql.NullString
+	var totalKobo int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT status, payment_reference, total_kobo FROM orders WHERE id=$1`, orderID,
+	).Scan(&status, &paymentRef, &totalKobo)
+	if errors.Is(err, sql.ErrNoRows) {
+		return dto.OrderResp{}, apperrors.NotFound("order not found")
+	}
+	if err != nil {
+		return dto.OrderResp{}, fmt.Errorf("load order: %w", err)
+	}
+	if status.String == string(dto.OrderStatusCancelled) {
+		// Already handled — return the current state rather than refunding twice.
+		return s.getOrderByID(ctx, orderID)
+	}
+	if status.String == string(dto.OrderStatusShipped) || status.String == string(dto.OrderStatusDelivered) {
+		return dto.OrderResp{}, apperrors.BadRequest("order has already been dispatched — cannot no-show it now")
+	}
+	if !paymentRef.Valid || paymentRef.String == "" {
+		return dto.OrderResp{}, apperrors.Internal(fmt.Errorf("order %s has no payment_reference to refund", orderID))
+	}
+
+	refundRef, err := s.refundPaystackTransaction(ctx, paymentRef.String, totalKobo)
+	if err != nil {
+		return dto.OrderResp{}, err
+	}
+
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return dto.OrderResp{}, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE orders SET status=$1, cancelled_reason=$2, refund_reference=$3, refunded_at=NOW(), updated_at=NOW()
+		WHERE id=$4`,
+		dto.OrderStatusCancelled, "vendor_no_show_at_dispatch", refundRef, orderID,
+	); err != nil {
+		return dto.OrderResp{}, fmt.Errorf("mark cancelled: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE wallet_transactions SET status='failed' WHERE order_id=$1 AND status='pending'`,
+		orderID,
+	); err != nil {
+		return dto.OrderResp{}, fmt.Errorf("reverse wallet credit: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return dto.OrderResp{}, fmt.Errorf("commit: %w", err)
+	}
+
+	return s.getOrderByID(ctx, orderID)
+}
+
+// getOrderByID fetches an order by ID alone, no store or email scoping —
+// only used by internal flows (NoShowRefund) that have already authorized
+// the caller by other means.
+func (s *OrdersService) getOrderByID(ctx context.Context, orderID uuid.UUID) (dto.OrderResp, error) {
+	var r orderRow
+	err := s.db.QueryRowxContext(ctx, `SELECT `+orderColumns+` FROM orders WHERE id=$1`, orderID).StructScan(&r)
+	if errors.Is(err, sql.ErrNoRows) {
+		return dto.OrderResp{}, apperrors.NotFound("order not found")
+	}
+	if err != nil {
+		return dto.OrderResp{}, fmt.Errorf("get order by id: %w", err)
+	}
+	o := rowToOrder(r)
+	o.Items = s.loadItems(ctx, r.ID)
+	return o, nil
+}
+
+// escrowAutoReleaseWindow is how long a dispatched order can sit unconfirmed
+// before its vendor's held funds release automatically — the buyer-never-
+// confirms fallback. Matches the 7-day window agreed with the user.
+const escrowAutoReleaseWindow = 7 * 24 * time.Hour
+
+// StartAutoReleaseLoop runs forever (until ctx is cancelled), releasing any
+// order that's been dispatched for longer than escrowAutoReleaseWindow with
+// no buyer confirmation. Never blocks or panics the caller — matches the
+// "background goroutine, log and continue" shape used elsewhere in this
+// codebase (e.g. identity's Paystack DVA provisioning) since no cron/scheduler
+// infra exists anywhere in this backend.
+func (s *OrdersService) StartAutoReleaseLoop(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+	// Run once immediately on startup too, not just after the first tick.
+	s.releaseOverdueEscrow(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.releaseOverdueEscrow(ctx)
+		}
+	}
+}
+
+func (s *OrdersService) releaseOverdueEscrow(ctx context.Context) {
+	cutoff := time.Now().Add(-escrowAutoReleaseWindow)
+
+	// No explicit row locking here — the two UPDATEs below are each
+	// conditioned on the current status (status='shipped' /
+	// wallet_transactions.status='pending'), so a duplicate run (e.g. a
+	// second instance on the same tick) is a harmless no-op, not a
+	// double-release.
+	rows, err := s.db.QueryxContext(ctx, `
+		SELECT id FROM orders
+		WHERE status='shipped' AND dispatched_at < $1 AND delivery_confirmed_at IS NULL`, cutoff)
+	if err != nil {
+		s.log.Warn().Err(err).Msg("escrow auto-release: query failed")
+		return
+	}
+	var orderIDs []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err == nil {
+			orderIDs = append(orderIDs, id)
+		}
+	}
+	rows.Close()
+
+	for _, id := range orderIDs {
+		if _, err := s.db.ExecContext(ctx, `
+			UPDATE orders SET status=$1, delivered_at=NOW(), delivery_confirmed_at=NOW(), updated_at=NOW()
+			WHERE id=$2 AND status='shipped'`, dto.OrderStatusDelivered, id,
+		); err != nil {
+			s.log.Warn().Err(err).Str("order_id", id.String()).Msg("escrow auto-release: mark delivered failed")
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, `
+			UPDATE wallet_transactions SET status='completed', released_at=NOW()
+			WHERE order_id=$1 AND status='pending'`, id,
+		); err != nil {
+			s.log.Warn().Err(err).Str("order_id", id.String()).Msg("escrow auto-release: release wallet failed")
+			continue
+		}
+		s.log.Info().Str("order_id", id.String()).Msg("escrow auto-released after 7-day window")
+	}
+}
+
 func (s *OrdersService) GetOrder(ctx context.Context, storeID uuid.UUID, orderID uuid.UUID) (dto.OrderResp, error) {
 	var r orderRow
 	err := s.db.QueryRowxContext(ctx, `
-		SELECT id, store_id, customer_id, customer_name, customer_email,
-		       status, total_kobo, delivery_address, created_at, updated_at
+		SELECT `+orderColumns+`
 		FROM orders WHERE id=$1 AND store_id=$2`, orderID, storeID).StructScan(&r)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.OrderResp{}, apperrors.NotFound("order not found")
@@ -124,8 +391,7 @@ func (s *OrdersService) UpdateOrderStatus(ctx context.Context, storeID uuid.UUID
 	err := s.db.QueryRowxContext(ctx, `
 		UPDATE orders SET status=$1, note=COALESCE($2,note), updated_at=NOW()
 		WHERE id=$3 AND store_id=$4
-		RETURNING id, store_id, customer_id, customer_name, customer_email,
-		          status, total_kobo, delivery_address, created_at, updated_at`,
+		RETURNING `+orderColumns,
 		req.Status, req.Note, orderID, storeID).StructScan(&r)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.OrderResp{}, apperrors.NotFound("order not found")
@@ -243,10 +509,13 @@ func insertOrderTx(ctx context.Context, tx *sqlx.Tx, storeID uuid.UUID, customer
 		}
 	}
 
-	// Credit the vendor's wallet for the full order value.
+	// Credit the vendor's wallet for the full order value, but held in
+	// escrow (status='pending', excluded from GetWallet's available-balance
+	// query) until the buyer confirms receipt — see ConfirmDelivery below
+	// and the auto-release goroutine in cmd/server/main.go.
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO wallet_transactions (store_id, type, amount_kobo, description, reference, order_id, status)
-		VALUES ($1,'credit',$2,$3,$4,$5,'completed')`,
+		VALUES ($1,'credit',$2,$3,$4,$5,'pending')`,
 		storeID, totalKobo, fmt.Sprintf("Sale — order #%s", orderID.String()[:8]), paymentRef, orderID,
 	); err != nil {
 		return uuid.Nil, 0, fmt.Errorf("credit wallet: %w", err)
@@ -328,8 +597,7 @@ func (s *OrdersService) notifyOrderCreated(storeID, orderID uuid.UUID, totalKobo
 // that already succeeded (e.g. a dropped response on a flaky connection).
 func (s *OrdersService) findOrdersByPaymentRef(ctx context.Context, ref string) ([]dto.OrderResp, error) {
 	rows, err := s.db.QueryxContext(ctx, `
-		SELECT id, store_id, customer_id, customer_name, customer_email,
-		       status, total_kobo, delivery_address, created_at, updated_at
+		SELECT `+orderColumns+`
 		FROM orders WHERE payment_reference=$1 ORDER BY created_at ASC`, ref)
 	if err != nil {
 		return nil, fmt.Errorf("find orders by payment_reference: %w", err)
@@ -901,16 +1169,23 @@ func (s *OrdersService) GetTopProducts(ctx context.Context, storeID uuid.UUID, l
 // ── Row types ─────────────────────────────────────────────────────────────────
 
 type orderRow struct {
-	ID              uuid.UUID `db:"id"`
-	StoreID         uuid.UUID `db:"store_id"`
-	CustomerID      uuid.UUID `db:"customer_id"`
-	CustomerName    string    `db:"customer_name"`
-	CustomerEmail   string    `db:"customer_email"`
-	Status          string    `db:"status"`
-	TotalKobo       int64     `db:"total_kobo"`
-	DeliveryAddress string    `db:"delivery_address"`
-	CreatedAt       time.Time `db:"created_at"`
-	UpdatedAt       time.Time `db:"updated_at"`
+	ID                  uuid.UUID      `db:"id"`
+	StoreID             uuid.UUID      `db:"store_id"`
+	CustomerID          uuid.UUID      `db:"customer_id"`
+	CustomerName        string         `db:"customer_name"`
+	CustomerEmail       string         `db:"customer_email"`
+	Status              string         `db:"status"`
+	TotalKobo           int64          `db:"total_kobo"`
+	DeliveryAddress     string         `db:"delivery_address"`
+	PaymentReference    sql.NullString `db:"payment_reference"`
+	HubReceivedAt       sql.NullTime   `db:"hub_received_at"`
+	DispatchedAt        sql.NullTime   `db:"dispatched_at"`
+	DeliveredAt         sql.NullTime   `db:"delivered_at"`
+	DeliveryConfirmedAt sql.NullTime   `db:"delivery_confirmed_at"`
+	CancelledReason     sql.NullString `db:"cancelled_reason"`
+	WalletStatus        sql.NullString `db:"wallet_status"`
+	CreatedAt           time.Time      `db:"created_at"`
+	UpdatedAt           time.Time      `db:"updated_at"`
 }
 
 type abandonedRow struct {
@@ -924,7 +1199,7 @@ type abandonedRow struct {
 }
 
 func rowToOrder(r orderRow) dto.OrderResp {
-	return dto.OrderResp{
+	o := dto.OrderResp{
 		ID:              r.ID.String(),
 		StoreID:         r.StoreID.String(),
 		CustomerID:      r.CustomerID.String(),
@@ -934,8 +1209,47 @@ func rowToOrder(r orderRow) dto.OrderResp {
 		Items:           []dto.OrderItem{},
 		TotalKobo:       r.TotalKobo,
 		DeliveryAddress: r.DeliveryAddress,
+		EscrowStatus:    escrowStatus(r.WalletStatus),
 		CreatedAt:       r.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt:       r.UpdatedAt.UTC().Format(time.RFC3339),
+	}
+	if r.PaymentReference.Valid {
+		o.PaymentRef = r.PaymentReference.String
+	}
+	if r.HubReceivedAt.Valid {
+		s := r.HubReceivedAt.Time.UTC().Format(time.RFC3339)
+		o.HubReceivedAt = &s
+	}
+	if r.DispatchedAt.Valid {
+		s := r.DispatchedAt.Time.UTC().Format(time.RFC3339)
+		o.DispatchedAt = &s
+	}
+	if r.DeliveredAt.Valid {
+		s := r.DeliveredAt.Time.UTC().Format(time.RFC3339)
+		o.DeliveredAt = &s
+	}
+	if r.DeliveryConfirmedAt.Valid {
+		s := r.DeliveryConfirmedAt.Time.UTC().Format(time.RFC3339)
+		o.DeliveryConfirmedAt = &s
+	}
+	if r.CancelledReason.Valid {
+		o.CancelledReason = &r.CancelledReason.String
+	}
+	return o
+}
+
+// escrowStatus derives the buyer-visible escrow state from the underlying
+// wallet_transactions row's status. No row at all (e.g. an order created
+// before this feature, or a data inconsistency) reads as "held" — the safe
+// default, since it means we've made no promise the money is available.
+func escrowStatus(walletStatus sql.NullString) dto.EscrowStatus {
+	switch walletStatus.String {
+	case "completed":
+		return dto.EscrowReleased
+	case "failed":
+		return dto.EscrowReversed
+	default:
+		return dto.EscrowHeld
 	}
 }
 

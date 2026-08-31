@@ -76,6 +76,16 @@ func run(log zerolog.Logger) error {
 				return
 			}
 
+			// Admin routes are pass-through too — admin-api mints and verifies
+			// its own RS256 tokens (distinct is_admin/admin_role claims) entirely
+			// independently of the buyer/vendor Claims shape this gateway checks
+			// below, and doesn't need the X-User-ID/X-Is-Vendor/X-Store-IDs
+			// headers that check injects.
+			if strings.HasPrefix(r.URL.Path, "/v1/admin/") {
+				proxy.ServeHTTP(w, r)
+				return
+			}
+
 			// Public storefront routes (e.g. store lookup by slug) require no auth.
 			if strings.HasPrefix(r.URL.Path, "/v1/storefront/public/") {
 				proxy.ServeHTTP(w, r)
@@ -374,6 +384,7 @@ func loadUpstreams() (map[string]string, error) {
 		"/v1/crm/":       "UPSTREAM_ORDERS",
 		"/v1/analytics/": "UPSTREAM_ORDERS",
 		"/v1/wallet/":    "UPSTREAM_ORDERS",
+		"/v1/admin/":     "UPSTREAM_ADMIN",
 	}
 
 	result := map[string]string{}
