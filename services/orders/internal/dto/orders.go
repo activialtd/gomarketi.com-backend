@@ -223,6 +223,7 @@ type WalletTransactionResp struct {
 type WalletResp struct {
 	BalanceKobo  int64                    `json:"balance_kobo"`
 	TotalEarned  int64                    `json:"total_earned_kobo"`
+	HeldKobo     int64                    `json:"held_kobo"` // credits still in escrow — not yet withdrawable
 	Transactions []WalletTransactionResp `json:"transactions"`
 }
 
