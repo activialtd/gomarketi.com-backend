@@ -30,4 +30,10 @@ export const config = {
     publicKey: loadKey("JWT_PUBLIC_KEY_PATH", "JWT_PUBLIC_KEY_B64"),
     accessTokenTTLSeconds: Number(process.env.JWT_ACCESS_TTL_SECONDS ?? 3600),
   },
+  // The one internal service-to-service call this app makes — batch
+  // dispatch calling orders service's no-show-refund endpoint directly
+  // (not through the gateway). Empty key matches orders service's own
+  // dev-mode "unprotected with a warning" fallback.
+  ordersInternalUrl: process.env.ORDERS_INTERNAL_URL ?? "http://localhost:8084",
+  internalApiKey: process.env.INTERNAL_API_KEY ?? "",
 };

@@ -34,7 +34,14 @@ func main() {
 
 	switch os.Args[1] {
 	case "mint":
-		token, err := mgr.IssueAccessToken("smoke-test-user-id", pkgjwt.Claims{IsBuyer: true})
+		// Optional 2nd arg overrides the subject — default kept as
+		// "smoke-test-user-id" so scripts/smoke-jwt.ts's assertions
+		// (which expect exactly that value) keep passing unchanged.
+		subject := "smoke-test-user-id"
+		if len(os.Args) >= 3 {
+			subject = os.Args[2]
+		}
+		token, err := mgr.IssueAccessToken(subject, pkgjwt.Claims{IsBuyer: true})
 		if err != nil {
 			fail("issue token: %v", err)
 		}

@@ -83,15 +83,28 @@ export interface StoresTable {
   created_at: Date;
 }
 
+export type OrderStatus = "pending" | "confirmed" | "at_hub" | "shipped" | "delivered" | "cancelled";
+
 export interface OrdersTable {
   id: string;
   store_id: string;
   customer_id: string;
   customer_name: string;
   customer_email: string;
-  status: "pending" | "confirmed" | "shipped" | "delivered" | "cancelled";
+  status: OrderStatus;
   total_kobo: string;
+  delivery_address: string;
+  payment_reference: string | null;
+  hub_received_at: Date | null;
+  hub_received_by: string | null;
+  dispatched_at: Date | null;
+  delivered_at: Date | null;
+  delivery_confirmed_at: Date | null;
+  cancelled_reason: string | null;
+  refund_reference: string | null;
+  refunded_at: Date | null;
   created_at: Date;
+  updated_at: Date;
 }
 
 export interface OrderItemsTable {
@@ -104,6 +117,17 @@ export interface OrderItemsTable {
   price_kobo: string;
 }
 
+export interface WalletTransactionsTable {
+  id: string;
+  store_id: string;
+  type: "credit" | "debit";
+  amount_kobo: string;
+  order_id: string | null;
+  status: "pending" | "completed" | "failed";
+  released_at: Date | null;
+  created_at: Date;
+}
+
 export interface Database {
   admin_users: AdminUsersTable;
   users: UsersTable;
@@ -114,4 +138,5 @@ export interface Database {
   stores: StoresTable;
   orders: OrdersTable;
   order_items: OrderItemsTable;
+  wallet_transactions: WalletTransactionsTable;
 }
