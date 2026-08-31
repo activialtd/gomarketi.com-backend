@@ -107,7 +107,7 @@ func run(log zerolog.Logger) error {
 	h := handler.New(svc)
 	r := gin.New()
 	allowedOrigins := viper.GetStringSlice("ALLOWED_ORIGINS")
-	handler.Register(r, h, log, allowedOrigins)
+	handler.Register(r, h, log, allowedOrigins, db)
 
 	port := viper.GetString("PORT")
 	if port == "" {

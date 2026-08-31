@@ -128,6 +128,27 @@ export interface WalletTransactionsTable {
   created_at: Date;
 }
 
+export type ErrorEventLevel = "error" | "warning";
+
+// Populated two ways: Go services write directly on panic/5xx (see
+// shared/pkg/middleware.Recovery), and frontend apps POST to
+// /v1/admin/errors/report for self-built crash capture — one queue either way.
+export interface ErrorEventsTable {
+  id: Generated<string>;
+  service: string;
+  level: ErrorEventLevel;
+  message: string;
+  stack: string | null;
+  context: unknown;
+  request_path: string | null;
+  status_code: number | null;
+  user_id: string | null;
+  resolved: Generated<boolean>;
+  resolved_at: Date | null;
+  resolved_by: string | null;
+  created_at: Generated<Date>;
+}
+
 export interface Database {
   admin_users: AdminUsersTable;
   users: UsersTable;
@@ -139,4 +160,5 @@ export interface Database {
   orders: OrdersTable;
   order_items: OrderItemsTable;
   wallet_transactions: WalletTransactionsTable;
+  error_events: ErrorEventsTable;
 }

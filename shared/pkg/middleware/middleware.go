@@ -7,6 +7,8 @@
 package middleware
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"strings"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
 	"github.com/rs/zerolog"
 )
 
@@ -135,10 +138,14 @@ func RequestLogger(log zerolog.Logger) gin.HandlerFunc {
 
 // ── Recovery ──────────────────────────────────────────────────────────────────
 
-// Recovery catches panics, logs them at ERROR level, and responds with a
-// generic 500 JSON body. Always register this as the outermost middleware so
-// it wraps all other handlers.
-func Recovery(log zerolog.Logger) gin.HandlerFunc {
+// Recovery catches panics, logs them at ERROR level, responds with a generic
+// 500 JSON body, and — for both panics and handlers that return a 5xx without
+// panicking — writes a row to the shared error_events table (owned by
+// admin-api, surfaced in the Admin Center's error queue). db may be nil (e.g.
+// in tests), in which case error capture is skipped but recovery still works.
+// Always register this as the outermost middleware so it wraps all other
+// handlers.
+func Recovery(log zerolog.Logger, db *sqlx.DB, serviceName string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		defer func() {
 			if r := recover(); r != nil {
@@ -149,12 +156,53 @@ func Recovery(log zerolog.Logger) gin.HandlerFunc {
 					Str("method", c.Request.Method).
 					Str("path", c.Request.URL.Path).
 					Msg("panic recovered")
+				recordErrorEvent(db, serviceName, log, c, http.StatusInternalServerError, stringVal(r))
 				c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
 					"error": "an internal error occurred",
 				})
 			}
 		}()
 		c.Next()
+		if status := c.Writer.Status(); !c.IsAborted() && status >= http.StatusInternalServerError {
+			recordErrorEvent(db, serviceName, log, c, status, "")
+		}
+	}
+}
+
+// recordErrorEvent writes one row to error_events. Best-effort: a failure to
+// record must never affect the response already sent to the client, so
+// errors here are logged (not returned) and the write runs against a short,
+// bounded context rather than the (possibly already-cancelled) request one.
+func recordErrorEvent(db *sqlx.DB, serviceName string, log zerolog.Logger, c *gin.Context, status int, panicVal string) {
+	if db == nil {
+		return
+	}
+
+	message := panicVal
+	if message == "" {
+		message = "HTTP " + http.StatusText(status)
+	}
+
+	reqID, _ := c.Get("request_id")
+	userID := c.GetString(CtxKeyUserID)
+
+	ctxJSON, err := json.Marshal(gin.H{
+		"request_id": stringVal(reqID),
+		"method":     c.Request.Method,
+	})
+	if err != nil {
+		ctxJSON = []byte("{}")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO error_events (service, level, message, request_path, status_code, user_id, context)
+		VALUES ($1, 'error', $2, $3, $4, NULLIF($5, ''), $6)
+	`, serviceName, message, c.Request.URL.Path, status, userID, ctxJSON)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to record error_event")
 	}
 }
 
