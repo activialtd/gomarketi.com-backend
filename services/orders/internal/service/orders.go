@@ -797,10 +797,11 @@ func (s *OrdersService) GetWallet(ctx context.Context, storeID uuid.UUID) (dto.W
 	var resp dto.WalletResp
 	err := s.db.QueryRowContext(ctx, `
 		SELECT
-			COALESCE(SUM(CASE WHEN type='credit' THEN amount_kobo ELSE -amount_kobo END), 0),
-			COALESCE(SUM(CASE WHEN type='credit' THEN amount_kobo ELSE 0 END), 0)
-		FROM wallet_transactions WHERE store_id=$1 AND status='completed'`, storeID,
-	).Scan(&resp.BalanceKobo, &resp.TotalEarned)
+			COALESCE(SUM(CASE WHEN status='completed' THEN (CASE WHEN type='credit' THEN amount_kobo ELSE -amount_kobo END) ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status='completed' AND type='credit' THEN amount_kobo ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status='pending'   AND type='credit' THEN amount_kobo ELSE 0 END), 0)
+		FROM wallet_transactions WHERE store_id=$1`, storeID,
+	).Scan(&resp.BalanceKobo, &resp.TotalEarned, &resp.HeldKobo)
 	if err != nil {
 		return dto.WalletResp{}, fmt.Errorf("wallet balance: %w", err)
 	}
