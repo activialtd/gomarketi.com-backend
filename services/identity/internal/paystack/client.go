@@ -1,10 +1,16 @@
-// Package paystack provides a minimal wrapper around the community
-// github.com/gray-adeyi/paystack SDK for creating a Paystack Customer and a
-// Dedicated Virtual Account (DVA) for a vendor. It does not handle payments,
-// subaccounts, or settlement — only account provisioning. (Paystack does not
-// publish an official Go SDK; this is the most complete community one,
-// confirmed to cover both the Customer and Dedicated Virtual Account
-// endpoints this package needs.)
+// Package paystack provides a minimal wrapper for creating a Paystack
+// Customer and a Dedicated Virtual Account (DVA) for a vendor. It does not
+// handle payments, subaccounts, or settlement — only account provisioning.
+//
+// Customer creation uses the community github.com/gray-adeyi/paystack SDK
+// (Paystack does not publish an official Go SDK). Dedicated Virtual Account
+// creation deliberately does NOT use that SDK: its DedicatedAccountBank.Id
+// field is typed string, but Paystack's live API returns a JSON number for
+// bank.id, so the SDK fails to decode every real (non-403, non-simulated)
+// DVA response — confirmed against a live key, latest SDK version (v0.2.1)
+// at the time. CreateDedicatedAccount calls Paystack directly instead, same
+// raw-HTTP pattern as services/orders/internal/service/paystack.go, with a
+// local response struct that simply omits the field the SDK gets wrong.
 //
 // When PAYSTACK_SECRET_KEY is not set the client runs in simulation mode,
 // synthesizing a fake account so onboarding can be developed and tested
@@ -12,8 +18,11 @@
 package paystack
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -24,12 +33,14 @@ import (
 
 const preferredBank = "wema-bank" // Paystack's standard DVA provider
 
-// Client wraps the Paystack SDK for customer + DVA creation.
-// Construct via New(); use a single instance per service.
+// Client wraps the Paystack SDK (customer creation) and a plain HTTP client
+// (DVA creation — see package doc). Construct via New(); use a single
+// instance per service.
 type Client struct {
-	sdk     *sdk.PaystackClient
-	log     zerolog.Logger
-	simMode bool
+	sdk       *sdk.PaystackClient
+	secretKey string
+	log       zerolog.Logger
+	simMode   bool
 }
 
 // New creates a Client. When secretKey is empty the client enters simulation
@@ -38,7 +49,7 @@ func New(secretKey string, log zerolog.Logger) *Client {
 	if secretKey == "" {
 		return &Client{log: log, simMode: true}
 	}
-	return &Client{sdk: sdk.NewClient(sdk.WithSecretKey(secretKey)), log: log}
+	return &Client{sdk: sdk.NewClient(sdk.WithSecretKey(secretKey)), secretKey: secretKey, log: log}
 }
 
 // CreateCustomer registers a Paystack Customer for a vendor and returns the
@@ -63,6 +74,21 @@ func (c *Client) CreateCustomer(ctx context.Context, email, firstName, lastName,
 	return resp.Data.CustomerCode, nil
 }
 
+// dedicatedAccountResp deliberately omits bank.id (and every other field
+// this package doesn't need) — see the package doc for why the SDK's own
+// typed model can't be used here.
+type dedicatedAccountResp struct {
+	Status  bool   `json:"status"`
+	Message string `json:"message"`
+	Data    struct {
+		AccountNumber string `json:"account_number"`
+		AccountName   string `json:"account_name"`
+		Bank          struct {
+			Name string `json:"name"`
+		} `json:"bank"`
+	} `json:"data"`
+}
+
 // CreateDedicatedAccount creates a Dedicated Virtual Account (a unique NUBAN)
 // for an existing Paystack customer.
 func (c *Client) CreateDedicatedAccount(ctx context.Context, customerCode string) (accountNumber, bankName, accountName string, err error) {
@@ -72,10 +98,32 @@ func (c *Client) CreateDedicatedAccount(ctx context.Context, customerCode string
 		return fmt.Sprintf("%010d", n), "Wema Bank (simulated)", "GoMarketi Vendor (simulated)", nil
 	}
 
-	var resp models.Response[models.DedicatedAccount]
-	if sdkErr := c.sdk.DedicatedVirtualAccounts.Create(ctx, customerCode, &resp,
-		sdk.WithOptionalPayload("preferred_bank", preferredBank)); sdkErr != nil {
-		return "", "", "", fmt.Errorf("paystack: create dedicated account: %w", sdkErr)
+	payload, err := json.Marshal(map[string]string{
+		"customer":       customerCode,
+		"preferred_bank": preferredBank,
+	})
+	if err != nil {
+		return "", "", "", fmt.Errorf("paystack: create dedicated account: marshal: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.paystack.co/dedicated_account", bytes.NewReader(payload))
+	if err != nil {
+		return "", "", "", fmt.Errorf("paystack: create dedicated account: build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.secretKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	httpResp, err := client.Do(req)
+	if err != nil {
+		return "", "", "", fmt.Errorf("paystack: create dedicated account: request failed: %w", err)
+	}
+	defer httpResp.Body.Close()
+
+	var resp dedicatedAccountResp
+	if err := json.NewDecoder(httpResp.Body).Decode(&resp); err != nil {
+		return "", "", "", fmt.Errorf("paystack: create dedicated account: decode response: %w", err)
 	}
 	if !resp.Status || resp.Data.AccountNumber == "" {
 		return "", "", "", fmt.Errorf("paystack: create dedicated account: %s", resp.Message)
