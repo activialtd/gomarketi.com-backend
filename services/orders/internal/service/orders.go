@@ -14,10 +14,11 @@ import (
 	"github.com/jmoiron/sqlx"
 	"github.com/rs/zerolog"
 
-	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
 	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/dto"
 	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/email"
 	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/sse"
+	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
+	"github.com/activialtd/gomarketi.com-backend/shared/pkg/middleware"
 )
 
 type OrdersService struct {
@@ -340,6 +341,7 @@ func (s *OrdersService) releaseOverdueEscrow(ctx context.Context) {
 		WHERE status='shipped' AND dispatched_at < $1 AND delivery_confirmed_at IS NULL`, cutoff)
 	if err != nil {
 		s.log.Warn().Err(err).Msg("escrow auto-release: query failed")
+		middleware.RecordBackgroundError(s.db, s.log, "orders", "escrow auto-release: query failed: "+err.Error(), nil)
 		return
 	}
 	var orderIDs []uuid.UUID
@@ -357,6 +359,8 @@ func (s *OrdersService) releaseOverdueEscrow(ctx context.Context) {
 			WHERE id=$2 AND status='shipped'`, dto.OrderStatusDelivered, id,
 		); err != nil {
 			s.log.Warn().Err(err).Str("order_id", id.String()).Msg("escrow auto-release: mark delivered failed")
+			middleware.RecordBackgroundError(s.db, s.log, "orders", "escrow auto-release: mark delivered failed: "+err.Error(),
+				map[string]any{"order_id": id.String()})
 			continue
 		}
 		if _, err := s.db.ExecContext(ctx, `
@@ -364,6 +368,8 @@ func (s *OrdersService) releaseOverdueEscrow(ctx context.Context) {
 			WHERE order_id=$1 AND status='pending'`, id,
 		); err != nil {
 			s.log.Warn().Err(err).Str("order_id", id.String()).Msg("escrow auto-release: release wallet failed")
+			middleware.RecordBackgroundError(s.db, s.log, "orders", "escrow auto-release: release wallet failed: "+err.Error(),
+				map[string]any{"order_id": id.String()})
 			continue
 		}
 		s.log.Info().Str("order_id", id.String()).Msg("escrow auto-released after 7-day window")
@@ -417,6 +423,8 @@ func (s *OrdersService) UpdateOrderStatus(ctx context.Context, storeID uuid.UUID
 				custEmail, custName, oidStr, slug, name, statusVal,
 			); err != nil {
 				s.log.Warn().Err(err).Str("order_id", oidStr).Msg("status update email failed")
+				middleware.RecordBackgroundError(s.db, s.log, "orders", "status update email failed: "+err.Error(),
+					map[string]any{"order_id": oidStr})
 			}
 		}()
 	}
@@ -563,6 +571,8 @@ func (s *OrdersService) notifyOrderCreated(storeID, orderID uuid.UUID, totalKobo
 				invoiceItems,
 			); err != nil {
 				s.log.Warn().Err(err).Str("order_id", orderIDStr).Msg("invoice email failed")
+				middleware.RecordBackgroundError(s.db, s.log, "orders", "invoice email failed: "+err.Error(),
+					map[string]any{"order_id": orderIDStr})
 			}
 		}()
 	}
@@ -572,6 +582,12 @@ func (s *OrdersService) notifyOrderCreated(storeID, orderID uuid.UUID, totalKobo
 		vendorEmail, err := s.getVendorEmail(context.Background(), storeID)
 		if err != nil || vendorEmail == "" {
 			s.log.Warn().Err(err).Str("store_id", storeID.String()).Msg("vendor email lookup failed")
+			msg := "vendor email lookup failed: no email on file"
+			if err != nil {
+				msg = "vendor email lookup failed: " + err.Error()
+			}
+			middleware.RecordBackgroundError(s.db, s.log, "orders", msg,
+				map[string]any{"store_id": storeID.String(), "order_id": orderIDStr})
 			return
 		}
 		if err := email.SendVendorAlert(
@@ -587,6 +603,8 @@ func (s *OrdersService) notifyOrderCreated(storeID, orderID uuid.UUID, totalKobo
 			invoiceItems,
 		); err != nil {
 			s.log.Warn().Err(err).Str("order_id", orderIDStr).Msg("vendor alert email failed")
+			middleware.RecordBackgroundError(s.db, s.log, "orders", "vendor alert email failed: "+err.Error(),
+				map[string]any{"order_id": orderIDStr})
 		}
 	}()
 }
@@ -1112,7 +1130,7 @@ func (s *OrdersService) GetRevenueTrend(ctx context.Context, storeID uuid.UUID, 
 	// Fill every day in the window so the chart has no gaps
 	out := make([]dto.RevenueTrendPoint, days)
 	for i := range out {
-		d := time.Now().UTC().AddDate(0, 0, -(days-1-i)).Format("2006-01-02")
+		d := time.Now().UTC().AddDate(0, 0, -(days - 1 - i)).Format("2006-01-02")
 		if p, ok := byDate[d]; ok {
 			out[i] = p
 		} else {

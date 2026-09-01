@@ -10,10 +10,11 @@ import (
 
 	"github.com/google/uuid"
 
-	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
 	"github.com/activialtd/gomarketi.com-backend/services/identity/internal/dto"
-	"github.com/activialtd/gomarketi.com-backend/services/identity/internal/repository/db"
 	"github.com/activialtd/gomarketi.com-backend/services/identity/internal/paystack"
+	"github.com/activialtd/gomarketi.com-backend/services/identity/internal/repository/db"
+	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
+	"github.com/activialtd/gomarketi.com-backend/shared/pkg/middleware"
 )
 
 // ── Plans ──────────────────────────────────────────────────────────────────────
@@ -144,12 +145,16 @@ func (s *IdentityService) provisionPaystackAccount(vendorID uuid.UUID, email, fu
 	customerCode, err := s.paystackClient.CreateCustomer(ctx, email, first, last, phone)
 	if err != nil {
 		s.log.Warn().Err(err).Str("vendor_id", vendorID.String()).Msg("paystack customer creation failed")
+		middleware.RecordBackgroundError(s.store.DB(), s.log, "identity", "paystack customer creation failed: "+err.Error(),
+			map[string]any{"vendor_id": vendorID.String()})
 		return
 	}
 
 	accNum, bankName, accName, err := s.paystackClient.CreateDedicatedAccount(ctx, customerCode)
 	if err != nil {
 		s.log.Warn().Err(err).Str("vendor_id", vendorID.String()).Msg("paystack DVA creation failed")
+		middleware.RecordBackgroundError(s.store.DB(), s.log, "identity", "paystack DVA creation failed: "+err.Error(),
+			map[string]any{"vendor_id": vendorID.String(), "customer_code": customerCode})
 		return
 	}
 
@@ -174,11 +179,15 @@ func (s *IdentityService) provisionPaystackAccount(vendorID uuid.UUID, email, fu
 	}
 	if persistErr != nil {
 		s.log.Warn().Err(persistErr).Str("vendor_id", vendorID.String()).Msg("persist paystack DVA failed")
+		middleware.RecordBackgroundError(s.store.DB(), s.log, "identity", "persist paystack DVA failed: "+persistErr.Error(),
+			map[string]any{"vendor_id": vendorID.String(), "customer_code": customerCode, "account_number": accNum})
 		return
 	}
 
 	if err := s.mailer.SendAccountReady(ctx, email, fullName, bankName, accNum, accName); err != nil {
 		s.log.Warn().Err(err).Str("vendor_id", vendorID.String()).Msg("account ready email failed")
+		middleware.RecordBackgroundError(s.store.DB(), s.log, "identity", "account ready email failed: "+err.Error(),
+			map[string]any{"vendor_id": vendorID.String()})
 	}
 }
 

@@ -169,15 +169,9 @@ func Recovery(log zerolog.Logger, db *sqlx.DB, serviceName string) gin.HandlerFu
 	}
 }
 
-// recordErrorEvent writes one row to error_events. Best-effort: a failure to
-// record must never affect the response already sent to the client, so
-// errors here are logged (not returned) and the write runs against a short,
-// bounded context rather than the (possibly already-cancelled) request one.
+// recordErrorEvent writes one row to error_events for an HTTP-request-scoped
+// failure (panic or 5xx response) caught by Recovery.
 func recordErrorEvent(db *sqlx.DB, serviceName string, log zerolog.Logger, c *gin.Context, status int, panicVal string) {
-	if db == nil {
-		return
-	}
-
 	message := panicVal
 	if message == "" {
 		message = "HTTP " + http.StatusText(status)
@@ -186,12 +180,45 @@ func recordErrorEvent(db *sqlx.DB, serviceName string, log zerolog.Logger, c *gi
 	reqID, _ := c.Get("request_id")
 	userID := c.GetString(CtxKeyUserID)
 
-	ctxJSON, err := json.Marshal(gin.H{
+	fields := map[string]any{
 		"request_id": stringVal(reqID),
 		"method":     c.Request.Method,
-	})
+	}
+
+	writeErrorEvent(db, log, serviceName, message, c.Request.URL.Path, &status, userID, fields)
+}
+
+// RecordBackgroundError writes an error_events row for a failure that
+// happened OUTSIDE the HTTP request/response cycle — a goroutine, a
+// scheduled job — the same queue Recovery writes to for request-scoped
+// failures, but reachable from anywhere a service holds a *sqlx.DB. These
+// failures (a third-party API call inside a background provisioning step,
+// a transactional email, a scheduled release job) previously only ever hit
+// a zerolog Warn() — invisible to the Admin Center's error queue unless
+// someone went looking at container logs. fields is optional free-form
+// context (e.g. {"vendor_id": "..."}) shown alongside the error.
+func RecordBackgroundError(db *sqlx.DB, log zerolog.Logger, serviceName, message string, fields map[string]any) {
+	if fields == nil {
+		fields = map[string]any{}
+	}
+	writeErrorEvent(db, log, serviceName, message, "", nil, "", fields)
+}
+
+// writeErrorEvent is the shared low-level writer behind both the HTTP-path
+// (recordErrorEvent) and background-path (RecordBackgroundError) capture.
+// Best-effort: a failure to record must never affect the caller — a request
+// already in flight, or a background job already doing its own thing — so
+// errors here are logged (not returned) and the write runs against a short,
+// bounded context rather than whatever context the caller has (which, for
+// an HTTP request, dies the moment the response is written).
+func writeErrorEvent(db *sqlx.DB, log zerolog.Logger, serviceName, message, requestPath string, statusCode *int, userID string, fields map[string]any) {
+	if db == nil {
+		return
+	}
+
+	fieldsJSON, err := json.Marshal(fields)
 	if err != nil {
-		ctxJSON = []byte("{}")
+		fieldsJSON = []byte("{}")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -199,8 +226,8 @@ func recordErrorEvent(db *sqlx.DB, serviceName string, log zerolog.Logger, c *gi
 
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO error_events (service, level, message, request_path, status_code, user_id, context)
-		VALUES ($1, 'error', $2, $3, $4, NULLIF($5, ''), $6)
-	`, serviceName, message, c.Request.URL.Path, status, userID, ctxJSON)
+		VALUES ($1, 'error', $2, NULLIF($3, ''), $4, NULLIF($5, ''), $6)
+	`, serviceName, message, requestPath, statusCode, userID, fieldsJSON)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to record error_event")
 	}

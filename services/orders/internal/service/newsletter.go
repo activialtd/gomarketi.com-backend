@@ -9,9 +9,10 @@ import (
 
 	"github.com/google/uuid"
 
-	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
 	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/dto"
 	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/email"
+	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
+	"github.com/activialtd/gomarketi.com-backend/shared/pkg/middleware"
 )
 
 // Subscribe adds an email to a store's newsletter list.
@@ -227,10 +228,13 @@ func (s *OrdersService) SendCampaign(ctx context.Context, storeID uuid.UUID, cam
 	campIDStr := campaignID.String()
 
 	go func() {
-		sent := 0
+		sent, failed := 0, 0
 		for _, sub := range subs {
 			plain := "You received a message from " + name + ". Please view this email in an HTML-capable client."
-			_ = email.SendCampaignMail(context.Background(), sub.Email, sub.Name, name, subject, bodyHTML, plain)
+			if err := email.SendCampaignMail(context.Background(), sub.Email, sub.Name, name, subject, bodyHTML, plain); err != nil {
+				failed++
+				continue
+			}
 			sent++
 		}
 		status := "sent"
@@ -239,6 +243,14 @@ func (s *OrdersService) SendCampaign(ctx context.Context, storeID uuid.UUID, cam
 			SET status=$1, recipients_count=$2, sent_at=NOW(), updated_at=NOW()
 			WHERE id=$3`, status, sent, campIDStr,
 		)
+		// One aggregated event per campaign, not one per failed recipient —
+		// a bad mailing list shouldn't flood the error queue.
+		if failed > 0 {
+			s.log.Warn().Str("campaign_id", campIDStr).Int("sent", sent).Int("failed", failed).Msg("newsletter campaign had failed sends")
+			middleware.RecordBackgroundError(s.db, s.log, "orders",
+				fmt.Sprintf("newsletter campaign: %d of %d sends failed", failed, sent+failed),
+				map[string]any{"campaign_id": campIDStr, "store_id": storeID.String(), "sent": sent, "failed": failed})
+		}
 	}()
 
 	createdAt := time.Now().UTC().Format(time.RFC3339)
