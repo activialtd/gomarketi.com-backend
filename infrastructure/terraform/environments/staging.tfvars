@@ -17,4 +17,11 @@ additional_allowed_origins = [
   # storefront except whatever happens to be hardcoded above. See
   # gateway's originMatches() for the "*.host" wildcard support this relies on.
   "https://*.gomarketi.com",
+  # admin-web (Admin Center) doesn't have a custom domain yet — it's only
+  # reachable at whatever Vercel-assigned URL its project currently has.
+  # This will need updating (or replacing with a real admin.gomarketi.com
+  # entry, matched by the wildcard above) whenever that project's URL
+  # changes, since Vercel's *.vercel.app aliases aren't guaranteed stable
+  # across every redeploy.
+  "https://gomarketi-com-frontend-vendor-web-p.vercel.app",
 ]
