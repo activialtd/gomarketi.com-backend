@@ -13,14 +13,15 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
-	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
-	"github.com/activialtd/gomarketi.com-backend/shared/pkg/crypto"
 	"github.com/activialtd/gomarketi.com-backend/services/identity/internal/dto"
+	identityemail "github.com/activialtd/gomarketi.com-backend/services/identity/internal/email"
+	"github.com/activialtd/gomarketi.com-backend/services/identity/internal/paystack"
 	"github.com/activialtd/gomarketi.com-backend/services/identity/internal/repository"
 	"github.com/activialtd/gomarketi.com-backend/services/identity/internal/repository/db"
 	"github.com/activialtd/gomarketi.com-backend/services/identity/internal/smileid"
-	"github.com/activialtd/gomarketi.com-backend/services/identity/internal/paystack"
-	identityemail "github.com/activialtd/gomarketi.com-backend/services/identity/internal/email"
+	"github.com/activialtd/gomarketi.com-backend/shared/pkg/crypto"
+	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
+	"github.com/activialtd/gomarketi.com-backend/shared/pkg/middleware"
 )
 
 // IdentityService implements all identity use-cases.
@@ -333,9 +334,9 @@ func (s *IdentityService) UpdateVendorBusiness(ctx context.Context, userID uuid.
 	nextStep := advanceStep(vendor.OnboardingStep, "business_details")
 
 	params := db.UpdateVendorBusinessParams{
-		ID:           vendor.ID,
-		BusinessName: sql.NullString{String: req.BusinessName, Valid: true},
-		BusinessType: sql.NullString{String: req.BusinessType, Valid: true},
+		ID:             vendor.ID,
+		BusinessName:   sql.NullString{String: req.BusinessName, Valid: true},
+		BusinessType:   sql.NullString{String: req.BusinessType, Valid: true},
 		OnboardingStep: nextStep,
 	}
 	if req.EmployeeRange != nil {
@@ -357,12 +358,12 @@ func (s *IdentityService) UpdateVendorBusiness(ctx context.Context, userID uuid.
 }
 
 // SubmitVendorKYC performs the full CBN-aligned KYC verification flow:
-//   1. Rate-limit check (max 3 attempts / 24 h per vendor — CBN AML requirement)
-//   2. If BVN or NIN provided: call Smile ID to verify against NIMC/CBN database
-//   3. If CAC number provided: call Smile ID KYB check against CAC database
-//   4. Encrypt every PII field (AES-256-GCM) before writing to DB
-//   5. Advance onboarding_step and set kyc_status = pending (manual review)
-//      OR = verified (if Smile ID returned an instant Verified result)
+//  1. Rate-limit check (max 3 attempts / 24 h per vendor — CBN AML requirement)
+//  2. If BVN or NIN provided: call Smile ID to verify against NIMC/CBN database
+//  3. If CAC number provided: call Smile ID KYB check against CAC database
+//  4. Encrypt every PII field (AES-256-GCM) before writing to DB
+//  5. Advance onboarding_step and set kyc_status = pending (manual review)
+//     OR = verified (if Smile ID returned an instant Verified result)
 //
 // SECURITY: req.Bvn, req.Nin and req.IdNumber are NEVER logged anywhere in
 // this function. They are passed to Smile ID over TLS and then immediately
@@ -418,9 +419,15 @@ func (s *IdentityService) SubmitVendorKYC(ctx context.Context, userID uuid.UUID,
 		}
 
 		firstName, lastName, dob := "", "", ""
-		if req.FirstName != nil { firstName = *req.FirstName }
-		if req.LastName != nil  { lastName  = *req.LastName  }
-		if req.DOB != nil       { dob       = *req.DOB       }
+		if req.FirstName != nil {
+			firstName = *req.FirstName
+		}
+		if req.LastName != nil {
+			lastName = *req.LastName
+		}
+		if req.DOB != nil {
+			dob = *req.DOB
+		}
 
 		result, smileErr := s.kycClient.VerifyID(verifyCtx, smileid.VerifyRequest{
 			Country:   "NG",
@@ -439,6 +446,8 @@ func (s *IdentityService) SubmitVendorKYC(ctx context.Context, userID uuid.UUID,
 				Str("id_type", string(idType)).
 				Err(smileErr).
 				Msg("smile id call failed — falling back to manual review")
+			middleware.RecordBackgroundError(s.store.DB(), s.log, "identity", "smile id call failed — falling back to manual review: "+smileErr.Error(),
+				map[string]any{"vendor_id": vendor.ID.String(), "id_type": string(idType)})
 		} else {
 			sj := result.SmileJobID
 			smileJobID = &sj
@@ -456,6 +465,8 @@ func (s *IdentityService) SubmitVendorKYC(ctx context.Context, userID uuid.UUID,
 		})
 		if smileErr != nil {
 			s.log.Warn().Err(smileErr).Msg("smile id CAC check failed — manual review")
+			middleware.RecordBackgroundError(s.store.DB(), s.log, "identity", "smile id CAC check failed — manual review: "+smileErr.Error(),
+				map[string]any{"vendor_id": vendor.ID.String()})
 		} else {
 			sj := result.SmileJobID
 			smileJobID = &sj

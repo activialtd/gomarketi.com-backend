@@ -20,6 +20,7 @@ import (
 	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/email"
 	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/vercel"
 	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
+	"github.com/activialtd/gomarketi.com-backend/shared/pkg/middleware"
 	"github.com/activialtd/gomarketi.com-backend/shared/pkg/planlimits"
 )
 
@@ -153,6 +154,8 @@ func (s *StorefrontService) CreateStore(ctx context.Context, userID uuid.UUID, r
 				vendorEmail, vendorName, storeName, storeSlug, storeDomain,
 			); emailErr != nil {
 				s.log.Warn().Err(emailErr).Str("slug", storeSlug).Msg("welcome email failed")
+				middleware.RecordBackgroundError(s.db, s.log, "storefront", "welcome email failed: "+emailErr.Error(),
+					map[string]any{"slug": storeSlug})
 			}
 		}()
 	}
@@ -169,6 +172,8 @@ func (s *StorefrontService) CreateStore(ctx context.Context, userID uuid.UUID, r
 		defer cancel()
 		if domainErr := s.domains.AddDomain(ctx3, storeSubdomain); domainErr != nil {
 			s.log.Warn().Err(domainErr).Str("domain", storeSubdomain).Msg("vercel domain registration failed")
+			middleware.RecordBackgroundError(s.db, s.log, "storefront", "vercel domain registration failed: "+domainErr.Error(),
+				map[string]any{"domain": storeSubdomain})
 		}
 	}()
 
