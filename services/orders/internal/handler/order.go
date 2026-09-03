@@ -184,6 +184,29 @@ func (h *Handler) ConfirmDelivery(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
+// ReportMissing godoc
+// POST /v1/orders/public/:id/report-missing — buyer flags one order within a
+// batch as never having arrived, even though it was dispatched.
+func (h *Handler) ReportMissing(c *gin.Context) {
+	orderID, ok := h.pathUUID(c, "id")
+	if !ok {
+		return
+	}
+
+	var req dto.ReportMissingReq
+	if !h.bind(c, &req) {
+		return
+	}
+
+	resp, err := h.svc.ReportMissing(c.Request.Context(), orderID, req.Email, req.Reason)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
 // CreateOrder godoc
 // POST /v1/orders/public — no auth, called by the storefront checkout after
 // a successful (simulated) Paystack charge.
@@ -290,6 +313,38 @@ func (h *Handler) NoShowRefund(c *gin.Context) {
 	}
 
 	resp, err := h.svc.NoShowRefund(c.Request.Context(), orderID)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+// DisputeRefundReq is the body for POST /v1/orders/internal/dispute-refund.
+type DisputeRefundReq struct {
+	OrderID string `json:"order_id" validate:"required,uuid"`
+}
+
+// DisputeRefund godoc
+// POST /v1/orders/internal/dispute-refund
+// Called by admin-api when an admin resolves a reported "buyer never
+// received this" dispute by refunding them — the claw-back path for an
+// order already past dispatch. Same internal shared-secret protection as
+// NoShowRefund, same reason: this is the one step that needs orders
+// service's own Paystack secret key.
+func (h *Handler) DisputeRefund(c *gin.Context) {
+	var req DisputeRefundReq
+	if !h.bind(c, &req) {
+		return
+	}
+	orderID, err := uuid.Parse(req.OrderID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.ErrorResp{Error: "invalid order_id"})
+		return
+	}
+
+	resp, err := h.svc.DisputeRefund(c.Request.Context(), orderID)
 	if err != nil {
 		h.writeError(c, err)
 		return

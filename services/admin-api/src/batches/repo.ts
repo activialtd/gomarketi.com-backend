@@ -79,6 +79,9 @@ export async function getBatch(paymentReference: string) {
       "orders.delivery_confirmed_at",
       "orders.cancelled_reason",
       "orders.refund_reference",
+      "orders.dispute_status",
+      "orders.dispute_reason",
+      "orders.disputed_at",
       "orders.created_at",
       "wallet_transactions.status as wallet_status",
     ])
@@ -106,6 +109,58 @@ export async function getBatch(paymentReference: string) {
       ...o,
       items: items.filter((i) => i.order_id === o.id),
     })),
+  };
+}
+
+export interface DisputeSummary {
+  id: string;
+  payment_reference: string | null;
+  store_id: string;
+  store_name: string;
+  customer_name: string;
+  customer_email: string;
+  total_kobo: string;
+  dispute_reason: string | null;
+  disputed_at: Date;
+}
+
+// listDisputes is the customer-care queue — every order with an open
+// ("reported", not yet resolved) dispute, across every batch, so an agent
+// doesn't need to already know which batch a caller's order belongs to.
+export async function listDisputes(opts: { page?: number; perPage?: number }) {
+  const { page, perPage, offset } = clampPaging(opts.page, opts.perPage);
+
+  const rows = await db
+    .selectFrom("orders")
+    .innerJoin("stores", "stores.id", "orders.store_id")
+    .select([
+      "orders.id",
+      "orders.payment_reference",
+      "orders.store_id",
+      "stores.name as store_name",
+      "orders.customer_name",
+      "orders.customer_email",
+      "orders.total_kobo",
+      "orders.dispute_reason",
+      "orders.disputed_at",
+    ])
+    .where("orders.dispute_status", "=", "reported")
+    .orderBy("orders.disputed_at", "asc") // oldest-open-first — the ones waiting longest surface first
+    .limit(perPage)
+    .offset(offset)
+    .execute();
+
+  const totalRow = await db
+    .selectFrom("orders")
+    .select((eb) => eb.fn.countAll().as("count"))
+    .where("dispute_status", "=", "reported")
+    .executeTakeFirst();
+
+  return {
+    disputes: rows as DisputeSummary[],
+    total: Number(totalRow?.count ?? 0),
+    page,
+    per_page: perPage,
   };
 }
 
@@ -195,5 +250,37 @@ export async function releaseEscrow(orderId: string) {
 
   if (result.numUpdatedRows === 0n) {
     throw new Error("no held wallet credit found for this order");
+  }
+}
+
+// dismissDispute closes a reported "buyer never received this" report
+// without refunding — e.g. resolved directly with the customer, or found to
+// be in error. A pure DB write: no Paystack involvement, unlike refundDispute.
+export async function dismissDispute(orderId: string, adminId: string) {
+  const result = await db
+    .updateTable("orders")
+    .set({ dispute_status: "dismissed", dispute_resolved_at: new Date(), dispute_resolved_by: adminId, updated_at: new Date() })
+    .where("id", "=", orderId)
+    .where("dispute_status", "=", "reported")
+    .executeTakeFirst();
+
+  if (result.numUpdatedRows === 0n) {
+    throw new Error("order has no reported dispute to dismiss");
+  }
+}
+
+// refundDispute resolves a reported dispute by actually refunding the
+// buyer — the claw-back path for an order already past dispatch. Calls the
+// Go orders service internal endpoint (the only step needing its own
+// Paystack secret key), same pattern as callNoShowRefund above.
+export async function refundDispute(orderId: string): Promise<void> {
+  const res = await fetch(`${config.ordersInternalUrl}/v1/orders/internal/dispute-refund`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Internal-Key": config.internalApiKey },
+    body: JSON.stringify({ order_id: orderId }),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`dispute refund failed (${res.status}): ${body}`);
   }
 }
