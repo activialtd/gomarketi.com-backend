@@ -41,26 +41,41 @@ const (
 	EscrowReversed EscrowStatus = "reversed"
 )
 
+// DisputeStatus tracks a buyer's "I never received this" report — orthogonal
+// to OrderStatus, which stays 'shipped'/'delivered' for fulfillment tracking
+// even while a dispute is open. Reported disputes block the 7-day escrow
+// auto-release (see releaseOverdueEscrow) until an admin resolves them.
+type DisputeStatus string
+
+const (
+	DisputeReported  DisputeStatus = "reported"
+	DisputeRefunded  DisputeStatus = "refunded"
+	DisputeDismissed DisputeStatus = "dismissed"
+)
+
 // OrderResp is returned for any order read operation.
 type OrderResp struct {
-	ID                  string       `json:"id"`
-	StoreID             string       `json:"store_id"`
-	CustomerID          string       `json:"customer_id"`
-	CustomerName        string       `json:"customer_name"`
-	CustomerEmail       string       `json:"customer_email"`
-	Status              OrderStatus  `json:"status"`
-	Items               []OrderItem  `json:"items"`
-	TotalKobo           int64        `json:"total_kobo"`
-	DeliveryAddress     string       `json:"delivery_address"`
-	PaymentRef          string       `json:"payment_reference,omitempty"`
-	HubReceivedAt       *string      `json:"hub_received_at,omitempty"`
-	DispatchedAt        *string      `json:"dispatched_at,omitempty"`
-	DeliveredAt         *string      `json:"delivered_at,omitempty"`
-	DeliveryConfirmedAt *string      `json:"delivery_confirmed_at,omitempty"`
-	CancelledReason     *string      `json:"cancelled_reason,omitempty"`
-	EscrowStatus        EscrowStatus `json:"escrow_status"`
-	CreatedAt           string       `json:"created_at"`
-	UpdatedAt           string       `json:"updated_at"`
+	ID                  string         `json:"id"`
+	StoreID             string         `json:"store_id"`
+	CustomerID          string         `json:"customer_id"`
+	CustomerName        string         `json:"customer_name"`
+	CustomerEmail       string         `json:"customer_email"`
+	Status              OrderStatus    `json:"status"`
+	Items               []OrderItem    `json:"items"`
+	TotalKobo           int64          `json:"total_kobo"`
+	DeliveryAddress     string         `json:"delivery_address"`
+	PaymentRef          string         `json:"payment_reference,omitempty"`
+	HubReceivedAt       *string        `json:"hub_received_at,omitempty"`
+	DispatchedAt        *string        `json:"dispatched_at,omitempty"`
+	DeliveredAt         *string        `json:"delivered_at,omitempty"`
+	DeliveryConfirmedAt *string        `json:"delivery_confirmed_at,omitempty"`
+	CancelledReason     *string        `json:"cancelled_reason,omitempty"`
+	EscrowStatus        EscrowStatus   `json:"escrow_status"`
+	DisputeStatus       *DisputeStatus `json:"dispute_status,omitempty"`
+	DisputeReason       *string        `json:"dispute_reason,omitempty"`
+	DisputedAt          *string        `json:"disputed_at,omitempty"`
+	CreatedAt           string         `json:"created_at"`
+	UpdatedAt           string         `json:"updated_at"`
 }
 
 // OrderListResp wraps a paginated list of orders.
@@ -139,6 +154,15 @@ type ConfirmDeliveryReq struct {
 	Email string `json:"email" validate:"required,email"`
 }
 
+// ReportMissingReq is the body for POST /v1/orders/public/:id/report-missing —
+// a buyer flagging that a specific order within a batch (possibly already
+// dispatched or delivered) never actually arrived. Same email-gated trust
+// model as ConfirmDeliveryReq, since checkout has no real buyer JWT identity.
+type ReportMissingReq struct {
+	Email  string  `json:"email"  validate:"required,email"`
+	Reason *string `json:"reason"`
+}
+
 // AbandonedCartResp is a single abandoned cart entry.
 type AbandonedCartResp struct {
 	ID            string      `json:"id"`
@@ -188,7 +212,7 @@ type AnalyticsOverviewResp struct {
 
 // RevenueTrendPoint is one day's aggregated revenue for the trend chart.
 type RevenueTrendPoint struct {
-	Date        string `json:"date"`         // "2026-07-03"
+	Date        string `json:"date"` // "2026-07-03"
 	RevenueKobo int64  `json:"revenue_kobo"`
 	Orders      int    `json:"orders"`
 }
@@ -196,11 +220,11 @@ type RevenueTrendPoint struct {
 // TopProductResp is a single entry in the top-selling products list,
 // aggregated from order_items across all of a store's orders.
 type TopProductResp struct {
-	ProductID    string `json:"product_id"`
-	Name         string `json:"name"`
-	ImageURL     string `json:"image_url,omitempty"`
-	UnitsSold    int64  `json:"units_sold"`
-	RevenueKobo  int64  `json:"revenue_kobo"`
+	ProductID   string `json:"product_id"`
+	Name        string `json:"name"`
+	ImageURL    string `json:"image_url,omitempty"`
+	UnitsSold   int64  `json:"units_sold"`
+	RevenueKobo int64  `json:"revenue_kobo"`
 }
 
 // ── Wallet ────────────────────────────────────────────────────────────────────
@@ -221,9 +245,9 @@ type WalletTransactionResp struct {
 
 // WalletResp is returned by GET /v1/wallet.
 type WalletResp struct {
-	BalanceKobo  int64                    `json:"balance_kobo"`
-	TotalEarned  int64                    `json:"total_earned_kobo"`
-	HeldKobo     int64                    `json:"held_kobo"` // credits still in escrow — not yet withdrawable
+	BalanceKobo  int64                   `json:"balance_kobo"`
+	TotalEarned  int64                   `json:"total_earned_kobo"`
+	HeldKobo     int64                   `json:"held_kobo"` // credits still in escrow — not yet withdrawable
 	Transactions []WalletTransactionResp `json:"transactions"`
 }
 
@@ -277,11 +301,11 @@ type SubscribeReq struct {
 
 // SubscriberResp is a single newsletter subscriber.
 type SubscriberResp struct {
-	ID           string  `json:"id"`
-	Email        string  `json:"email"`
-	Name         string  `json:"name"`
-	SubscribedAt string  `json:"subscribed_at"`
-	Unsubscribed bool    `json:"unsubscribed"`
+	ID           string `json:"id"`
+	Email        string `json:"email"`
+	Name         string `json:"name"`
+	SubscribedAt string `json:"subscribed_at"`
+	Unsubscribed bool   `json:"unsubscribed"`
 }
 
 // SubscriberListResp wraps a paginated subscriber list.
@@ -300,12 +324,12 @@ type CreateCampaignReq struct {
 
 // CampaignResp is a single email campaign.
 type CampaignResp struct {
-	ID             string  `json:"id"`
-	Subject        string  `json:"subject"`
-	Status         string  `json:"status"`
-	RecipientsCount int    `json:"recipients_count"`
-	CreatedAt      string  `json:"created_at"`
-	SentAt         *string `json:"sent_at,omitempty"`
+	ID              string  `json:"id"`
+	Subject         string  `json:"subject"`
+	Status          string  `json:"status"`
+	RecipientsCount int     `json:"recipients_count"`
+	CreatedAt       string  `json:"created_at"`
+	SentAt          *string `json:"sent_at,omitempty"`
 }
 
 // CampaignListResp wraps a list of campaigns.

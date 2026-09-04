@@ -34,6 +34,7 @@ type OrdersService struct {
 const orderColumns = `id, store_id, customer_id, customer_name, customer_email, status,
 	total_kobo, delivery_address, payment_reference,
 	hub_received_at, dispatched_at, delivered_at, delivery_confirmed_at, cancelled_reason,
+	dispute_status, dispute_reason, disputed_at,
 	created_at, updated_at,
 	(SELECT wt.status FROM wallet_transactions wt WHERE wt.order_id = orders.id LIMIT 1) AS wallet_status`
 
@@ -224,6 +225,112 @@ func (s *OrdersService) ConfirmDelivery(ctx context.Context, orderID uuid.UUID, 
 	return s.GetPublicOrder(ctx, orderID, email)
 }
 
+// ReportMissing lets the buyer flag one order within a batch as never having
+// arrived, even though it was checked in at the hub and dispatched — the gap
+// the no-show path doesn't cover, since that only ever fires BEFORE dispatch.
+// Deliberately does not touch order status (fulfillment tracking stays
+// accurate); dispute_status is a parallel flag. Reporting a dispute is what
+// blocks releaseOverdueEscrow from paying the vendor while it's open — see
+// that function's WHERE clause.
+func (s *OrdersService) ReportMissing(ctx context.Context, orderID uuid.UUID, email string, reason *string) (dto.OrderResp, error) {
+	var status string
+	var disputeStatus sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT status, dispute_status FROM orders WHERE id=$1 AND LOWER(customer_email)=LOWER($2)`,
+		orderID, email,
+	).Scan(&status, &disputeStatus)
+	if errors.Is(err, sql.ErrNoRows) {
+		return dto.OrderResp{}, apperrors.NotFound("order not found")
+	}
+	if err != nil {
+		return dto.OrderResp{}, fmt.Errorf("load order: %w", err)
+	}
+	if status != string(dto.OrderStatusShipped) && status != string(dto.OrderStatusDelivered) {
+		return dto.OrderResp{}, apperrors.BadRequest(
+			"this order hasn't been dispatched yet — there's nothing to report as missing")
+	}
+	if disputeStatus.String == string(dto.DisputeReported) {
+		// Already reported — idempotent, not an error.
+		return s.getOrderByID(ctx, orderID)
+	}
+	if disputeStatus.Valid {
+		return dto.OrderResp{}, apperrors.BadRequest("this order's dispute has already been resolved")
+	}
+
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE orders SET dispute_status='reported', dispute_reason=$1, disputed_at=NOW(), updated_at=NOW()
+		WHERE id=$2`,
+		reason, orderID,
+	); err != nil {
+		return dto.OrderResp{}, fmt.Errorf("report missing: %w", err)
+	}
+
+	return s.getOrderByID(ctx, orderID)
+}
+
+// DisputeRefund resolves a reported dispute by refunding the buyer for real —
+// the claw-back path the escrow model was missing entirely: until this
+// existed, an admin had no way to reverse money for an order already past
+// dispatch. Called by admin-api the same way NoShowRefund is (the only step
+// needing orders service's own Paystack secret key). Reverses the vendor's
+// wallet credit regardless of whether it was still held or already released
+// — if the vendor already withdrew it, their balance goes negative, which is
+// the correct signal that they now owe the platform for this reversal.
+func (s *OrdersService) DisputeRefund(ctx context.Context, orderID uuid.UUID) (dto.OrderResp, error) {
+	var status, disputeStatus, paymentRef sql.NullString
+	var totalKobo int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT status, dispute_status, payment_reference, total_kobo FROM orders WHERE id=$1`, orderID,
+	).Scan(&status, &disputeStatus, &paymentRef, &totalKobo)
+	if errors.Is(err, sql.ErrNoRows) {
+		return dto.OrderResp{}, apperrors.NotFound("order not found")
+	}
+	if err != nil {
+		return dto.OrderResp{}, fmt.Errorf("load order: %w", err)
+	}
+	if disputeStatus.String == string(dto.DisputeRefunded) {
+		// Already handled — return current state rather than refunding twice.
+		return s.getOrderByID(ctx, orderID)
+	}
+	if disputeStatus.String != string(dto.DisputeReported) {
+		return dto.OrderResp{}, apperrors.BadRequest("order has no reported dispute to refund")
+	}
+	if !paymentRef.Valid || paymentRef.String == "" {
+		return dto.OrderResp{}, apperrors.Internal(fmt.Errorf("order %s has no payment_reference to refund", orderID))
+	}
+
+	refundRef, err := s.refundPaystackTransaction(ctx, paymentRef.String, totalKobo)
+	if err != nil {
+		return dto.OrderResp{}, err
+	}
+
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return dto.OrderResp{}, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE orders SET status=$1, cancelled_reason=$2, refund_reference=$3, refunded_at=NOW(),
+		                   dispute_status=$4, dispute_resolved_at=NOW(), updated_at=NOW()
+		WHERE id=$5`,
+		dto.OrderStatusCancelled, "buyer_reported_not_received", refundRef, dto.DisputeRefunded, orderID,
+	); err != nil {
+		return dto.OrderResp{}, fmt.Errorf("mark cancelled: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE wallet_transactions SET status='failed' WHERE order_id=$1 AND status IN ('pending','completed')`,
+		orderID,
+	); err != nil {
+		return dto.OrderResp{}, fmt.Errorf("reverse wallet credit: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return dto.OrderResp{}, fmt.Errorf("commit: %w", err)
+	}
+
+	return s.getOrderByID(ctx, orderID)
+}
+
 // NoShowRefund cancels one order in a batch and refunds the buyer for that
 // portion, because its vendor didn't deliver to the GoMarketi hub in time
 // for dispatch. Called by admin-api's batch-dispatch action (the one
@@ -336,9 +443,14 @@ func (s *OrdersService) releaseOverdueEscrow(ctx context.Context) {
 	// wallet_transactions.status='pending'), so a duplicate run (e.g. a
 	// second instance on the same tick) is a harmless no-op, not a
 	// double-release.
+	// dispute_status IS DISTINCT FROM 'reported' — an open "buyer says this
+	// never arrived" dispute must block auto-release; the vendor only gets
+	// paid automatically once that's resolved (refunded or dismissed) by an
+	// admin, or never was reported at all.
 	rows, err := s.db.QueryxContext(ctx, `
 		SELECT id FROM orders
-		WHERE status='shipped' AND dispatched_at < $1 AND delivery_confirmed_at IS NULL`, cutoff)
+		WHERE status='shipped' AND dispatched_at < $1 AND delivery_confirmed_at IS NULL
+		  AND dispute_status IS DISTINCT FROM 'reported'`, cutoff)
 	if err != nil {
 		s.log.Warn().Err(err).Msg("escrow auto-release: query failed")
 		middleware.RecordBackgroundError(s.db, s.log, "orders", "escrow auto-release: query failed: "+err.Error(), nil)
@@ -1202,6 +1314,9 @@ type orderRow struct {
 	DeliveredAt         sql.NullTime   `db:"delivered_at"`
 	DeliveryConfirmedAt sql.NullTime   `db:"delivery_confirmed_at"`
 	CancelledReason     sql.NullString `db:"cancelled_reason"`
+	DisputeStatus       sql.NullString `db:"dispute_status"`
+	DisputeReason       sql.NullString `db:"dispute_reason"`
+	DisputedAt          sql.NullTime   `db:"disputed_at"`
 	WalletStatus        sql.NullString `db:"wallet_status"`
 	CreatedAt           time.Time      `db:"created_at"`
 	UpdatedAt           time.Time      `db:"updated_at"`
@@ -1253,6 +1368,17 @@ func rowToOrder(r orderRow) dto.OrderResp {
 	}
 	if r.CancelledReason.Valid {
 		o.CancelledReason = &r.CancelledReason.String
+	}
+	if r.DisputeStatus.Valid {
+		ds := dto.DisputeStatus(r.DisputeStatus.String)
+		o.DisputeStatus = &ds
+	}
+	if r.DisputeReason.Valid {
+		o.DisputeReason = &r.DisputeReason.String
+	}
+	if r.DisputedAt.Valid {
+		s := r.DisputedAt.Time.UTC().Format(time.RFC3339)
+		o.DisputedAt = &s
 	}
 	return o
 }

@@ -55,19 +55,21 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 	// Public — no auth.
 	pub := r.Group("/v1/orders/public")
 	pub.POST("", h.CreateOrder)
-	pub.POST("/checkout", h.CreateCheckout)             // multi-store cart: one payment, one order per vendor
-	pub.GET("/:id", h.GetPublicOrder)                   // customer order tracking — gated by email param
+	pub.POST("/checkout", h.CreateCheckout)              // multi-store cart: one payment, one order per vendor
+	pub.GET("/:id", h.GetPublicOrder)                    // customer order tracking — gated by email param
 	pub.POST("/:id/confirm-delivery", h.ConfirmDelivery) // buyer confirms receipt — releases vendor escrow
-	pub.POST("/visit", h.TrackVisit)                    // lightweight storefront page-view beacon
-	pub.POST("/subscribe", h.Subscribe)                 // storefront newsletter opt-in
-	pub.GET("/gateways/:store_id", h.GetPublicGateways) // active payment gateways for checkout
-	pub.POST("/cart-email", h.SendCartInvoice)          // pre-payment cart summary email
+	pub.POST("/:id/report-missing", h.ReportMissing)     // buyer flags a dispatched order as never received
+	pub.POST("/visit", h.TrackVisit)                     // lightweight storefront page-view beacon
+	pub.POST("/subscribe", h.Subscribe)                  // storefront newsletter opt-in
+	pub.GET("/gateways/:store_id", h.GetPublicGateways)  // active payment gateways for checkout
+	pub.POST("/cart-email", h.SendCartInvoice)           // pre-payment cart summary email
 
 	// Internal — service-to-service only, reached by direct networking (not
 	// the public gateway), protected by a shared secret instead of a user JWT.
 	internal := r.Group("/v1/orders/internal")
 	internal.Use(requireInternalKey(log))
 	internal.POST("/no-show-refund", h.NoShowRefund)
+	internal.POST("/dispute-refund", h.DisputeRefund)
 
 	v1 := r.Group("/v1")
 	v1.Use(middleware.RequireUser())

@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { requireAuth, requireRole } from "../auth/middleware.js";
-import { dispatchBatch, getBatch, hubIntake, listBatches, releaseEscrow } from "./repo.js";
+import { dismissDispute, dispatchBatch, getBatch, hubIntake, listBatches, listDisputes, refundDispute, releaseEscrow } from "./repo.js";
 
 interface ListQuery {
   page?: string;
@@ -14,6 +14,15 @@ export async function batchRoutes(app: FastifyInstance) {
     async (request) => {
       const { page, per_page } = request.query;
       return listBatches({ page: page ? Number(page) : undefined, perPage: per_page ? Number(per_page) : undefined });
+    },
+  );
+
+  app.get<{ Querystring: ListQuery }>(
+    "/v1/admin/disputes",
+    { preHandler: requireAuth },
+    async (request) => {
+      const { page, per_page } = request.query;
+      return listDisputes({ page: page ? Number(page) : undefined, perPage: per_page ? Number(per_page) : undefined });
     },
   );
 
@@ -58,6 +67,32 @@ export async function batchRoutes(app: FastifyInstance) {
     async (request, reply) => {
       try {
         await releaseEscrow(request.params.id);
+        return { ok: true };
+      } catch (err) {
+        return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });
+      }
+    },
+  );
+
+  app.post<{ Params: { id: string } }>(
+    "/v1/admin/orders/:id/dismiss-dispute",
+    { preHandler: [requireAuth, requireRole("supervisor", "super_admin")] },
+    async (request, reply) => {
+      try {
+        await dismissDispute(request.params.id, request.admin!.sub);
+        return { ok: true };
+      } catch (err) {
+        return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });
+      }
+    },
+  );
+
+  app.post<{ Params: { id: string } }>(
+    "/v1/admin/orders/:id/refund-dispute",
+    { preHandler: [requireAuth, requireRole("supervisor", "super_admin")] },
+    async (request, reply) => {
+      try {
+        await refundDispute(request.params.id);
         return { ok: true };
       } catch (err) {
         return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });

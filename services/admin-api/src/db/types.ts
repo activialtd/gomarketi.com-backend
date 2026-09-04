@@ -84,6 +84,7 @@ export interface StoresTable {
 }
 
 export type OrderStatus = "pending" | "confirmed" | "at_hub" | "shipped" | "delivered" | "cancelled";
+export type DisputeStatus = "reported" | "refunded" | "dismissed";
 
 export interface OrdersTable {
   id: string;
@@ -103,6 +104,11 @@ export interface OrdersTable {
   cancelled_reason: string | null;
   refund_reference: string | null;
   refunded_at: Date | null;
+  dispute_status: DisputeStatus | null;
+  dispute_reason: string | null;
+  disputed_at: Date | null;
+  dispute_resolved_at: Date | null;
+  dispute_resolved_by: string | null;
   created_at: Date;
   updated_at: Date;
 }
