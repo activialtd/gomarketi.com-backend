@@ -359,7 +359,12 @@ func needsStoreIDs(prefix string) bool {
 		strings.HasPrefix(prefix, "/v1/orders/") ||
 		strings.HasPrefix(prefix, "/v1/crm/") ||
 		strings.HasPrefix(prefix, "/v1/analytics/") ||
-		strings.HasPrefix(prefix, "/v1/wallet/")
+		strings.HasPrefix(prefix, "/v1/wallet/") ||
+		// identity's vendor/staff endpoints (staff.go's callerStoreID) need
+		// this too — missing here meant every staff list/create/update/delete
+		// call always 403'd with "no store associated with this account",
+		// regardless of plan, for every vendor, unconditionally.
+		strings.HasPrefix(prefix, "/v1/identity/")
 }
 
 // ── Upstream loading ──────────────────────────────────────────────────────────
