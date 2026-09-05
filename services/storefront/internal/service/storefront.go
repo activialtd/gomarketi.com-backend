@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -44,15 +45,20 @@ func planAllowsTemplate(planSlug, template string) bool {
 }
 
 type StorefrontService struct {
-	db          *sqlx.DB
-	log         zerolog.Logger
-	emailer     email.WelcomeMailer
-	domains     vercel.Registrar
-	storeDomain string
+	db                  *sqlx.DB
+	log                 zerolog.Logger
+	emailer             email.WelcomeMailer
+	domains             vercel.Registrar
+	storeDomain         string
+	identityInternalURL string
+	internalAPIKey      string
 }
 
-func New(db *sqlx.DB, emailer email.WelcomeMailer, domains vercel.Registrar, storeDomain string, log zerolog.Logger) *StorefrontService {
-	return &StorefrontService{db: db, emailer: emailer, domains: domains, storeDomain: storeDomain, log: log}
+func New(db *sqlx.DB, emailer email.WelcomeMailer, domains vercel.Registrar, storeDomain, identityInternalURL, internalAPIKey string, log zerolog.Logger) *StorefrontService {
+	return &StorefrontService{
+		db: db, emailer: emailer, domains: domains, storeDomain: storeDomain,
+		identityInternalURL: identityInternalURL, internalAPIKey: internalAPIKey, log: log,
+	}
 }
 
 // ── Slug validation ─────────────────────────────────────────────────────────
@@ -174,6 +180,40 @@ func (s *StorefrontService) CreateStore(ctx context.Context, userID uuid.UUID, r
 			s.log.Warn().Err(domainErr).Str("domain", storeSubdomain).Msg("vercel domain registration failed")
 			middleware.RecordBackgroundError(s.db, s.log, "storefront", "vercel domain registration failed: "+domainErr.Error(),
 				map[string]any{"domain": storeSubdomain})
+		}
+	}()
+
+	// Trigger the vendor's Dedicated Virtual Account provisioning now that a
+	// store — and therefore a store name — exists. Deliberately not done at
+	// plan-selection time (identity's SelectPlan): a plan can be picked long
+	// before a store exists, and the DVA's account_name is meant to read as
+	// the store's name, not the vendor's personal name. Best-effort, async,
+	// same shape as the welcome-email/Vercel-registration goroutines above.
+	storeName := resp.Name
+	go func() {
+		ctx4, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		body, _ := json.Marshal(map[string]string{"user_id": userID.String(), "store_name": storeName})
+		req, reqErr := http.NewRequestWithContext(ctx4, http.MethodPost,
+			s.identityInternalURL+"/v1/identity/internal/provision-dva", bytes.NewReader(body))
+		if reqErr != nil {
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Internal-Key", s.internalAPIKey)
+		httpResp, doErr := (&http.Client{Timeout: 20 * time.Second}).Do(req)
+		if doErr != nil {
+			s.log.Warn().Err(doErr).Str("store", storeName).Msg("dva provisioning request failed")
+			middleware.RecordBackgroundError(s.db, s.log, "storefront", "dva provisioning request failed: "+doErr.Error(),
+				map[string]any{"store": storeName})
+			return
+		}
+		defer httpResp.Body.Close()
+		if httpResp.StatusCode >= 300 {
+			s.log.Warn().Int("status", httpResp.StatusCode).Str("store", storeName).Msg("dva provisioning failed")
+			middleware.RecordBackgroundError(s.db, s.log, "storefront",
+				fmt.Sprintf("dva provisioning failed: identity returned %d", httpResp.StatusCode),
+				map[string]any{"store": storeName})
 		}
 	}()
 

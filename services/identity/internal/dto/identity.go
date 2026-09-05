@@ -192,6 +192,13 @@ type SubscriptionResp struct {
 	PaystackAccountName   *string  `json:"paystack_dva_account_name,omitempty"`
 }
 
+// ProvisionDVAReq is the body for POST /v1/identity/internal/provision-dva.
+// Internal service-to-service only — called by storefront's CreateStore.
+type ProvisionDVAReq struct {
+	UserID    string `json:"user_id"    validate:"required,uuid"`
+	StoreName string `json:"store_name" validate:"required"`
+}
+
 // ── Shared ────────────────────────────────────────────────────────────────────
 
 // ErrorResp is the standard error envelope.

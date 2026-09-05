@@ -2,13 +2,35 @@ package handler
 
 import (
 	"net/http"
+	"os"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jmoiron/sqlx"
 	"github.com/rs/zerolog"
 
+	"github.com/activialtd/gomarketi.com-backend/services/identity/internal/dto"
 	"github.com/activialtd/gomarketi.com-backend/shared/pkg/middleware"
 )
+
+// requireInternalKey protects service-to-service routes reached by direct
+// networking (not the public gateway) — a shared-secret header, not a user
+// JWT. Same pattern as services/orders/internal/handler/routes.go.
+// INTERNAL_API_KEY unset skips the check with a loud warning (dev mode).
+func requireInternalKey(log zerolog.Logger) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		key := os.Getenv("INTERNAL_API_KEY")
+		if key == "" {
+			log.Warn().Msg("INTERNAL_API_KEY not set — internal routes are unprotected (dev mode)")
+			c.Next()
+			return
+		}
+		if c.GetHeader("X-Internal-Key") != key {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, dto.ErrorResp{Error: "invalid internal key"})
+			return
+		}
+		c.Next()
+	}
+}
 
 // Register mounts all identity routes onto r.
 // All routes are protected by Envoy JWT gate (reads X-User-ID injected header).
@@ -26,6 +48,12 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 		middleware.CORS(allowedOrigins),
 		middleware.UserContext(),
 	)
+
+	// Internal — service-to-service only, reached by direct networking (not
+	// the public gateway), protected by a shared secret instead of a user JWT.
+	internal := r.Group("/v1/identity/internal")
+	internal.Use(requireInternalKey(log))
+	internal.POST("/provision-dva", h.ProvisionDVA)
 
 	v1 := r.Group("/v1/identity")
 	v1.Use(middleware.RequireUser())
