@@ -68,9 +68,18 @@ func (s *IdentityService) SelectPlan(ctx context.Context, userID uuid.UUID, req 
 		return dto.SubscriptionResp{}, err
 	}
 
-	// Paid plans require a payment reference.
-	if plan.PriceKobo > 0 && (req.PaymentReference == nil || *req.PaymentReference == "") {
-		return dto.SubscriptionResp{}, apperrors.BadRequest("payment_reference is required for paid plans")
+	// Paid plans require a payment reference — and the reference must be a
+	// real, successful Paystack charge for exactly the plan's price. Before
+	// this check, any non-empty string was accepted with no verification at
+	// all, so a vendor could get a paid plan's limits for free by calling
+	// this endpoint directly instead of going through the real checkout UI.
+	if plan.PriceKobo > 0 {
+		if req.PaymentReference == nil || *req.PaymentReference == "" {
+			return dto.SubscriptionResp{}, apperrors.BadRequest("payment_reference is required for paid plans")
+		}
+		if err := s.paystackClient.VerifyTransaction(ctx, *req.PaymentReference, plan.PriceKobo); err != nil {
+			return dto.SubscriptionResp{}, apperrors.BadRequest("payment verification failed: " + err.Error())
+		}
 	}
 
 	// Get vendor profile.

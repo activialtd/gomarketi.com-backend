@@ -32,7 +32,7 @@ type OrdersService struct {
 // (escrow state — see EscrowStatus in rowToOrder) in exactly one place
 // instead of duplicated across five near-identical queries.
 const orderColumns = `id, store_id, customer_id, customer_name, customer_email, status,
-	total_kobo, delivery_address, payment_reference,
+	total_kobo, delivery_fee_kobo, delivery_address, payment_reference,
 	hub_received_at, dispatched_at, delivered_at, delivery_confirmed_at, cancelled_reason,
 	dispute_status, dispute_reason, disputed_at,
 	created_at, updated_at,
@@ -593,23 +593,24 @@ func claimPaymentReference(ctx context.Context, tx *sqlx.Tx, ref string, amountK
 // insertOrderTx inserts one order, its line items, and the vendor's wallet
 // credit, all within the given transaction. Shared by CreateOrder (one
 // store) and CreateCheckout (N stores, one per vendor, sharing one payment).
-func insertOrderTx(ctx context.Context, tx *sqlx.Tx, storeID uuid.UUID, customerName, customerEmail, deliveryAddress string, items []dto.CreateOrderItem, paymentRef string) (uuid.UUID, int64, error) {
-	var totalKobo int64
+func insertOrderTx(ctx context.Context, tx *sqlx.Tx, storeID uuid.UUID, customerName, customerEmail, deliveryAddress string, items []dto.CreateOrderItem, deliveryFeeKobo int64, paymentRef string) (uuid.UUID, int64, error) {
+	var itemsKobo int64
 	for _, it := range items {
-		totalKobo += it.PriceKobo * int64(it.Quantity)
+		itemsKobo += it.PriceKobo * int64(it.Quantity)
 	}
-	if totalKobo <= 0 {
+	if itemsKobo <= 0 {
 		return uuid.Nil, 0, apperrors.BadRequest("order total must be greater than zero")
 	}
+	totalKobo := itemsKobo + deliveryFeeKobo
 
 	custID := customerUUID(storeID, customerEmail)
 
 	var orderID uuid.UUID
 	err := tx.QueryRowContext(ctx, `
-		INSERT INTO orders (store_id, customer_id, customer_name, customer_email, status, total_kobo, delivery_address, payment_reference)
-		VALUES ($1,$2,$3,$4,'confirmed',$5,$6,$7)
+		INSERT INTO orders (store_id, customer_id, customer_name, customer_email, status, total_kobo, delivery_fee_kobo, delivery_address, payment_reference)
+		VALUES ($1,$2,$3,$4,'confirmed',$5,$6,$7,$8)
 		RETURNING id`,
-		storeID, custID, customerName, customerEmail, totalKobo, deliveryAddress, paymentRef,
+		storeID, custID, customerName, customerEmail, totalKobo, deliveryFeeKobo, deliveryAddress, paymentRef,
 	).Scan(&orderID)
 	if err != nil {
 		return uuid.Nil, 0, fmt.Errorf("insert order: %w", err)
@@ -629,14 +630,16 @@ func insertOrderTx(ctx context.Context, tx *sqlx.Tx, storeID uuid.UUID, customer
 		}
 	}
 
-	// Credit the vendor's wallet for the full order value, but held in
-	// escrow (status='pending', excluded from GetWallet's available-balance
-	// query) until the buyer confirms receipt — see ConfirmDelivery below
-	// and the auto-release goroutine in cmd/server/main.go.
+	// Credit the vendor's wallet for the items total only — GoMarketi's hub
+	// handles delivery, not the vendor, so the delivery fee (if any) is
+	// platform revenue and isn't credited here. Held in escrow
+	// (status='pending', excluded from GetWallet's available-balance query)
+	// until the buyer confirms receipt — see ConfirmDelivery below and the
+	// auto-release goroutine in cmd/server/main.go.
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO wallet_transactions (store_id, type, amount_kobo, description, reference, order_id, status)
 		VALUES ($1,'credit',$2,$3,$4,$5,'pending')`,
-		storeID, totalKobo, fmt.Sprintf("Sale — order #%s", orderID.String()[:8]), paymentRef, orderID,
+		storeID, itemsKobo, fmt.Sprintf("Sale — order #%s", orderID.String()[:8]), paymentRef, orderID,
 	); err != nil {
 		return uuid.Nil, 0, fmt.Errorf("credit wallet: %w", err)
 	}
@@ -759,13 +762,21 @@ func (s *OrdersService) CreateOrder(ctx context.Context, req dto.CreateOrderReq)
 		return dto.OrderResp{}, apperrors.BadRequest("invalid store_id")
 	}
 
-	var totalKobo int64
+	var itemsKobo int64
 	for _, it := range req.Items {
-		totalKobo += it.PriceKobo * int64(it.Quantity)
+		itemsKobo += it.PriceKobo * int64(it.Quantity)
 	}
-	if totalKobo <= 0 {
+	if itemsKobo <= 0 {
 		return dto.OrderResp{}, apperrors.BadRequest("order total must be greater than zero")
 	}
+	// The storefront charges items + a delivery fee through Paystack (see
+	// apps/web's checkout) — the verified/recorded total must include it too,
+	// or a real, successful charge always fails verification here and the
+	// order is silently never created despite the customer's card being
+	// charged. delivery_fee_kobo is self-correcting: whatever the client
+	// claims must equal what Paystack actually charged (checked below), so
+	// there's no way to under-report it without verification failing outright.
+	totalKobo := itemsKobo + req.DeliveryFeeKobo
 
 	// Verify the Paystack charge before touching the database.
 	// In dev mode (no PAYSTACK_SECRET_KEY) this is a no-op with a log warning.
@@ -790,7 +801,7 @@ func (s *OrdersService) CreateOrder(ctx context.Context, req dto.CreateOrderReq)
 		return dto.OrderResp{}, fmt.Errorf("claim payment reference: %w", err)
 	}
 
-	orderID, insertedTotal, err := insertOrderTx(ctx, tx, storeID, req.CustomerName, req.CustomerEmail, req.DeliveryAddress, req.Items, req.PaymentRef)
+	orderID, insertedTotal, err := insertOrderTx(ctx, tx, storeID, req.CustomerName, req.CustomerEmail, req.DeliveryAddress, req.Items, req.DeliveryFeeKobo, req.PaymentRef)
 	if err != nil {
 		return dto.OrderResp{}, err
 	}
@@ -872,7 +883,7 @@ func (s *OrdersService) CreateCheckout(ctx context.Context, req dto.CreateChecko
 		if err != nil {
 			return nil, apperrors.BadRequest("invalid store_id")
 		}
-		orderID, subTotal, err := insertOrderTx(ctx, tx, storeID, req.CustomerName, req.CustomerEmail, req.DeliveryAddress, so.Items, req.PaymentRef)
+		orderID, subTotal, err := insertOrderTx(ctx, tx, storeID, req.CustomerName, req.CustomerEmail, req.DeliveryAddress, so.Items, 0, req.PaymentRef)
 		if err != nil {
 			return nil, err
 		}
@@ -1307,6 +1318,7 @@ type orderRow struct {
 	CustomerEmail       string         `db:"customer_email"`
 	Status              string         `db:"status"`
 	TotalKobo           int64          `db:"total_kobo"`
+	DeliveryFeeKobo     int64          `db:"delivery_fee_kobo"`
 	DeliveryAddress     string         `db:"delivery_address"`
 	PaymentReference    sql.NullString `db:"payment_reference"`
 	HubReceivedAt       sql.NullTime   `db:"hub_received_at"`
@@ -1342,6 +1354,7 @@ func rowToOrder(r orderRow) dto.OrderResp {
 		Status:          dto.OrderStatus(r.Status),
 		Items:           []dto.OrderItem{},
 		TotalKobo:       r.TotalKobo,
+		DeliveryFeeKobo: r.DeliveryFeeKobo,
 		DeliveryAddress: r.DeliveryAddress,
 		EscrowStatus:    escrowStatus(r.WalletStatus),
 		CreatedAt:       r.CreatedAt.UTC().Format(time.RFC3339),

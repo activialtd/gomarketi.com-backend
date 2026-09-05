@@ -1,0 +1,11 @@
+-- 0010_add_delivery_fee.sql
+-- Direct-storefront checkout (apps/web) charges a flat delivery fee on top
+-- of the item subtotal via Paystack, but CreateOrder only ever verified and
+-- recorded the items-only total — so every non-free-shipping order failed
+-- Paystack amount verification after a real, successful charge (the
+-- customer's card was charged, but the order was never saved). This column
+-- lets the order carry its real delivery_fee_kobo component so total_kobo
+-- can match what Paystack actually charged, while the vendor's wallet
+-- credit stays items-only — GoMarketi's hub does the delivery, not the
+-- vendor, so the delivery fee is platform revenue, not vendor revenue.
+ALTER TABLE orders ADD COLUMN delivery_fee_kobo BIGINT NOT NULL DEFAULT 0;

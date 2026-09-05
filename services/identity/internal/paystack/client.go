@@ -158,6 +158,59 @@ func (c *Client) CreateDedicatedAccount(ctx context.Context, customerCode string
 	return resp.Data.AccountNumber, resp.Data.Bank.Name, resp.Data.AccountName, nil
 }
 
+// transactionVerifyResp is the subset of Paystack's transaction/verify
+// response this client needs.
+type transactionVerifyResp struct {
+	Status bool `json:"status"`
+	Data   struct {
+		Status string `json:"status"`
+		Amount int64  `json:"amount"`
+	} `json:"data"`
+}
+
+// VerifyTransaction confirms a Paystack transaction reference actually
+// succeeded and charged exactly expectedKobo — the same check
+// services/orders/internal/service/paystack.go does for order payments.
+// SelectPlan didn't have this at all: any non-empty payment_reference was
+// accepted for a paid plan with no verification the charge (or any charge)
+// ever happened, letting a vendor claim a paid plan's limits for free by
+// calling the API directly. In simulation mode (no PAYSTACK_SECRET_KEY)
+// this is a no-op, matching CreateCustomer/CreateDedicatedAccount above.
+func (c *Client) VerifyTransaction(ctx context.Context, reference string, expectedKobo int64) error {
+	if c.simMode {
+		c.log.Warn().Str("reference", reference).Msg("paystack: SIMULATION MODE — skipping plan payment verification")
+		return nil
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		"https://api.paystack.co/transaction/verify/"+reference, nil)
+	if err != nil {
+		return fmt.Errorf("paystack: verify transaction: build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.secretKey)
+	req.Header.Set("Accept", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	httpResp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("paystack: verify transaction: request failed: %w", err)
+	}
+	defer httpResp.Body.Close()
+
+	var resp transactionVerifyResp
+	if err := json.NewDecoder(httpResp.Body).Decode(&resp); err != nil {
+		return fmt.Errorf("paystack: verify transaction: decode response: %w", err)
+	}
+	if !resp.Status || resp.Data.Status != "success" {
+		return fmt.Errorf("paystack: transaction %s is %s, not success", reference, resp.Data.Status)
+	}
+	if resp.Data.Amount != expectedKobo {
+		return fmt.Errorf("paystack: amount mismatch for %s: expected %d kobo, got %d kobo",
+			reference, expectedKobo, resp.Data.Amount)
+	}
+	return nil
+}
+
 // SplitName splits a full name into (first, last) for Paystack's Customer API.
 // A single-token name yields an empty last name.
 func SplitName(fullName string) (first, last string) {
