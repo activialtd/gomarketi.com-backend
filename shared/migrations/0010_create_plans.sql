@@ -26,8 +26,8 @@ VALUES
      'Free',
      'Perfect for testing the waters. Start selling with no upfront cost.',
      0,
-     20, 1, 1,
-     '["1 store","Up to 20 products","Basic analytics","GoMarketi checkout","Community support"]',
+     30, 1, 1,
+     '["1 store","Up to 30 products","Basic analytics","GoMarketi checkout","Community support"]',
      1),
 
     ('starter',
