@@ -31,34 +31,44 @@ type UpdateStoreReq struct {
 	State           *string         `json:"state"            validate:"omitempty,max=100"`
 	MarketID        *string         `json:"market_id"        validate:"omitempty,uuid"`
 	ThemeConfig     json.RawMessage `json:"theme_config"` // raw JSON, stored as JSONB
+
+	// Delivery — a vendor-set flat fee charged on physical orders, waived
+	// above FreeDeliveryThresholdKobo or for all-digital carts. Both
+	// int64-typed and nil-checked with a pointer, not a bare 0 default, so
+	// "explicitly set to free (0)" is distinguishable from "not sent" and
+	// won't clobber an existing value on an unrelated PATCH.
+	DeliveryFeeKobo           *int64 `json:"delivery_fee_kobo"            validate:"omitempty,min=0"`
+	FreeDeliveryThresholdKobo *int64 `json:"free_delivery_threshold_kobo" validate:"omitempty,min=0"`
 }
 
 // StoreResp is returned for any store read or write operation.
 type StoreResp struct {
-	ID                 string          `json:"id"`
-	VendorID           string          `json:"vendor_id"`
-	Name               string          `json:"name"`
-	Slug               string          `json:"slug"`
-	Category           string          `json:"category"`
-	Currency           string          `json:"currency"`
-	TeamSize           *string         `json:"team_size,omitempty"`
-	StaffRange         *string         `json:"staff_range,omitempty"`
-	Tagline            *string         `json:"tagline,omitempty"`
-	LogoURL            *string         `json:"logo_url,omitempty"`
-	HeroImageURL       *string         `json:"hero_image_url,omitempty"`
-	SiteDescription    *string         `json:"site_description,omitempty"`
-	SocialLinks        json.RawMessage `json:"social_links,omitempty"`
-	SupportPhone       *string         `json:"support_phone,omitempty"`
-	Address            *string         `json:"address,omitempty"`
-	City               *string         `json:"city,omitempty"`
-	State              *string         `json:"state,omitempty"`
-	MarketID           *string         `json:"market_id,omitempty"`
-	MarketName         *string         `json:"market_name,omitempty"`
-	CustomDomain       *string         `json:"custom_domain,omitempty"`
-	CustomDomainStatus string          `json:"custom_domain_status,omitempty"`
-	ThemeConfig        json.RawMessage `json:"theme_config,omitempty"` // raw JSON
-	IsActive           bool            `json:"is_active"`
-	CreatedAt          string          `json:"created_at"`
+	ID                        string          `json:"id"`
+	VendorID                  string          `json:"vendor_id"`
+	Name                      string          `json:"name"`
+	Slug                      string          `json:"slug"`
+	Category                  string          `json:"category"`
+	Currency                  string          `json:"currency"`
+	TeamSize                  *string         `json:"team_size,omitempty"`
+	StaffRange                *string         `json:"staff_range,omitempty"`
+	Tagline                   *string         `json:"tagline,omitempty"`
+	LogoURL                   *string         `json:"logo_url,omitempty"`
+	HeroImageURL              *string         `json:"hero_image_url,omitempty"`
+	SiteDescription           *string         `json:"site_description,omitempty"`
+	SocialLinks               json.RawMessage `json:"social_links,omitempty"`
+	SupportPhone              *string         `json:"support_phone,omitempty"`
+	Address                   *string         `json:"address,omitempty"`
+	City                      *string         `json:"city,omitempty"`
+	State                     *string         `json:"state,omitempty"`
+	MarketID                  *string         `json:"market_id,omitempty"`
+	MarketName                *string         `json:"market_name,omitempty"`
+	CustomDomain              *string         `json:"custom_domain,omitempty"`
+	CustomDomainStatus        string          `json:"custom_domain_status,omitempty"`
+	ThemeConfig               json.RawMessage `json:"theme_config,omitempty"` // raw JSON
+	DeliveryFeeKobo           int64           `json:"delivery_fee_kobo"`
+	FreeDeliveryThresholdKobo int64           `json:"free_delivery_threshold_kobo"`
+	IsActive                  bool            `json:"is_active"`
+	CreatedAt                 string          `json:"created_at"`
 }
 
 // StoreSearchReq is the query params for GET /v1/storefront/public/stores/search.

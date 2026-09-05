@@ -590,6 +590,54 @@ func claimPaymentReference(ctx context.Context, tx *sqlx.Tx, ref string, amountK
 	return err
 }
 
+// computeDeliveryFeeKobo determines the delivery fee for a direct-storefront
+// order: free for an all-digital cart, free once itemsKobo clears the
+// store's configured free-delivery threshold (a 0 threshold disables that
+// tier — always charge the fee unless digital), otherwise the store's own
+// flat delivery_fee_kobo. Reads stores/products directly rather than
+// trusting a client-supplied fee, so a vendor's dashboard setting actually
+// takes effect and can't be spoofed by a tampered frontend — reading
+// storefront/catalogue-owned tables directly is this codebase's established
+// cross-service pattern (no cross-service FKs, direct reads are fine).
+func (s *OrdersService) computeDeliveryFeeKobo(ctx context.Context, storeID uuid.UUID, itemsKobo int64, items []dto.CreateOrderItem) (int64, error) {
+	var feeKobo, thresholdKobo int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT delivery_fee_kobo, free_delivery_threshold_kobo FROM stores WHERE id=$1`, storeID,
+	).Scan(&feeKobo, &thresholdKobo)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, apperrors.BadRequest("store not found")
+	}
+	if err != nil {
+		return 0, fmt.Errorf("get store delivery settings: %w", err)
+	}
+
+	allDigital := true
+	for _, it := range items {
+		productID, parseErr := uuid.Parse(it.ProductID)
+		if parseErr != nil {
+			return 0, apperrors.BadRequest("invalid product_id in items")
+		}
+		var isDigital bool
+		if scanErr := s.db.QueryRowContext(ctx,
+			`SELECT is_digital FROM products WHERE id=$1`, productID,
+		).Scan(&isDigital); scanErr != nil {
+			// A missing product row shouldn't block checkout over a
+			// delivery-fee nuance — default to physical, the safer side
+			// (charges the fee rather than silently waiving it).
+			allDigital = false
+			continue
+		}
+		if !isDigital {
+			allDigital = false
+		}
+	}
+
+	if allDigital || (thresholdKobo > 0 && itemsKobo > thresholdKobo) {
+		return 0, nil
+	}
+	return feeKobo, nil
+}
+
 // insertOrderTx inserts one order, its line items, and the vendor's wallet
 // credit, all within the given transaction. Shared by CreateOrder (one
 // store) and CreateCheckout (N stores, one per vendor, sharing one payment).
@@ -769,14 +817,18 @@ func (s *OrdersService) CreateOrder(ctx context.Context, req dto.CreateOrderReq)
 	if itemsKobo <= 0 {
 		return dto.OrderResp{}, apperrors.BadRequest("order total must be greater than zero")
 	}
-	// The storefront charges items + a delivery fee through Paystack (see
-	// apps/web's checkout) — the verified/recorded total must include it too,
-	// or a real, successful charge always fails verification here and the
-	// order is silently never created despite the customer's card being
-	// charged. delivery_fee_kobo is self-correcting: whatever the client
-	// claims must equal what Paystack actually charged (checked below), so
-	// there's no way to under-report it without verification failing outright.
-	totalKobo := itemsKobo + req.DeliveryFeeKobo
+
+	// Delivery fee is computed here, server-side, from the store's own
+	// configured settings — not trusted from the client — so a vendor's
+	// dashboard setting actually takes effect and can't be spoofed by a
+	// tampered frontend. The storefront still needs to know this number
+	// before CreateOrder is ever called (it's charged through Paystack up
+	// front), but what actually gets recorded/verified is recomputed here.
+	deliveryFeeKobo, err := s.computeDeliveryFeeKobo(ctx, storeID, itemsKobo, req.Items)
+	if err != nil {
+		return dto.OrderResp{}, err
+	}
+	totalKobo := itemsKobo + deliveryFeeKobo
 
 	// Verify the Paystack charge before touching the database.
 	// In dev mode (no PAYSTACK_SECRET_KEY) this is a no-op with a log warning.
@@ -801,7 +853,7 @@ func (s *OrdersService) CreateOrder(ctx context.Context, req dto.CreateOrderReq)
 		return dto.OrderResp{}, fmt.Errorf("claim payment reference: %w", err)
 	}
 
-	orderID, insertedTotal, err := insertOrderTx(ctx, tx, storeID, req.CustomerName, req.CustomerEmail, req.DeliveryAddress, req.Items, req.DeliveryFeeKobo, req.PaymentRef)
+	orderID, insertedTotal, err := insertOrderTx(ctx, tx, storeID, req.CustomerName, req.CustomerEmail, req.DeliveryAddress, req.Items, deliveryFeeKobo, req.PaymentRef)
 	if err != nil {
 		return dto.OrderResp{}, err
 	}
