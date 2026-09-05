@@ -107,7 +107,6 @@ type CreateOrderReq struct {
 	CustomerPhone   string            `json:"customer_phone"`
 	DeliveryAddress string            `json:"delivery_address"`
 	Items           []CreateOrderItem `json:"items"             validate:"required,min=1,dive"`
-	DeliveryFeeKobo int64             `json:"delivery_fee_kobo" validate:"min=0"`
 	PaymentRef      string            `json:"payment_reference" validate:"required"`
 }
 

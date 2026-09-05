@@ -133,7 +133,7 @@ func (s *StorefrontService) CreateStore(ctx context.Context, userID uuid.UUID, r
 		          support_phone, address, city, state, market_id,
 		          (SELECT name FROM markets m WHERE m.id = market_id) AS market_name,
 		          custom_domain, custom_domain_status,
-		          COALESCE(theme_config, '{}') AS theme_config, is_active, created_at`,
+		          COALESCE(theme_config, '{}') AS theme_config, delivery_fee_kobo, free_delivery_threshold_kobo, is_active, created_at`,
 		userID, req.Name, req.Slug, req.Category, req.Currency,
 		req.TeamSize, req.SupportPhone,
 	).StructScan(&row)
@@ -255,18 +255,21 @@ func (s *StorefrontService) UpdateStore(ctx context.Context, userID uuid.UUID, s
 			state            = COALESCE($10, state),
 			market_id        = COALESCE($11::uuid, market_id),
 			theme_config     = CASE WHEN $12::jsonb IS NOT NULL THEN $12::jsonb ELSE COALESCE(theme_config, '{}') END,
+			delivery_fee_kobo            = COALESCE($13, delivery_fee_kobo),
+			free_delivery_threshold_kobo = COALESCE($14, free_delivery_threshold_kobo),
 			updated_at       = NOW()
-		WHERE id=$13 AND vendor_id=$14
+		WHERE id=$15 AND vendor_id=$16
 		RETURNING id, vendor_id, name, slug, category, currency,
 		          team_size, staff_range, tagline, logo_url, hero_image_url, site_description,
 		          COALESCE(social_links, '{}') AS social_links,
 		          support_phone, address, city, state, market_id,
 		          (SELECT name FROM markets m WHERE m.id = market_id) AS market_name,
 		          custom_domain, custom_domain_status,
-		          COALESCE(theme_config, '{}') AS theme_config, is_active, created_at`,
+		          COALESCE(theme_config, '{}') AS theme_config, delivery_fee_kobo, free_delivery_threshold_kobo, is_active, created_at`,
 		req.Name, req.Tagline, req.LogoURL, req.HeroImageURL, req.SiteDescription,
 		nullJSON(req.SocialLinks), req.SupportPhone,
 		req.Address, req.City, req.State, req.MarketID, nullJSON(req.ThemeConfig),
+		req.DeliveryFeeKobo, req.FreeDeliveryThresholdKobo,
 		storeID, userID,
 	).StructScan(&row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -296,7 +299,7 @@ func (s *StorefrontService) GetStoreBySlug(ctx context.Context, slug string) (dt
 		       support_phone, address, city, state, market_id,
 		       (SELECT name FROM markets m WHERE m.id = market_id) AS market_name,
 		       custom_domain, custom_domain_status,
-		       COALESCE(theme_config, '{}') AS theme_config, is_active, created_at
+		       COALESCE(theme_config, '{}') AS theme_config, delivery_fee_kobo, free_delivery_threshold_kobo, is_active, created_at
 		FROM stores WHERE slug=$1 AND is_active=TRUE`, slug).StructScan(&row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.StoreResp{}, apperrors.NotFound("store not found")
@@ -316,7 +319,7 @@ func (s *StorefrontService) GetStoreByDomain(ctx context.Context, domain string)
 		       support_phone, address, city, state, market_id,
 		       (SELECT name FROM markets m WHERE m.id = market_id) AS market_name,
 		       custom_domain, custom_domain_status,
-		       COALESCE(theme_config, '{}') AS theme_config, is_active, created_at
+		       COALESCE(theme_config, '{}') AS theme_config, delivery_fee_kobo, free_delivery_threshold_kobo, is_active, created_at
 		FROM stores WHERE custom_domain=$1 AND custom_domain_status='active' AND is_active=TRUE`, domain).StructScan(&row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.StoreResp{}, apperrors.NotFound("store not found")
@@ -874,30 +877,32 @@ func (s *StorefrontService) RemoveStaff(ctx context.Context, userID uuid.UUID, s
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 type storeRow struct {
-	ID                 uuid.UUID      `db:"id"`
-	VendorID           uuid.UUID      `db:"vendor_id"`
-	Name               string         `db:"name"`
-	Slug               string         `db:"slug"`
-	Category           string         `db:"category"`
-	Currency           string         `db:"currency"`
-	TeamSize           sql.NullString `db:"team_size"`
-	StaffRange         sql.NullString `db:"staff_range"`
-	Tagline            sql.NullString `db:"tagline"`
-	LogoURL            sql.NullString `db:"logo_url"`
-	HeroImageURL       sql.NullString `db:"hero_image_url"`
-	SiteDescription    sql.NullString `db:"site_description"`
-	SocialLinks        []byte         `db:"social_links"`
-	SupportPhone       sql.NullString `db:"support_phone"`
-	Address            sql.NullString `db:"address"`
-	City               sql.NullString `db:"city"`
-	State              sql.NullString `db:"state"`
-	MarketID           sql.NullString `db:"market_id"`
-	MarketName         sql.NullString `db:"market_name"`
-	CustomDomain       sql.NullString `db:"custom_domain"`
-	CustomDomainStatus string         `db:"custom_domain_status"`
-	ThemeConfig        []byte         `db:"theme_config"`
-	IsActive           bool           `db:"is_active"`
-	CreatedAt          time.Time      `db:"created_at"`
+	ID                        uuid.UUID      `db:"id"`
+	VendorID                  uuid.UUID      `db:"vendor_id"`
+	Name                      string         `db:"name"`
+	Slug                      string         `db:"slug"`
+	Category                  string         `db:"category"`
+	Currency                  string         `db:"currency"`
+	TeamSize                  sql.NullString `db:"team_size"`
+	StaffRange                sql.NullString `db:"staff_range"`
+	Tagline                   sql.NullString `db:"tagline"`
+	LogoURL                   sql.NullString `db:"logo_url"`
+	HeroImageURL              sql.NullString `db:"hero_image_url"`
+	SiteDescription           sql.NullString `db:"site_description"`
+	SocialLinks               []byte         `db:"social_links"`
+	SupportPhone              sql.NullString `db:"support_phone"`
+	Address                   sql.NullString `db:"address"`
+	City                      sql.NullString `db:"city"`
+	State                     sql.NullString `db:"state"`
+	MarketID                  sql.NullString `db:"market_id"`
+	MarketName                sql.NullString `db:"market_name"`
+	CustomDomain              sql.NullString `db:"custom_domain"`
+	CustomDomainStatus        string         `db:"custom_domain_status"`
+	ThemeConfig               []byte         `db:"theme_config"`
+	DeliveryFeeKobo           int64          `db:"delivery_fee_kobo"`
+	FreeDeliveryThresholdKobo int64          `db:"free_delivery_threshold_kobo"`
+	IsActive                  bool           `db:"is_active"`
+	CreatedAt                 time.Time      `db:"created_at"`
 }
 
 type staffRow struct {
@@ -918,7 +923,7 @@ func (s *StorefrontService) getStoreByVendor(ctx context.Context, userID uuid.UU
 		       support_phone, address, city, state, market_id,
 		       (SELECT name FROM markets m WHERE m.id = market_id) AS market_name,
 		       custom_domain, custom_domain_status,
-		       COALESCE(theme_config, '{}') AS theme_config, is_active, created_at
+		       COALESCE(theme_config, '{}') AS theme_config, delivery_fee_kobo, free_delivery_threshold_kobo, is_active, created_at
 		FROM stores WHERE vendor_id=$1`, userID).StructScan(&row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.StoreResp{}, apperrors.NotFound("store not found")
@@ -940,28 +945,30 @@ func (s *StorefrontService) assertOwner(ctx context.Context, userID, storeID uui
 
 func rowToResp(r storeRow) dto.StoreResp {
 	resp := dto.StoreResp{
-		ID:                 r.ID.String(),
-		VendorID:           r.VendorID.String(),
-		Name:               r.Name,
-		Slug:               r.Slug,
-		Category:           r.Category,
-		Currency:           r.Currency,
-		TeamSize:           nullToPtr(r.TeamSize),
-		StaffRange:         nullToPtr(r.StaffRange),
-		Tagline:            nullToPtr(r.Tagline),
-		LogoURL:            nullToPtr(r.LogoURL),
-		HeroImageURL:       nullToPtr(r.HeroImageURL),
-		SiteDescription:    nullToPtr(r.SiteDescription),
-		SupportPhone:       nullToPtr(r.SupportPhone),
-		Address:            nullToPtr(r.Address),
-		City:               nullToPtr(r.City),
-		State:              nullToPtr(r.State),
-		MarketID:           nullToPtr(r.MarketID),
-		MarketName:         nullToPtr(r.MarketName),
-		CustomDomain:       nullToPtr(r.CustomDomain),
-		CustomDomainStatus: r.CustomDomainStatus,
-		IsActive:           r.IsActive,
-		CreatedAt:          r.CreatedAt.UTC().Format(time.RFC3339),
+		ID:                        r.ID.String(),
+		VendorID:                  r.VendorID.String(),
+		Name:                      r.Name,
+		Slug:                      r.Slug,
+		Category:                  r.Category,
+		Currency:                  r.Currency,
+		TeamSize:                  nullToPtr(r.TeamSize),
+		StaffRange:                nullToPtr(r.StaffRange),
+		Tagline:                   nullToPtr(r.Tagline),
+		LogoURL:                   nullToPtr(r.LogoURL),
+		HeroImageURL:              nullToPtr(r.HeroImageURL),
+		SiteDescription:           nullToPtr(r.SiteDescription),
+		SupportPhone:              nullToPtr(r.SupportPhone),
+		Address:                   nullToPtr(r.Address),
+		City:                      nullToPtr(r.City),
+		State:                     nullToPtr(r.State),
+		MarketID:                  nullToPtr(r.MarketID),
+		MarketName:                nullToPtr(r.MarketName),
+		CustomDomain:              nullToPtr(r.CustomDomain),
+		CustomDomainStatus:        r.CustomDomainStatus,
+		DeliveryFeeKobo:           r.DeliveryFeeKobo,
+		FreeDeliveryThresholdKobo: r.FreeDeliveryThresholdKobo,
+		IsActive:                  r.IsActive,
+		CreatedAt:                 r.CreatedAt.UTC().Format(time.RFC3339),
 	}
 	// social_links and theme_config are JSONB — only set when non-empty.
 	if len(r.SocialLinks) > 0 && string(r.SocialLinks) != "{}" && string(r.SocialLinks) != "null" {
