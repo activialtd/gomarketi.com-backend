@@ -54,6 +54,17 @@ func New(secretKey string, log zerolog.Logger) *Client {
 
 // CreateCustomer registers a Paystack Customer for a vendor and returns the
 // customer_code needed to create a Dedicated Virtual Account for them.
+//
+// Paystack's Customer.Create silently no-ops when the email already has a
+// customer record on the integration — it returns 200 with the *existing*
+// record and does not apply any newly-passed fields (confirmed against a
+// live key: a vendor whose customer predates a given plan-selection retry
+// kept an empty phone/last_name no matter how many times Create ran with
+// those fields set). CreateDedicatedAccount then fails downstream since
+// Paystack requires both on the underlying customer. An explicit Update
+// call after Create closes that gap for both the fresh-customer and
+// already-exists cases — cheap, since this whole path already runs off
+// the request path in a background goroutine.
 func (c *Client) CreateCustomer(ctx context.Context, email, firstName, lastName, phone string) (string, error) {
 	if c.simMode {
 		c.log.Warn().Str("email", email).Msg("paystack: SIMULATION MODE — set PAYSTACK_SECRET_KEY for live account creation")
@@ -71,6 +82,22 @@ func (c *Client) CreateCustomer(ctx context.Context, email, firstName, lastName,
 	if !resp.Status || resp.Data.CustomerCode == "" {
 		return "", fmt.Errorf("paystack: create customer: %s", resp.Message)
 	}
+
+	var updateResp models.Response[models.Customer]
+	updateOpts := []sdk.OptionalPayload{
+		sdk.WithOptionalPayload("first_name", firstName),
+		sdk.WithOptionalPayload("last_name", lastName),
+	}
+	if phone != "" {
+		updateOpts = append(updateOpts, sdk.WithOptionalPayload("phone", phone))
+	}
+	if err := c.sdk.Customers.Update(ctx, resp.Data.CustomerCode, &updateResp, updateOpts...); err != nil {
+		return "", fmt.Errorf("paystack: update customer: %w", err)
+	}
+	if !updateResp.Status {
+		return "", fmt.Errorf("paystack: update customer: %s", updateResp.Message)
+	}
+
 	return resp.Data.CustomerCode, nil
 }
 
