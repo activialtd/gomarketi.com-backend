@@ -108,7 +108,13 @@ func run(log zerolog.Logger) error {
 		log.Warn().Msg("vercel domain registration: no VERCEL_API_TOKEN, using noop")
 	}
 
-	svc := service.New(db, welcomeMailer, domainRegistrar, storeDomain, log)
+	identityInternalURL := viper.GetString("IDENTITY_INTERNAL_URL")
+	if identityInternalURL == "" {
+		identityInternalURL = "http://localhost:8081"
+	}
+	internalAPIKey := viper.GetString("INTERNAL_API_KEY")
+
+	svc := service.New(db, welcomeMailer, domainRegistrar, storeDomain, identityInternalURL, internalAPIKey, log)
 	h := handler.New(svc)
 	r := gin.New()
 

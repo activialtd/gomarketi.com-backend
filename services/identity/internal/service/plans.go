@@ -115,39 +115,67 @@ func (s *IdentityService) SelectPlan(ctx context.Context, userID uuid.UUID, req 
 		UPDATE vendor_profiles SET onboarding_step = 'plan_selected', updated_at = NOW()
 		WHERE id = $1 AND onboarding_step = 'account_created'`, vendor.ID)
 
-	// Best-effort Paystack Dedicated Virtual Account creation — Paystack
-	// downtime must never block onboarding. Fetch the identity fields
-	// synchronously since the request ctx dies once the response is written
-	// (same reason storefront.CreateStore's welcome-email goroutine pre-fetches
-	// email before spawning its own goroutine).
-	if !vendor.PaystackDVAAccountNumber.Valid {
-		user, userErr := s.store.Queries().GetUserByID(ctx, userID)
-		if userErr == nil && user.Email.Valid {
-			vendorID := vendor.ID
-			email := user.Email.String
-			fullName := user.FullName.String
-			phone := user.Phone.String
-			go s.provisionPaystackAccount(vendorID, email, fullName, phone)
-		}
-	}
+	// Dedicated Virtual Account provisioning does NOT happen here anymore —
+	// it's triggered by storefront's CreateStore instead, once the vendor's
+	// store (and therefore its name) exists. See ProvisionVendorDVA. A plan
+	// can be selected long before a store exists, and the DVA's account_name
+	// is meant to read as the store's name, not the vendor's personal name.
 
 	return s.GetSubscription(ctx, userID)
 }
 
+// ProvisionVendorDVA creates a Paystack Customer + Dedicated Virtual Account
+// for a vendor, named after their store (storeName) rather than their
+// personal name — called by storefront's CreateStore right after the store
+// row exists (via the internal /vendor/provision-dva route), not at plan
+// selection, since a store might not exist yet at that point. Idempotent:
+// a vendor who already has a DVA is left untouched.
+func (s *IdentityService) ProvisionVendorDVA(ctx context.Context, userID uuid.UUID, storeName string) error {
+	vendor, err := s.store.Queries().GetVendorProfileByUserID(ctx, userID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return apperrors.NotFound("vendor profile not found")
+	}
+	if err != nil {
+		return fmt.Errorf("get vendor: %w", err)
+	}
+	if vendor.PaystackDVAAccountNumber.Valid {
+		return nil
+	}
+
+	user, err := s.store.Queries().GetUserByID(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("get user: %w", err)
+	}
+	if !user.Email.Valid {
+		return apperrors.BadRequest("vendor has no email on file")
+	}
+
+	return s.provisionPaystackAccount(vendor.ID, user.Email.String, user.FullName.String, storeName, user.Phone.String)
+}
+
 // provisionPaystackAccount creates a Paystack Customer + Dedicated Virtual
-// Account for a vendor and persists the result. Any failure is logged and
-// swallowed — this must never affect the vendor's onboarding flow.
-func (s *IdentityService) provisionPaystackAccount(vendorID uuid.UUID, email, fullName, phone string) {
+// Account for a vendor and persists the result. displayName becomes the
+// DVA's account_name (via Paystack's first_name/last_name split — pass the
+// vendor's store name, not their personal name); vendorName is used only for
+// the account-ready email greeting, kept separate so that email still reads
+// as addressed to the person, not the store.
+func (s *IdentityService) provisionPaystackAccount(vendorID uuid.UUID, email, vendorName, displayName, phone string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	first, last := paystack.SplitName(fullName)
+	first, last := paystack.SplitName(displayName)
+	if last == "" {
+		// Paystack requires a non-empty last_name on the underlying customer
+		// for dedicated_account creation — a single-word store name (e.g.
+		// "Zara") would otherwise fail with "last_name is required".
+		last = "Store"
+	}
 	customerCode, err := s.paystackClient.CreateCustomer(ctx, email, first, last, phone)
 	if err != nil {
 		s.log.Warn().Err(err).Str("vendor_id", vendorID.String()).Msg("paystack customer creation failed")
 		middleware.RecordBackgroundError(s.store.DB(), s.log, "identity", "paystack customer creation failed: "+err.Error(),
 			map[string]any{"vendor_id": vendorID.String()})
-		return
+		return fmt.Errorf("paystack customer creation failed: %w", err)
 	}
 
 	accNum, bankName, accName, err := s.paystackClient.CreateDedicatedAccount(ctx, customerCode)
@@ -155,7 +183,7 @@ func (s *IdentityService) provisionPaystackAccount(vendorID uuid.UUID, email, fu
 		s.log.Warn().Err(err).Str("vendor_id", vendorID.String()).Msg("paystack DVA creation failed")
 		middleware.RecordBackgroundError(s.store.DB(), s.log, "identity", "paystack DVA creation failed: "+err.Error(),
 			map[string]any{"vendor_id": vendorID.String(), "customer_code": customerCode})
-		return
+		return fmt.Errorf("paystack DVA creation failed: %w", err)
 	}
 
 	params := db.UpdateVendorPaystackAccountParams{
@@ -181,14 +209,15 @@ func (s *IdentityService) provisionPaystackAccount(vendorID uuid.UUID, email, fu
 		s.log.Warn().Err(persistErr).Str("vendor_id", vendorID.String()).Msg("persist paystack DVA failed")
 		middleware.RecordBackgroundError(s.store.DB(), s.log, "identity", "persist paystack DVA failed: "+persistErr.Error(),
 			map[string]any{"vendor_id": vendorID.String(), "customer_code": customerCode, "account_number": accNum})
-		return
+		return fmt.Errorf("persist paystack DVA failed: %w", persistErr)
 	}
 
-	if err := s.mailer.SendAccountReady(ctx, email, fullName, bankName, accNum, accName); err != nil {
+	if err := s.mailer.SendAccountReady(ctx, email, vendorName, bankName, accNum, accName); err != nil {
 		s.log.Warn().Err(err).Str("vendor_id", vendorID.String()).Msg("account ready email failed")
 		middleware.RecordBackgroundError(s.store.DB(), s.log, "identity", "account ready email failed: "+err.Error(),
 			map[string]any{"vendor_id": vendorID.String()})
 	}
+	return nil
 }
 
 func (s *IdentityService) GetSubscription(ctx context.Context, userID uuid.UUID) (dto.SubscriptionResp, error) {
