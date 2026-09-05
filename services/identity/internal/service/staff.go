@@ -9,6 +9,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
+	"github.com/activialtd/gomarketi.com-backend/shared/pkg/planlimits"
 )
 
 // ValidRoles lists the granular RBAC roles for store staff.
@@ -96,6 +97,27 @@ func (s *IdentityService) CreateStaff(ctx context.Context, storeID uuid.UUID, re
 	}
 	if len(req.Password) < 8 {
 		return StaffResp{}, apperrors.BadRequest("password must be at least 8 characters")
+	}
+
+	// Team limit was resolved into planlimits.Limits but never actually
+	// checked anywhere — a Free/Starter-plan vendor (team_limit=1) could add
+	// unlimited staff. Enforced here the same way catalogue's CreateProduct
+	// enforces product_limit: count existing store_staff rows, reject at cap.
+	limits, err := planlimits.ForStoreID(ctx, s.store.DB(), storeID)
+	if err != nil {
+		return StaffResp{}, fmt.Errorf("resolve plan limits: %w", err)
+	}
+	if limits.TeamLimit != -1 {
+		var count int
+		if err := s.store.DB().QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM store_staff WHERE store_id=$1`, storeID,
+		).Scan(&count); err != nil {
+			return StaffResp{}, fmt.Errorf("count staff: %w", err)
+		}
+		if count >= limits.TeamLimit {
+			return StaffResp{}, apperrors.BadRequest(fmt.Sprintf(
+				"your plan allows up to %d team members — upgrade to add more", limits.TeamLimit))
+		}
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
