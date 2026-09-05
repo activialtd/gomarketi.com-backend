@@ -63,6 +63,7 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 	pub.POST("/subscribe", h.Subscribe)                  // storefront newsletter opt-in
 	pub.GET("/gateways/:store_id", h.GetPublicGateways)  // active payment gateways for checkout
 	pub.POST("/cart-email", h.SendCartInvoice)           // pre-payment cart summary email
+	pub.POST("/webhooks/paystack", h.PaystackWebhook)    // Paystack calls this directly — signature-verified, not JWT
 
 	// Internal — service-to-service only, reached by direct networking (not
 	// the public gateway), protected by a shared secret instead of a user JWT.
