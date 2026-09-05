@@ -63,6 +63,7 @@ type OrderResp struct {
 	Status              OrderStatus    `json:"status"`
 	Items               []OrderItem    `json:"items"`
 	TotalKobo           int64          `json:"total_kobo"`
+	DeliveryFeeKobo     int64          `json:"delivery_fee_kobo"`
 	DeliveryAddress     string         `json:"delivery_address"`
 	PaymentRef          string         `json:"payment_reference,omitempty"`
 	HubReceivedAt       *string        `json:"hub_received_at,omitempty"`
@@ -106,6 +107,7 @@ type CreateOrderReq struct {
 	CustomerPhone   string            `json:"customer_phone"`
 	DeliveryAddress string            `json:"delivery_address"`
 	Items           []CreateOrderItem `json:"items"             validate:"required,min=1,dive"`
+	DeliveryFeeKobo int64             `json:"delivery_fee_kobo" validate:"min=0"`
 	PaymentRef      string            `json:"payment_reference" validate:"required"`
 }
 
