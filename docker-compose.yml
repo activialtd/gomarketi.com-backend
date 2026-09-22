@@ -16,7 +16,9 @@ services:
 
   # ── PostgreSQL (local fallback — use Neon for CI/staging/prod) ───────────
   postgres:
-    image: postgres:16-alpine
+    # PostGIS build — shared/migrations/0006 does CREATE EXTENSION postgis,
+    # which the plain postgres image cannot satisfy.
+    image: postgis/postgis:16-3.4-alpine
     restart: unless-stopped
     environment:
       POSTGRES_USER:     ${POSTGRES_USER:-gomarketi}

@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/smtp"
@@ -28,10 +29,10 @@ type InvoiceItem struct {
 
 // SendInvoice sends the order-confirmed invoice to the customer.
 // Call asynchronously — errors should be logged, not returned to the caller.
-func SendInvoice(ctx context.Context, to, customerName, orderID, storeSlug, storeName string, totalKobo int64, items []InvoiceItem) error {
+func SendInvoice(ctx context.Context, to, customerName, orderID, storeSlug, storeName string, totalKobo, deliveryFeeKobo int64, deliveryTitle string, items []InvoiceItem) error {
 	orderURL := buildOrderURL(storeSlug, orderID, to)
 	subject := fmt.Sprintf("Order confirmed — %s (#%s)", storeName, shortID(orderID))
-	html := customerInvoiceHTML(customerName, storeName, orderID, orderURL, totalKobo, items)
+	html := customerInvoiceHTML(customerName, storeName, orderID, orderURL, totalKobo, deliveryFeeKobo, deliveryTitle, items)
 	return sendMail(ctx, to, subject, html, "Your order has been confirmed. View it at: "+orderURL)
 }
 
@@ -215,6 +216,8 @@ func humanStatus(s string) string {
 	switch s {
 	case "confirmed":
 		return "confirmed"
+	case "at_hub":
+		return "received at our hub"
 	case "shipped":
 		return "shipped"
 	case "delivered":
@@ -230,6 +233,8 @@ func statusIcon(s string) string {
 	switch s {
 	case "confirmed":
 		return "✅"
+	case "at_hub":
+		return "🏬"
 	case "shipped":
 		return "🚚"
 	case "delivered":
@@ -245,6 +250,8 @@ func statusColor(s string) string {
 	switch s {
 	case "confirmed":
 		return "#1A7A42"
+	case "at_hub":
+		return "#8b5cf6"
 	case "shipped":
 		return "#3b82f6"
 	case "delivered":
@@ -266,6 +273,8 @@ func statusUpdateHTML(customerName, storeName, orderID, orderURL, status string)
 	switch status {
 	case "confirmed":
 		message = "Your order has been confirmed and is being prepared. We'll let you know as soon as it's on the way."
+	case "at_hub":
+		message = "Your order has arrived at our hub. We're packing it together with anything else you ordered, then it goes out for delivery."
 	case "shipped":
 		message = "Great news — your order is on its way! The seller will share delivery details with you directly."
 	case "delivered":
@@ -335,11 +344,11 @@ func statusUpdateHTML(customerName, storeName, orderID, orderURL, status string)
 
 // SendVendorAlert emails the store owner when a new order arrives.
 // Call asynchronously — errors should be logged, not returned to the caller.
-func SendVendorAlert(ctx context.Context, vendorEmail, storeName, orderID, customerName, customerEmail, customerPhone, deliveryAddress string, totalKobo int64, items []InvoiceItem) error {
+func SendVendorAlert(ctx context.Context, vendorEmail, storeName, orderID, customerName, customerEmail, customerPhone, deliveryAddress string, totalKobo, deliveryFeeKobo int64, deliveryTitle string, items []InvoiceItem) error {
 	dashboardBase := getenv("VENDOR_BASE_URL", "http://localhost:3000")
 	orderURL := fmt.Sprintf("%s/merchant/orders", dashboardBase)
 	subject := fmt.Sprintf("New order #%s — %s from %s", shortID(orderID), fmtNaira(totalKobo), customerName)
-	html := vendorAlertHTML(storeName, orderID, orderURL, customerName, customerEmail, customerPhone, deliveryAddress, totalKobo, items)
+	html := vendorAlertHTML(storeName, orderID, orderURL, customerName, customerEmail, customerPhone, deliveryAddress, totalKobo, deliveryFeeKobo, deliveryTitle, items)
 	plain := fmt.Sprintf("New order #%s placed.\nCustomer: %s (%s)\nTotal: %s\nView orders: %s", shortID(orderID), customerName, customerEmail, fmtNaira(totalKobo), orderURL)
 	return sendMail(ctx, vendorEmail, subject, html, plain)
 }
@@ -349,6 +358,11 @@ func SendVendorAlert(ctx context.Context, vendorEmail, storeName, orderID, custo
 // sendMail dispatches an email using whichever provider is configured.
 // Priority: Gmail API (same creds as auth service) → SMTP.
 func sendMail(ctx context.Context, to, subject, html, plainText string) error {
+	// Resend first: an HTTPS API that works on any host, unlike SMTP which
+	// Railway blocks outbound.
+	if key := getenv("RESEND_API_KEY", ""); key != "" {
+		return sendMailResend(ctx, key, to, subject, html, plainText)
+	}
 	if rt := getenv("GMAIL_REFRESH_TOKEN", ""); rt != "" {
 		return sendMailGmail(ctx, to, subject, html)
 	}
@@ -598,7 +612,7 @@ func formatNumber(n int64) string {
 
 // ── Customer invoice HTML ──────────────────────────────────────────────────────
 
-func customerInvoiceHTML(customerName, storeName, orderID, orderURL string, totalKobo int64, items []InvoiceItem) string {
+func customerInvoiceHTML(customerName, storeName, orderID, orderURL string, totalKobo, deliveryFeeKobo int64, deliveryTitle string, items []InvoiceItem) string {
 	sid := shortID(orderID)
 
 	// Build item rows
@@ -665,6 +679,7 @@ func customerInvoiceHTML(customerName, storeName, orderID, orderURL string, tota
         <th style="text-align:right;font-size:11px;color:#94a3b8;font-weight:600;padding-bottom:8px;border-bottom:2px solid #f1f5f9;">Total</th>
       </tr>
       %s
+      %s
       <!-- Total row -->
       <tr>
         <td style="padding:16px 0 0;font-size:13px;font-weight:700;color:#6b7280;">Order total</td>
@@ -707,15 +722,37 @@ func customerInvoiceHTML(customerName, storeName, orderID, orderURL string, tota
 </html>`,
 		storeName, customerName,
 		sid,
-		rows.String(), fmtNaira(totalKobo),
+		rows.String(), deliveryRowHTML(deliveryFeeKobo, deliveryTitle, 1), fmtNaira(totalKobo),
 		orderURL, orderURL, orderURL,
 		storeName,
 	)
 }
 
+// deliveryRowHTML renders the delivery line above the order total. It returns
+// an empty string when no delivery fee was charged, so the totals block looks
+// exactly as it did before for pickup-only orders.
+func deliveryRowHTML(deliveryFeeKobo int64, title string, colspan int) string {
+	if deliveryFeeKobo <= 0 {
+		return ""
+	}
+	label := "Delivery"
+	if title != "" {
+		label = "Delivery — " + title
+	}
+	span := ""
+	if colspan > 1 {
+		span = fmt.Sprintf(` colspan="%d"`, colspan)
+	}
+	return fmt.Sprintf(`
+      <tr>
+        <td%s style="padding:12px 0 0;font-size:13px;color:#6b7280;">%s</td>
+        <td style="padding:12px 0 0;font-size:13px;color:#1C1C1C;text-align:right;">%s</td>
+      </tr>`, span, label, fmtNaira(deliveryFeeKobo))
+}
+
 // ── Vendor alert HTML ──────────────────────────────────────────────────────────
 
-func vendorAlertHTML(storeName, orderID, dashboardURL, customerName, customerEmail, customerPhone, deliveryAddress string, totalKobo int64, items []InvoiceItem) string {
+func vendorAlertHTML(storeName, orderID, dashboardURL, customerName, customerEmail, customerPhone, deliveryAddress string, totalKobo, deliveryFeeKobo int64, deliveryTitle string, items []InvoiceItem) string {
 	sid := shortID(orderID)
 
 	var rows strings.Builder
@@ -783,6 +820,7 @@ func vendorAlertHTML(storeName, orderID, dashboardURL, customerName, customerEma
         <th style="text-align:right;font-size:11px;color:#94a3b8;font-weight:600;padding-bottom:8px;border-bottom:2px solid #f1f5f9;">Total</th>
       </tr>
       %s
+      %s
       <tr>
         <td colspan="2" style="padding:16px 0 0;font-size:13px;font-weight:700;color:#6b7280;">Order total</td>
         <td style="padding:16px 0 0;font-size:22px;font-weight:900;color:#1A7A42;text-align:right;">%s</td>
@@ -823,8 +861,50 @@ func vendorAlertHTML(storeName, orderID, dashboardURL, customerName, customerEma
 		customerName,
 		customerEmail, customerEmail,
 		phoneRow, addressRow,
-		rows.String(), fmtNaira(totalKobo),
+		rows.String(), deliveryRowHTML(deliveryFeeKobo, deliveryTitle, 2), fmtNaira(totalKobo),
 		dashboardURL,
 		storeName,
 	)
+}
+
+// sendMailResend posts one email to the Resend HTTP API. RESEND_FROM must be
+// a verified sender on the account, e.g. "GoMarketi <noreply@gomarketi.com>".
+func sendMailResend(ctx context.Context, apiKey, to, subject, html, plainText string) error {
+	// EMAIL_FROM is accepted as an alias for RESEND_FROM.
+	from := getenv("RESEND_FROM", getenv("EMAIL_FROM", "GoMarketi <onboarding@resend.dev>"))
+
+	payload := map[string]any{
+		"from":    from,
+		"to":      []string{to},
+		"subject": subject,
+		"html":    html,
+	}
+	if plainText != "" {
+		payload["text"] = plainText
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("resend: marshal: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		"https://api.resend.com/emails", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("resend: new request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("resend: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("resend: status %d: %s", resp.StatusCode, string(b))
+	}
+	return nil
 }

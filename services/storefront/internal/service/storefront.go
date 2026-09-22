@@ -12,9 +12,10 @@ import (
 	"github.com/jmoiron/sqlx"
 	"github.com/rs/zerolog"
 
-	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
 	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/dto"
 	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/email"
+	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/phone"
+	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
 )
 
 type StorefrontService struct {
@@ -22,10 +23,13 @@ type StorefrontService struct {
 	log         zerolog.Logger
 	emailer     email.WelcomeMailer
 	storeDomain string
+	// phones may be nil — number format is still checked, the Termii lookup
+	// is simply skipped.
+	phones *phone.Verifier
 }
 
-func New(db *sqlx.DB, emailer email.WelcomeMailer, storeDomain string, log zerolog.Logger) *StorefrontService {
-	return &StorefrontService{db: db, emailer: emailer, storeDomain: storeDomain, log: log}
+func New(db *sqlx.DB, emailer email.WelcomeMailer, storeDomain string, phones *phone.Verifier, log zerolog.Logger) *StorefrontService {
+	return &StorefrontService{db: db, emailer: emailer, storeDomain: storeDomain, phones: phones, log: log}
 }
 
 func (s *StorefrontService) DB() *sqlx.DB { return s.db }
@@ -42,6 +46,16 @@ func (s *StorefrontService) CreateStore(ctx context.Context, userID uuid.UUID, r
 		return dto.StoreResp{}, fmt.Errorf("check existing store: %w", err)
 	}
 
+	// Verify the support phone before creating anything, so a bad number is
+	// a clean validation error rather than a store the vendor must edit.
+	if req.SupportPhone != nil && *req.SupportPhone != "" {
+		normalised, err := s.verifyPhone(ctx, *req.SupportPhone)
+		if err != nil {
+			return dto.StoreResp{}, err
+		}
+		req.SupportPhone = &normalised
+	}
+
 	// Check slug is free.
 	var taken bool
 	_ = s.db.QueryRowContext(ctx, `SELECT TRUE FROM stores WHERE slug=$1`, req.Slug).Scan(&taken)
@@ -51,15 +65,11 @@ func (s *StorefrontService) CreateStore(ctx context.Context, userID uuid.UUID, r
 
 	var row storeRow
 	err = s.db.QueryRowxContext(ctx, `
-		INSERT INTO stores (vendor_id, name, slug, category, currency, team_size, support_phone)
-		VALUES ($1,$2,$3,$4,$5,$6,$7)
-		RETURNING id, vendor_id, name, slug, category, currency,
-		          team_size, staff_range, tagline, logo_url, hero_image_url, site_description,
-		          COALESCE(social_links, '{}') AS social_links,
-		          support_phone, address, city, state, custom_domain, custom_domain_status,
-		          COALESCE(theme_config, '{}') AS theme_config, is_active, created_at`,
+		INSERT INTO stores (vendor_id, name, slug, category, currency, team_size, support_phone, market_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+		RETURNING `+storeCols,
 		userID, req.Name, req.Slug, req.Category, req.Currency,
-		req.TeamSize, req.SupportPhone,
+		req.TeamSize, req.SupportPhone, nullUUID(req.MarketID),
 	).StructScan(&row)
 	if err != nil {
 		return dto.StoreResp{}, fmt.Errorf("insert store: %w", err)
@@ -96,6 +106,14 @@ func (s *StorefrontService) GetMyStore(ctx context.Context, userID uuid.UUID) (d
 }
 
 func (s *StorefrontService) UpdateStore(ctx context.Context, userID uuid.UUID, storeID uuid.UUID, req dto.UpdateStoreReq) (dto.StoreResp, error) {
+	if req.SupportPhone != nil && *req.SupportPhone != "" {
+		normalised, err := s.verifyPhone(ctx, *req.SupportPhone)
+		if err != nil {
+			return dto.StoreResp{}, err
+		}
+		req.SupportPhone = &normalised
+	}
+
 	var row storeRow
 	err := s.db.QueryRowxContext(ctx, `
 		UPDATE stores SET
@@ -110,16 +128,14 @@ func (s *StorefrontService) UpdateStore(ctx context.Context, userID uuid.UUID, s
 			city             = COALESCE($9, city),
 			state            = COALESCE($10, state),
 			theme_config     = CASE WHEN $11::jsonb IS NOT NULL THEN $11::jsonb ELSE COALESCE(theme_config, '{}') END,
+			market_id        = COALESCE($12::uuid, market_id),
 			updated_at       = NOW()
-		WHERE id=$12 AND vendor_id=$13
-		RETURNING id, vendor_id, name, slug, category, currency,
-		          team_size, staff_range, tagline, logo_url, hero_image_url, site_description,
-		          COALESCE(social_links, '{}') AS social_links,
-		          support_phone, address, city, state, custom_domain, custom_domain_status,
-		          COALESCE(theme_config, '{}') AS theme_config, is_active, created_at`,
+		WHERE id=$13 AND vendor_id=$14
+		RETURNING `+storeCols,
 		req.Name, req.Tagline, req.LogoURL, req.HeroImageURL, req.SiteDescription,
 		nullJSON(req.SocialLinks), req.SupportPhone,
 		req.Address, req.City, req.State, nullJSON(req.ThemeConfig),
+		nullUUID(req.MarketID),
 		storeID, userID,
 	).StructScan(&row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -140,11 +156,7 @@ func (s *StorefrontService) CheckSlugAvailable(ctx context.Context, slug string)
 func (s *StorefrontService) GetStoreBySlug(ctx context.Context, slug string) (dto.StoreResp, error) {
 	var row storeRow
 	err := s.db.QueryRowxContext(ctx, `
-		SELECT id, vendor_id, name, slug, category, currency,
-		       team_size, staff_range, tagline, logo_url, hero_image_url, site_description,
-		       COALESCE(social_links, '{}') AS social_links,
-		       support_phone, address, city, state, custom_domain, custom_domain_status,
-		       COALESCE(theme_config, '{}') AS theme_config, is_active, created_at
+		SELECT `+storeCols+`
 		FROM stores WHERE slug=$1 AND is_active=TRUE`, slug).StructScan(&row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.StoreResp{}, apperrors.NotFound("store not found")
@@ -152,17 +164,13 @@ func (s *StorefrontService) GetStoreBySlug(ctx context.Context, slug string) (dt
 	if err != nil {
 		return dto.StoreResp{}, fmt.Errorf("get store by slug: %w", err)
 	}
-	return rowToResp(row), nil
+	return s.withDeliveryOptions(ctx, rowToResp(row)), nil
 }
 
 func (s *StorefrontService) GetStoreByDomain(ctx context.Context, domain string) (dto.StoreResp, error) {
 	var row storeRow
 	err := s.db.QueryRowxContext(ctx, `
-		SELECT id, vendor_id, name, slug, category, currency,
-		       team_size, staff_range, tagline, logo_url, hero_image_url, site_description,
-		       COALESCE(social_links, '{}') AS social_links,
-		       support_phone, address, city, state, custom_domain, custom_domain_status,
-		       COALESCE(theme_config, '{}') AS theme_config, is_active, created_at
+		SELECT `+storeCols+`
 		FROM stores WHERE custom_domain=$1 AND custom_domain_status='active' AND is_active=TRUE`, domain).StructScan(&row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.StoreResp{}, apperrors.NotFound("store not found")
@@ -170,7 +178,25 @@ func (s *StorefrontService) GetStoreByDomain(ctx context.Context, domain string)
 	if err != nil {
 		return dto.StoreResp{}, fmt.Errorf("get store by domain: %w", err)
 	}
-	return rowToResp(row), nil
+	return s.withDeliveryOptions(ctx, rowToResp(row)), nil
+}
+
+// withDeliveryOptions attaches the store's active delivery options to a public
+// store payload so checkout can render them in one round trip. A failure here
+// is logged and swallowed — a storefront that loads without delivery choices
+// beats one that does not load at all.
+func (s *StorefrontService) withDeliveryOptions(ctx context.Context, resp dto.StoreResp) dto.StoreResp {
+	storeID, err := uuid.Parse(resp.ID)
+	if err != nil {
+		return resp
+	}
+	opts, err := s.ListDeliveryOptions(ctx, storeID, true)
+	if err != nil {
+		s.log.Warn().Err(err).Str("store_id", resp.ID).Msg("delivery options lookup failed")
+		return resp
+	}
+	resp.DeliveryOptions = opts
+	return resp
 }
 
 // ── Staff ─────────────────────────────────────────────────────────────────────
@@ -249,6 +275,18 @@ func (s *StorefrontService) RemoveStaff(ctx context.Context, userID uuid.UUID, s
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+// storeCols is the column list every store query returns — kept in one place
+// so the markets join stays consistent across SELECT and RETURNING. The
+// correlated subquery works in RETURNING too, where a JOIN would not.
+const storeCols = `id, vendor_id, name, slug, category, currency,
+          team_size, staff_range, tagline, logo_url, hero_image_url, site_description,
+          COALESCE(social_links, '{}') AS social_links,
+          support_phone, address, city, state,
+          market_id,
+          (SELECT m.name FROM markets m WHERE m.id = stores.market_id) AS market_name,
+          custom_domain, custom_domain_status,
+          COALESCE(theme_config, '{}') AS theme_config, is_active, created_at`
+
 type storeRow struct {
 	ID                 uuid.UUID      `db:"id"`
 	VendorID           uuid.UUID      `db:"vendor_id"`
@@ -267,6 +305,8 @@ type storeRow struct {
 	Address            sql.NullString `db:"address"`
 	City               sql.NullString `db:"city"`
 	State              sql.NullString `db:"state"`
+	MarketID           uuid.NullUUID  `db:"market_id"`
+	MarketName         sql.NullString `db:"market_name"`
 	CustomDomain       sql.NullString `db:"custom_domain"`
 	CustomDomainStatus string         `db:"custom_domain_status"`
 	ThemeConfig        []byte         `db:"theme_config"`
@@ -286,11 +326,7 @@ type staffRow struct {
 func (s *StorefrontService) getStoreByVendor(ctx context.Context, userID uuid.UUID) (dto.StoreResp, error) {
 	var row storeRow
 	err := s.db.QueryRowxContext(ctx, `
-		SELECT id, vendor_id, name, slug, category, currency,
-		       team_size, staff_range, tagline, logo_url, hero_image_url, site_description,
-		       COALESCE(social_links, '{}') AS social_links,
-		       support_phone, address, city, state, custom_domain, custom_domain_status,
-		       COALESCE(theme_config, '{}') AS theme_config, is_active, created_at
+		SELECT `+storeCols+`
 		FROM stores WHERE vendor_id=$1`, userID).StructScan(&row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.StoreResp{}, apperrors.NotFound("store not found")
@@ -328,10 +364,15 @@ func rowToResp(r storeRow) dto.StoreResp {
 		Address:            nullToPtr(r.Address),
 		City:               nullToPtr(r.City),
 		State:              nullToPtr(r.State),
+		MarketName:         nullToPtr(r.MarketName),
 		CustomDomain:       nullToPtr(r.CustomDomain),
 		CustomDomainStatus: r.CustomDomainStatus,
 		IsActive:           r.IsActive,
 		CreatedAt:          r.CreatedAt.UTC().Format(time.RFC3339),
+	}
+	if r.MarketID.Valid {
+		id := r.MarketID.UUID.String()
+		resp.MarketID = &id
 	}
 	// social_links and theme_config are JSONB — only set when non-empty.
 	if len(r.SocialLinks) > 0 && string(r.SocialLinks) != "{}" && string(r.SocialLinks) != "null" {
@@ -348,6 +389,15 @@ func nullToPtr(n sql.NullString) *string {
 		return nil
 	}
 	return &n.String
+}
+
+// nullUUID converts an optional UUID string from a request into a SQL NULL
+// when absent, so COALESCE leaves the stored value untouched on PATCH.
+func nullUUID(v *string) any {
+	if v == nil || *v == "" {
+		return nil
+	}
+	return *v
 }
 
 func nullStr(s string) sql.NullString {
@@ -408,4 +458,26 @@ func (s *StorefrontService) GetStoreViews(ctx context.Context, storeID uuid.UUID
 
 func isNotFound(err error) bool {
 	return apperrors.IsNotFound(err) || errors.Is(err, sql.ErrNoRows)
+}
+
+// verifyPhone normalises a support number to E.164 and checks with Termii
+// that the line actually exists. The stored value is always the normalised
+// form, so every store's number looks the same downstream.
+//
+// A number Termii does not recognise is rejected; a Termii outage is not the
+// vendor's problem, so the lookup fails open (see phone.Verifier.Verify).
+func (s *StorefrontService) verifyPhone(ctx context.Context, raw string) (string, error) {
+	normalised, err := phone.Normalise(raw)
+	if err != nil {
+		return "", apperrors.BadRequest("enter a valid Nigerian phone number, e.g. 08031234567")
+	}
+
+	ok, err := s.phones.Verify(ctx, normalised)
+	if err != nil {
+		return "", fmt.Errorf("verify phone: %w", err)
+	}
+	if !ok {
+		return "", apperrors.BadRequest("that phone number could not be verified — check it and try again")
+	}
+	return normalised, nil
 }

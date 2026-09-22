@@ -9,9 +9,9 @@ import (
 
 	"github.com/google/uuid"
 
-	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
 	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/dto"
 	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/email"
+	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
 )
 
 // Subscribe adds an email to a store's newsletter list.

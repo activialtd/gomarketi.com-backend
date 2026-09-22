@@ -9,10 +9,10 @@ import (
 	"github.com/go-playground/validator/v10"
 	"github.com/google/uuid"
 
-	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
-	"github.com/activialtd/gomarketi.com-backend/shared/pkg/middleware"
 	"github.com/activialtd/gomarketi.com-backend/services/catalogue/internal/dto"
 	"github.com/activialtd/gomarketi.com-backend/services/catalogue/internal/service"
+	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
+	"github.com/activialtd/gomarketi.com-backend/shared/pkg/middleware"
 )
 
 // Handler holds the service and validator.

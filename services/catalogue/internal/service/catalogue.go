@@ -12,8 +12,8 @@ import (
 	"github.com/lib/pq"
 	"github.com/rs/zerolog"
 
-	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
 	"github.com/activialtd/gomarketi.com-backend/services/catalogue/internal/dto"
+	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
 )
 
 type CatalogueService struct {
@@ -64,7 +64,7 @@ func (s *CatalogueService) ListProducts(ctx context.Context, storeID uuid.UUID, 
 	orderArgs := append(args, perPage, offset)
 	rows, err := s.db.QueryxContext(ctx,
 		`SELECT id, store_id, name, description, category_id, price_kobo, stock, sku,
-		        images, tags, is_digital, is_published, created_at, updated_at `+
+		        images, tags, is_digital, is_published, canonical_product_id, created_at, updated_at `+
 			base+fmt.Sprintf(` ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, i, i+1),
 		orderArgs...)
 	if err != nil {
@@ -86,13 +86,13 @@ func (s *CatalogueService) ListProducts(ctx context.Context, storeID uuid.UUID, 
 func (s *CatalogueService) CreateProduct(ctx context.Context, storeID uuid.UUID, req dto.CreateProductReq) (dto.ProductResp, error) {
 	var r productRow
 	err := s.db.QueryRowxContext(ctx, `
-		INSERT INTO products (store_id, name, description, category_id, price_kobo, stock, sku, images, tags, is_digital)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		INSERT INTO products (store_id, name, description, category_id, price_kobo, stock, sku, images, tags, is_digital, canonical_product_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 		RETURNING id, store_id, name, description, category_id, price_kobo, stock, sku,
-		          images, tags, is_digital, is_published, created_at, updated_at`,
+		          images, tags, is_digital, is_published, canonical_product_id, created_at, updated_at`,
 		storeID, req.Name, req.Description, req.CategoryID,
 		req.PriceKobo, req.Stock, req.SKU,
-		pq.Array(req.Images), pq.Array(req.Tags), req.IsDigital,
+		pq.Array(req.Images), pq.Array(req.Tags), req.IsDigital, req.CanonicalProductID,
 	).StructScan(&r)
 	if err != nil {
 		return dto.ProductResp{}, fmt.Errorf("create product: %w", err)
@@ -106,7 +106,7 @@ func (s *CatalogueService) GetPublicProductByID(ctx context.Context, productID u
 	var r productRow
 	err := s.db.QueryRowxContext(ctx, `
 		SELECT id, store_id, name, description, category_id, price_kobo, stock, sku,
-		       images, tags, is_digital, is_published, created_at, updated_at
+		       images, tags, is_digital, is_published, canonical_product_id, created_at, updated_at
 		FROM products WHERE id=$1 AND is_published=TRUE`, productID).StructScan(&r)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.ProductResp{}, apperrors.NotFound("product not found")
@@ -121,7 +121,7 @@ func (s *CatalogueService) GetProduct(ctx context.Context, storeID uuid.UUID, pr
 	var r productRow
 	err := s.db.QueryRowxContext(ctx, `
 		SELECT id, store_id, name, description, category_id, price_kobo, stock, sku,
-		       images, tags, is_digital, is_published, created_at, updated_at
+		       images, tags, is_digital, is_published, canonical_product_id, created_at, updated_at
 		FROM products WHERE id=$1 AND store_id=$2`, productID, storeID).StructScan(&r)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.ProductResp{}, apperrors.NotFound("product not found")
@@ -144,13 +144,14 @@ func (s *CatalogueService) UpdateProduct(ctx context.Context, storeID uuid.UUID,
 			sku         = COALESCE($6, sku),
 			images      = CASE WHEN $7::text[] IS NOT NULL THEN $7 ELSE images END,
 			tags        = CASE WHEN $8::text[] IS NOT NULL THEN $8 ELSE tags END,
+			canonical_product_id = COALESCE($9::uuid, canonical_product_id),
 			updated_at  = NOW()
-		WHERE id=$9 AND store_id=$10
+		WHERE id=$10 AND store_id=$11
 		RETURNING id, store_id, name, description, category_id, price_kobo, stock, sku,
-		          images, tags, is_digital, is_published, created_at, updated_at`,
+		          images, tags, is_digital, is_published, canonical_product_id, created_at, updated_at`,
 		req.Name, req.Description, req.CategoryID,
 		req.PriceKobo, req.Stock, req.SKU,
-		pq.Array(req.Images), pq.Array(req.Tags),
+		pq.Array(req.Images), pq.Array(req.Tags), req.CanonicalProductID,
 		productID, storeID,
 	).StructScan(&r)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -187,7 +188,7 @@ func (s *CatalogueService) setPublished(ctx context.Context, storeID, productID 
 		UPDATE products SET is_published=$1, updated_at=NOW()
 		WHERE id=$2 AND store_id=$3
 		RETURNING id, store_id, name, description, category_id, price_kobo, stock, sku,
-		          images, tags, is_digital, is_published, created_at, updated_at`,
+		          images, tags, is_digital, is_published, canonical_product_id, created_at, updated_at`,
 		published, productID, storeID).StructScan(&r)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.ProductResp{}, apperrors.NotFound("product not found")
@@ -278,6 +279,7 @@ type productRow struct {
 	Images      pq.StringArray `db:"images"`
 	Tags        pq.StringArray `db:"tags"`
 	IsDigital   bool           `db:"is_digital"`
+	CanonicalID sql.NullString `db:"canonical_product_id"`
 	IsPublished bool           `db:"is_published"`
 	CreatedAt   time.Time      `db:"created_at"`
 	UpdatedAt   time.Time      `db:"updated_at"`
@@ -311,6 +313,10 @@ func rowToProduct(r productRow) dto.ProductResp {
 		IsPublished: r.IsPublished,
 		CreatedAt:   r.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt:   r.UpdatedAt.UTC().Format(time.RFC3339),
+	}
+	if r.CanonicalID.Valid {
+		id := r.CanonicalID.String
+		p.CanonicalProductID = &id
 	}
 	if r.Description.Valid {
 		p.Description = &r.Description.String
