@@ -15,7 +15,7 @@ go run ./scripts/migrate
 
 # Port map  (gateway = 8080 public-facing, each service gets its own)
 #   gateway   :8080  ← what the frontend hits
-#   auth      :8081
+#   auth      :8086  (NOT 8081 — that is Metro/Expo's default port)
 #   identity  :8082
 #   storefront:8083
 #   catalogue :8084
@@ -44,7 +44,7 @@ cleanup() {
 trap cleanup SIGINT SIGTERM EXIT
 
 # Start upstream services first
-start_service "auth"       8081 "services/auth"
+start_service "auth"       8086 "services/auth"
 start_service "identity"   8082 "services/identity"
 start_service "storefront" 8083 "services/storefront"
 start_service "catalogue"  8084 "services/catalogue"
@@ -61,7 +61,7 @@ pids+=($!)
 echo ""
 echo "✓ All services running"
 echo "  Gateway  → http://localhost:8080"
-echo "  Auth     → http://localhost:8081"
+echo "  Auth     → http://localhost:8086"
 echo "  Storefront → http://localhost:8083"
 echo ""
 echo "Press Ctrl-C to stop all."

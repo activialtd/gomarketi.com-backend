@@ -1,19 +1,21 @@
 package handler
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
@@ -22,45 +24,68 @@ import (
 
 const maxUploadSize = 5 << 20 // 5 MB
 
-// supabaseS3Config reads Supabase Storage config from environment variables.
-// Required: SUPABASE_S3_ENDPOINT, SUPABASE_S3_BUCKET, SUPABASE_S3_ACCESS_KEY_ID, SUPABASE_S3_SECRET_ACCESS_KEY
-// Optional: SUPABASE_S3_REGION (defaults to "eu-west-1"), SUPABASE_PUBLIC_URL
-func supabaseS3Config() (endpoint, region, bucket, publicBase, accessKey, secretKey string, ok bool) {
-	endpoint   = os.Getenv("SUPABASE_S3_ENDPOINT")
-	region     = os.Getenv("SUPABASE_S3_REGION")
-	bucket     = os.Getenv("SUPABASE_S3_BUCKET")
-	publicBase = strings.TrimRight(os.Getenv("SUPABASE_PUBLIC_URL"), "/")
-	accessKey  = os.Getenv("SUPABASE_S3_ACCESS_KEY_ID")
-	secretKey  = os.Getenv("SUPABASE_S3_SECRET_ACCESS_KEY")
-	if region == "" {
-		region = "eu-west-1"
-	}
-	ok = endpoint != "" && bucket != "" && accessKey != "" && secretKey != ""
+// Uploads go to Cloudinary.
+//
+// Two routes, both signed server-side so the API secret never reaches a
+// browser:
+//
+//   - /uploads/presign returns a signature the client posts straight to
+//     Cloudinary, so the image never travels through this service.
+//   - /stores/upload takes the file itself and forwards it, for callers that
+//     would rather make one request.
+//
+// Cloudinary signs a request by SHA-1'ing the upload parameters (alphabetical,
+// joined like a query string) with the API secret appended.
+
+// cloudinaryConfig reads Cloudinary credentials from the environment.
+// Required: CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET.
+// Optional: CLOUDINARY_FOLDER (defaults to "gomarketi").
+func cloudinaryConfig() (cloudName, apiKey, apiSecret, folder string, ok bool) {
+	cloudName = getenv("CLOUDINARY_CLOUD_NAME", "")
+	apiKey = getenv("CLOUDINARY_API_KEY", "")
+	apiSecret = getenv("CLOUDINARY_API_SECRET", "")
+	folder = getenv("CLOUDINARY_FOLDER", "gomarketi")
+	ok = cloudName != "" && apiKey != "" && apiSecret != ""
 	return
 }
 
-// newSupabaseClient builds an S3-compatible client pointed at Supabase Storage.
-func newSupabaseClient(ctx context.Context, endpoint, region, accessKey, secretKey string) (*s3.Client, error) {
-	cfg, err := config.LoadDefaultConfig(ctx,
-		config.WithRegion(region),
-		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(accessKey, secretKey, "")),
-		config.WithEndpointResolverWithOptions(aws.EndpointResolverWithOptionsFunc(
-			func(service, region string, options ...interface{}) (aws.Endpoint, error) {
-				return aws.Endpoint{URL: endpoint, HostnameImmutable: true}, nil
-			},
-		)),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("aws config: %w", err)
+// signCloudinary builds the signature Cloudinary expects: every parameter
+// except file, api_key and the signature itself, sorted by key, joined as
+// k=v&k=v, with the API secret appended, then SHA-1 hex.
+func signCloudinary(params map[string]string, apiSecret string) string {
+	keys := make([]string, 0, len(params))
+	for k := range params {
+		if k == "file" || k == "api_key" || k == "resource_type" {
+			continue
+		}
+		keys = append(keys, k)
 	}
-	return s3.NewFromConfig(cfg, func(o *s3.Options) {
-		o.UsePathStyle = true // Supabase requires path-style URLs
-	}), nil
+	sort.Strings(keys)
+
+	var sb strings.Builder
+	for i, k := range keys {
+		if i > 0 {
+			sb.WriteByte('&')
+		}
+		sb.WriteString(k)
+		sb.WriteByte('=')
+		sb.WriteString(params[k])
+	}
+	sb.WriteString(apiSecret)
+
+	sum := sha1.Sum([]byte(sb.String()))
+	return hex.EncodeToString(sum[:])
+}
+
+func cloudinaryUploadURL(cloudName string) string {
+	// "image" rather than "auto": these endpoints only accept images, and
+	// being explicit stops a renamed file uploading as a raw asset.
+	return fmt.Sprintf("https://api.cloudinary.com/v1_1/%s/image/upload", cloudName)
 }
 
 // UploadStoreAsset godoc
 // POST /v1/storefront/stores/upload
-// Uploads a store logo or hero image directly to Supabase Storage.
+// Uploads a store logo or hero image through this service to Cloudinary.
 // Form fields: file (image), type ("logo" | "hero")
 func (h *Handler) UploadStoreAsset(c *gin.Context) {
 	userID, ok := h.callerID(c)
@@ -68,7 +93,6 @@ func (h *Handler) UploadStoreAsset(c *gin.Context) {
 		return
 	}
 
-	// Resolve the vendor's store to namespace the upload path.
 	store, err := h.svc.GetMyStore(c.Request.Context(), userID)
 	if err != nil {
 		h.writeError(c, err)
@@ -109,55 +133,106 @@ func (h *Handler) UploadStoreAsset(c *gin.Context) {
 	}
 	defer f.Close()
 
-	// Sniff MIME type from the first 512 bytes then rewind.
-	buf := make([]byte, 512)
-	n, _ := f.Read(buf)
-	contentType := http.DetectContentType(buf[:n])
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		c.JSON(http.StatusInternalServerError, dto.ErrorResp{Error: "failed to read file"})
-		return
-	}
-
-	// Path: {storeID}/{type}/{timestamp}{ext}
 	key := fmt.Sprintf("%s/%s/%d%s", store.ID, assetType, time.Now().UnixMilli(), ext)
 
-	publicURL, err := uploadToSupabase(c.Request.Context(), key, contentType, f, fh.Size)
+	var url string
+	switch {
+	case cloudinaryConfigured():
+		url, err = uploadToCloudinary(c.Request.Context(), strings.TrimSuffix(key, ext), fh.Filename, f)
+	case r2Configured():
+		// Sniff the type from the first bytes rather than trusting the
+		// extension, then rewind for the upload itself.
+		buf := make([]byte, 512)
+		n, _ := f.Read(buf)
+		contentType := http.DetectContentType(buf[:n])
+		if _, seekErr := f.Seek(0, io.SeekStart); seekErr != nil {
+			c.JSON(http.StatusInternalServerError, dto.ErrorResp{Error: "failed to read file"})
+			return
+		}
+		url, err = uploadToR2(c.Request.Context(), key, contentType, f, fh.Size)
+	default:
+		c.JSON(http.StatusServiceUnavailable, dto.ErrorResp{Error: "file storage not configured"})
+		return
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.ErrorResp{Error: "upload failed: " + err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"url": publicURL, "type": assetType})
+	c.JSON(http.StatusOK, gin.H{"url": url, "type": assetType})
 }
 
-func uploadToSupabase(ctx context.Context, key, contentType string, body io.Reader, size int64) (string, error) {
-	endpoint, region, bucket, publicBase, accessKey, secretKey, ok := supabaseS3Config()
+// uploadToCloudinary posts one image and returns its delivery URL.
+func uploadToCloudinary(ctx context.Context, publicID, filename string, body io.Reader) (string, error) {
+	cloudName, apiKey, apiSecret, folder, ok := cloudinaryConfig()
 	if !ok {
-		return "", fmt.Errorf("storage not configured: set SUPABASE_S3_ENDPOINT, SUPABASE_S3_BUCKET, SUPABASE_S3_ACCESS_KEY_ID, SUPABASE_S3_SECRET_ACCESS_KEY")
+		return "", fmt.Errorf("storage not configured: set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET")
 	}
 
-	client, err := newSupabaseClient(ctx, endpoint, region, accessKey, secretKey)
+	params := map[string]string{
+		"timestamp": fmt.Sprintf("%d", time.Now().Unix()),
+		"public_id": publicID,
+		"folder":    folder,
+	}
+	params["signature"] = signCloudinary(params, apiSecret)
+	params["api_key"] = apiKey
+
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	for k, v := range params {
+		if err := w.WriteField(k, v); err != nil {
+			return "", fmt.Errorf("cloudinary: write field %s: %w", k, err)
+		}
+	}
+	part, err := w.CreateFormFile("file", filename)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("cloudinary: create file part: %w", err)
+	}
+	if _, err := io.Copy(part, body); err != nil {
+		return "", fmt.Errorf("cloudinary: copy file: %w", err)
+	}
+	if err := w.Close(); err != nil {
+		return "", fmt.Errorf("cloudinary: close writer: %w", err)
 	}
 
-	if _, err = client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:        aws.String(bucket),
-		Key:           aws.String(key),
-		Body:          body,
-		ContentType:   aws.String(contentType),
-		ContentLength: aws.Int64(size),
-		CacheControl:  aws.String("public, max-age=31536000"),
-	}); err != nil {
-		return "", err
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cloudinaryUploadURL(cloudName), &buf)
+	if err != nil {
+		return "", fmt.Errorf("cloudinary: new request: %w", err)
+	}
+	req.Header.Set("Content-Type", w.FormDataContentType())
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("cloudinary: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode >= 300 {
+		return "", fmt.Errorf("cloudinary: status %d: %s", resp.StatusCode, string(raw))
 	}
 
-	return publicBase + "/" + key, nil
+	var parsed struct {
+		SecureURL string `json:"secure_url"`
+		URL       string `json:"url"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return "", fmt.Errorf("cloudinary: decode response: %w", err)
+	}
+	if parsed.SecureURL != "" {
+		return parsed.SecureURL, nil
+	}
+	return parsed.URL, nil
 }
 
 // PresignUpload godoc
 // POST /v1/storefront/uploads/presign
-// Returns a presigned PUT URL so the client can upload directly to Supabase Storage.
+//
+// Returns a Cloudinary signature the client posts the file to directly, so
+// the image never passes through this service. The response carries the form
+// fields Cloudinary requires — post them as multipart/form-data along with
+// `file`, and read `secure_url` off the reply.
 func (h *Handler) PresignUpload(c *gin.Context) {
 	userID, ok := h.callerID(c)
 	if !ok {
@@ -169,54 +244,84 @@ func (h *Handler) PresignUpload(c *gin.Context) {
 		return
 	}
 
-	endpoint, region, bucket, publicBase, accessKey, secretKey, configured := supabaseS3Config()
-	if !configured {
-		c.JSON(http.StatusServiceUnavailable, dto.ErrorResp{Error: "file storage not configured"})
-		return
-	}
-
-	client, err := newSupabaseClient(c.Request.Context(), endpoint, region, accessKey, secretKey)
-	if err != nil {
-		h.writeError(c, err)
-		return
-	}
-
 	purpose := req.Purpose
 	if purpose == "" {
 		purpose = "files"
 	}
-	ext := filepath.Ext(req.Filename)
 
+	// Namespace by store so one vendor's uploads never collide with another's.
 	var storeID string
 	_ = h.svc.DB().QueryRowContext(c.Request.Context(),
 		`SELECT id FROM stores WHERE vendor_id=$1 AND is_active=TRUE LIMIT 1`, userID,
 	).Scan(&storeID)
 
-	var key string
+	publicID := fmt.Sprintf("%s/%s", purpose, uuid.New().String())
 	if storeID != "" {
-		key = fmt.Sprintf("stores/%s/%s/%s%s", storeID, purpose, uuid.New().String(), ext)
-	} else {
-		key = fmt.Sprintf("uploads/%s/%s%s", purpose, uuid.New().String(), ext)
+		publicID = fmt.Sprintf("stores/%s/%s/%s", storeID, purpose, uuid.New().String())
 	}
 
-	presigner := s3.NewPresignClient(client)
-	presigned, err := presigner.PresignPutObject(c.Request.Context(),
-		&s3.PutObjectInput{
-			Bucket:      aws.String(bucket),
-			Key:         aws.String(key),
-			ContentType: aws.String(req.ContentType),
-		},
-		s3.WithPresignExpires(15*time.Minute),
-	)
-	if err != nil {
-		h.writeError(c, fmt.Errorf("presign: %w", err))
-		return
-	}
+	switch {
+	case cloudinaryConfigured():
+		cloudName, apiKey, apiSecret, folder, _ := cloudinaryConfig()
+		timestamp := time.Now().Unix()
+		params := map[string]string{
+			"timestamp": fmt.Sprintf("%d", timestamp),
+			"public_id": publicID,
+			"folder":    folder,
+		}
+		signature := signCloudinary(params, apiSecret)
 
-	c.JSON(http.StatusOK, dto.PresignUploadResp{
-		UploadURL: presigned.URL,
-		PublicURL: fmt.Sprintf("%s/%s", publicBase, key),
-		Key:       key,
-		ExpiresIn: 900,
-	})
+		// Cloudinary takes a multipart POST and returns the delivery URL,
+		// so public_url is not known until the upload completes.
+		c.JSON(http.StatusOK, dto.PresignUploadResp{
+			UploadURL: cloudinaryUploadURL(cloudName),
+			Key:       publicID,
+			ExpiresIn: 3600,
+			Provider:  "cloudinary",
+			Fields: map[string]string{
+				"api_key":   apiKey,
+				"timestamp": fmt.Sprintf("%d", timestamp),
+				"public_id": publicID,
+				"folder":    folder,
+				"signature": signature,
+			},
+		})
+
+	case r2Configured():
+		key := publicID + filepath.Ext(req.Filename)
+		uploadURL, publicURL, err := presignR2Put(c.Request.Context(), key, req.ContentType)
+		if err != nil {
+			h.writeError(c, err)
+			return
+		}
+		// R2 takes a plain PUT of the file body, and the final URL is known
+		// up front.
+		c.JSON(http.StatusOK, dto.PresignUploadResp{
+			UploadURL: uploadURL,
+			PublicURL: publicURL,
+			Key:       key,
+			ExpiresIn: 900,
+			Provider:  "r2",
+		})
+
+	default:
+		c.JSON(http.StatusServiceUnavailable, dto.ErrorResp{Error: "file storage not configured"})
+	}
+}
+
+func cloudinaryConfigured() bool {
+	_, _, _, _, ok := cloudinaryConfig()
+	return ok
+}
+
+func r2Configured() bool {
+	_, _, _, _, _, ok := r2Config()
+	return ok
+}
+
+func getenv(key, fallback string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return fallback
 }

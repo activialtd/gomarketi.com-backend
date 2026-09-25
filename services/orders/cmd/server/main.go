@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/jmoiron/sqlx"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jmoiron/sqlx"
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 	"github.com/spf13/viper"
@@ -79,6 +79,14 @@ func run(log zerolog.Logger) error {
 	}
 
 	svc := service.New(db, log, broker)
+
+	// Auto-release escrow that has been held past the window, so a buyer who
+	// never confirms doesn't strand the vendor's money. Stops with the
+	// process; each release is idempotent, so running several instances is
+	// safe.
+	escrowCtx, stopEscrow := context.WithCancel(context.Background())
+	defer stopEscrow()
+	go svc.StartEscrowReleaser(escrowCtx)
 	h := handler.New(svc, log, broker)
 	r := gin.New()
 

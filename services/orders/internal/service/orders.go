@@ -13,10 +13,10 @@ import (
 	"github.com/jmoiron/sqlx"
 	"github.com/rs/zerolog"
 
-	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
 	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/dto"
 	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/email"
 	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/sse"
+	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
 )
 
 type OrdersService struct {
@@ -62,7 +62,9 @@ func (s *OrdersService) ListOrders(ctx context.Context, storeID uuid.UUID, page,
 
 	listArgs := append(args, perPage, offset)
 	rows, err := s.db.QueryxContext(ctx,
-		`SELECT id, store_id, customer_id, customer_name, customer_email, status, total_kobo, delivery_address, created_at, updated_at `+
+		`SELECT id, store_id, customer_id, customer_name, customer_email, status, total_kobo, delivery_address, delivery_fee_kobo, delivery_option_title,
+		       escrow_status, hub_received_at, dispatched_at, delivered_at, delivery_confirmed_at, dispute_status, dispute_reason, disputed_at,
+		       created_at, updated_at `+
 			base+fmt.Sprintf(` ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, i, i+1),
 		listArgs...)
 	if err != nil {
@@ -88,7 +90,9 @@ func (s *OrdersService) GetPublicOrder(ctx context.Context, orderID uuid.UUID, e
 	var r orderRow
 	err := s.db.QueryRowxContext(ctx, `
 		SELECT id, store_id, customer_id, customer_name, customer_email,
-		       status, total_kobo, delivery_address, created_at, updated_at
+		       status, total_kobo, delivery_address, delivery_fee_kobo, delivery_option_title,
+		       escrow_status, hub_received_at, dispatched_at, delivered_at, delivery_confirmed_at, dispute_status, dispute_reason, disputed_at,
+		       created_at, updated_at
 		FROM orders WHERE id=$1 AND LOWER(customer_email)=LOWER($2)`, orderID, email).StructScan(&r)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.OrderResp{}, apperrors.NotFound("order not found")
@@ -105,7 +109,9 @@ func (s *OrdersService) GetOrder(ctx context.Context, storeID uuid.UUID, orderID
 	var r orderRow
 	err := s.db.QueryRowxContext(ctx, `
 		SELECT id, store_id, customer_id, customer_name, customer_email,
-		       status, total_kobo, delivery_address, created_at, updated_at
+		       status, total_kobo, delivery_address, delivery_fee_kobo, delivery_option_title,
+		       escrow_status, hub_received_at, dispatched_at, delivered_at, delivery_confirmed_at, dispute_status, dispute_reason, disputed_at,
+		       created_at, updated_at
 		FROM orders WHERE id=$1 AND store_id=$2`, orderID, storeID).StructScan(&r)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.OrderResp{}, apperrors.NotFound("order not found")
@@ -121,10 +127,21 @@ func (s *OrdersService) GetOrder(ctx context.Context, storeID uuid.UUID, orderID
 func (s *OrdersService) UpdateOrderStatus(ctx context.Context, storeID uuid.UUID, orderID uuid.UUID, req dto.UpdateOrderStatusReq) (dto.OrderResp, error) {
 	var r orderRow
 	err := s.db.QueryRowxContext(ctx, `
-		UPDATE orders SET status=$1, note=COALESCE($2,note), updated_at=NOW()
+		UPDATE orders SET
+			status     = $1,
+			note       = COALESCE($2, note),
+			-- Dispatch starts the auto-release clock; delivery is recorded
+			-- but does not release on its own — only the buyer confirming
+			-- (or the clock running out) does that.
+			hub_received_at = CASE WHEN $1 = 'at_hub'  THEN COALESCE(hub_received_at, NOW()) ELSE hub_received_at END,
+			dispatched_at = CASE WHEN $1 = 'shipped'   THEN COALESCE(dispatched_at, NOW()) ELSE dispatched_at END,
+			delivered_at  = CASE WHEN $1 = 'delivered' THEN COALESCE(delivered_at, NOW())  ELSE delivered_at  END,
+			updated_at = NOW()
 		WHERE id=$3 AND store_id=$4
 		RETURNING id, store_id, customer_id, customer_name, customer_email,
-		          status, total_kobo, delivery_address, created_at, updated_at`,
+		          status, total_kobo, delivery_address, delivery_fee_kobo, delivery_option_title,
+		          escrow_status, hub_received_at, dispatched_at, delivered_at, delivery_confirmed_at, dispute_status, dispute_reason, disputed_at,
+		       created_at, updated_at`,
 		req.Status, req.Note, orderID, storeID).StructScan(&r)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.OrderResp{}, apperrors.NotFound("order not found")
@@ -132,6 +149,14 @@ func (s *OrdersService) UpdateOrderStatus(ctx context.Context, storeID uuid.UUID
 	if err != nil {
 		return dto.OrderResp{}, fmt.Errorf("update status: %w", err)
 	}
+	// A cancelled order never earns the vendor anything: take the held
+	// credit back so it can't be withdrawn, and the buyer is owed a refund.
+	if req.Status == dto.OrderStatusCancelled {
+		if err := s.ReverseEscrow(ctx, orderID); err != nil {
+			s.log.Warn().Err(err).Str("order_id", orderID.String()).Msg("escrow reversal failed")
+		}
+	}
+
 	go s.broker.Publish(storeID.String(), sse.Event{
 		Type: "order_updated",
 		Data: fmt.Sprintf(`{"order_id":%q,"status":%q}`, orderID.String(), req.Status),
@@ -167,6 +192,57 @@ func customerUUID(storeID uuid.UUID, email string) uuid.UUID {
 	return uuid.NewSHA1(storeID, []byte(strings.ToLower(strings.TrimSpace(email))))
 }
 
+// resolveDeliveryFee decides what delivery actually costs for this order.
+//
+// The price is read from the store's own store_delivery_options row (owned by
+// the storefront service, same database) so a tampered client cannot invent a
+// cheaper fee — Paystack is then verified against a total the vendor set.
+//
+// Stores that have configured no options at all fall back to the client's
+// delivery_fee_kobo, which preserves the old behaviour for storefronts still
+// on the hardcoded zone list.
+func (s *OrdersService) resolveDeliveryFee(ctx context.Context, storeID uuid.UUID, req dto.CreateOrderReq) (int64, string, error) {
+	if req.DeliveryOptionID != "" {
+		optionID, err := uuid.Parse(req.DeliveryOptionID)
+		if err != nil {
+			return 0, "", apperrors.BadRequest("invalid delivery_option_id")
+		}
+		var (
+			priceKobo int64
+			title     string
+		)
+		err = s.db.QueryRowContext(ctx, `
+			SELECT price_kobo, title FROM store_delivery_options
+			WHERE id = $1 AND store_id = $2 AND is_active = TRUE`,
+			optionID, storeID,
+		).Scan(&priceKobo, &title)
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, "", apperrors.BadRequest("delivery option not found for this store")
+		}
+		if err != nil {
+			return 0, "", fmt.Errorf("lookup delivery option: %w", err)
+		}
+		return priceKobo, title, nil
+	}
+
+	if req.DeliveryFeeKobo <= 0 {
+		return 0, "", nil
+	}
+
+	// No option named, but a fee was sent. Only honour it when the store has
+	// no options configured — otherwise the client should have picked one.
+	var configured int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM store_delivery_options WHERE store_id=$1 AND is_active=TRUE`, storeID,
+	).Scan(&configured); err != nil {
+		return 0, "", fmt.Errorf("count delivery options: %w", err)
+	}
+	if configured > 0 {
+		return 0, "", apperrors.BadRequest("delivery_option_id is required for this store")
+	}
+	return req.DeliveryFeeKobo, "", nil
+}
+
 // CreateOrder is called by the storefront checkout after a (simulated)
 // successful Paystack charge. It creates the order, its line items, and
 // credits the vendor's wallet for the full amount in a single transaction.
@@ -176,13 +252,22 @@ func (s *OrdersService) CreateOrder(ctx context.Context, req dto.CreateOrderReq)
 		return dto.OrderResp{}, apperrors.BadRequest("invalid store_id")
 	}
 
-	var totalKobo int64
+	var itemsKobo int64
 	for _, it := range req.Items {
-		totalKobo += it.PriceKobo * int64(it.Quantity)
+		itemsKobo += it.PriceKobo * int64(it.Quantity)
 	}
-	if totalKobo <= 0 {
+	if itemsKobo <= 0 {
 		return dto.OrderResp{}, apperrors.BadRequest("order total must be greater than zero")
 	}
+
+	deliveryFeeKobo, deliveryTitle, err := s.resolveDeliveryFee(ctx, storeID, req)
+	if err != nil {
+		return dto.OrderResp{}, err
+	}
+
+	// total_kobo is the full amount charged — line items plus delivery — which
+	// is also the amount Paystack must have collected.
+	totalKobo := itemsKobo + deliveryFeeKobo
 
 	// Verify the Paystack charge before touching the database.
 	// In dev mode (no PAYSTACK_SECRET_KEY) this is a no-op with a log warning.
@@ -200,10 +285,12 @@ func (s *OrdersService) CreateOrder(ctx context.Context, req dto.CreateOrderReq)
 
 	var orderID uuid.UUID
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO orders (store_id, customer_id, customer_name, customer_email, status, total_kobo, delivery_address)
-		VALUES ($1,$2,$3,$4,'confirmed',$5,$6)
+		INSERT INTO orders (store_id, customer_id, customer_name, customer_email, status, total_kobo,
+		                    delivery_address, delivery_fee_kobo, delivery_option_title)
+		VALUES ($1,$2,$3,$4,'confirmed',$5,$6,$7,$8)
 		RETURNING id`,
-		storeID, custID, req.CustomerName, req.CustomerEmail, totalKobo, req.DeliveryAddress,
+		storeID, custID, req.CustomerName, req.CustomerEmail, totalKobo,
+		req.DeliveryAddress, deliveryFeeKobo, deliveryTitle,
 	).Scan(&orderID)
 	if err != nil {
 		return dto.OrderResp{}, fmt.Errorf("insert order: %w", err)
@@ -223,11 +310,14 @@ func (s *OrdersService) CreateOrder(ctx context.Context, req dto.CreateOrderReq)
 		}
 	}
 
-	// Credit the vendor's wallet for the full order value.
+	// Credit the vendor for their items only — the delivery fee belongs to
+	// the platform, which does the delivering. The credit lands 'pending':
+	// escrow holds it until the buyer confirms delivery (or auto-release
+	// elapses), and GetWallet counts only completed rows.
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO wallet_transactions (store_id, type, amount_kobo, description, reference, order_id, status)
-		VALUES ($1,'credit',$2,$3,$4,$5,'completed')`,
-		storeID, totalKobo, fmt.Sprintf("Sale — order #%s", orderID.String()[:8]), req.PaymentRef, orderID,
+		VALUES ($1,'credit',$2,$3,$4,$5,'pending')`,
+		storeID, itemsKobo, fmt.Sprintf("Sale — order #%s", orderID.String()[:8]), req.PaymentRef, orderID,
 	); err != nil {
 		return dto.OrderResp{}, fmt.Errorf("credit wallet: %w", err)
 	}
@@ -269,6 +359,8 @@ func (s *OrdersService) CreateOrder(ctx context.Context, req dto.CreateOrderReq)
 				storeSlug,
 				storeName,
 				totalKobo,
+				deliveryFeeKobo,
+				deliveryTitle,
 				invoiceItems,
 			); err != nil {
 				s.log.Warn().Err(err).Str("order_id", orderIDStr).Msg("invoice email failed")
@@ -293,6 +385,8 @@ func (s *OrdersService) CreateOrder(ctx context.Context, req dto.CreateOrderReq)
 			req.CustomerPhone,
 			req.DeliveryAddress,
 			totalKobo,
+			deliveryFeeKobo,
+			deliveryTitle,
 			invoiceItems,
 		); err != nil {
 			s.log.Warn().Err(err).Str("order_id", orderIDStr).Msg("vendor alert email failed")
@@ -647,7 +741,7 @@ func (s *OrdersService) GetRevenueTrend(ctx context.Context, storeID uuid.UUID, 
 	// Fill every day in the window so the chart has no gaps
 	out := make([]dto.RevenueTrendPoint, days)
 	for i := range out {
-		d := time.Now().UTC().AddDate(0, 0, -(days-1-i)).Format("2006-01-02")
+		d := time.Now().UTC().AddDate(0, 0, -(days - 1 - i)).Format("2006-01-02")
 		if p, ok := byDate[d]; ok {
 			out[i] = p
 		} else {
@@ -705,16 +799,26 @@ func (s *OrdersService) GetTopProducts(ctx context.Context, storeID uuid.UUID, l
 // ── Row types ─────────────────────────────────────────────────────────────────
 
 type orderRow struct {
-	ID              uuid.UUID `db:"id"`
-	StoreID         uuid.UUID `db:"store_id"`
-	CustomerID      uuid.UUID `db:"customer_id"`
-	CustomerName    string    `db:"customer_name"`
-	CustomerEmail   string    `db:"customer_email"`
-	Status          string    `db:"status"`
-	TotalKobo       int64     `db:"total_kobo"`
-	DeliveryAddress string    `db:"delivery_address"`
-	CreatedAt       time.Time `db:"created_at"`
-	UpdatedAt       time.Time `db:"updated_at"`
+	ID              uuid.UUID      `db:"id"`
+	StoreID         uuid.UUID      `db:"store_id"`
+	CustomerID      uuid.UUID      `db:"customer_id"`
+	CustomerName    string         `db:"customer_name"`
+	CustomerEmail   string         `db:"customer_email"`
+	Status          string         `db:"status"`
+	TotalKobo       int64          `db:"total_kobo"`
+	DeliveryAddress string         `db:"delivery_address"`
+	DeliveryFeeKobo int64          `db:"delivery_fee_kobo"`
+	DeliveryOption  string         `db:"delivery_option_title"`
+	EscrowStatus    string         `db:"escrow_status"`
+	HubReceivedAt   sql.NullTime   `db:"hub_received_at"`
+	DispatchedAt    sql.NullTime   `db:"dispatched_at"`
+	DeliveredAt     sql.NullTime   `db:"delivered_at"`
+	ConfirmedAt     sql.NullTime   `db:"delivery_confirmed_at"`
+	DisputeStatus   sql.NullString `db:"dispute_status"`
+	DisputeReason   sql.NullString `db:"dispute_reason"`
+	DisputedAt      sql.NullTime   `db:"disputed_at"`
+	CreatedAt       time.Time      `db:"created_at"`
+	UpdatedAt       time.Time      `db:"updated_at"`
 }
 
 type abandonedRow struct {
@@ -729,17 +833,27 @@ type abandonedRow struct {
 
 func rowToOrder(r orderRow) dto.OrderResp {
 	return dto.OrderResp{
-		ID:              r.ID.String(),
-		StoreID:         r.StoreID.String(),
-		CustomerID:      r.CustomerID.String(),
-		CustomerName:    r.CustomerName,
-		CustomerEmail:   r.CustomerEmail,
-		Status:          dto.OrderStatus(r.Status),
-		Items:           []dto.OrderItem{},
-		TotalKobo:       r.TotalKobo,
-		DeliveryAddress: r.DeliveryAddress,
-		CreatedAt:       r.CreatedAt.UTC().Format(time.RFC3339),
-		UpdatedAt:       r.UpdatedAt.UTC().Format(time.RFC3339),
+		ID:                  r.ID.String(),
+		StoreID:             r.StoreID.String(),
+		CustomerID:          r.CustomerID.String(),
+		CustomerName:        r.CustomerName,
+		CustomerEmail:       r.CustomerEmail,
+		Status:              dto.OrderStatus(r.Status),
+		Items:               []dto.OrderItem{},
+		TotalKobo:           r.TotalKobo,
+		DeliveryAddress:     r.DeliveryAddress,
+		DeliveryFeeKobo:     r.DeliveryFeeKobo,
+		DeliveryOptionTitle: r.DeliveryOption,
+		EscrowStatus:        r.EscrowStatus,
+		HubReceivedAt:       nullTimeStr(r.HubReceivedAt),
+		DispatchedAt:        nullTimeStr(r.DispatchedAt),
+		DeliveredAt:         nullTimeStr(r.DeliveredAt),
+		DeliveryConfirmedAt: nullTimeStr(r.ConfirmedAt),
+		DisputeStatus:       nullStrPtr(r.DisputeStatus),
+		DisputeReason:       nullStrPtr(r.DisputeReason),
+		DisputedAt:          nullTimeStr(r.DisputedAt),
+		CreatedAt:           r.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:           r.UpdatedAt.UTC().Format(time.RFC3339),
 	}
 }
 
@@ -773,4 +887,21 @@ func (s *OrdersService) loadItems(ctx context.Context, orderID uuid.UUID) []dto.
 		})
 	}
 	return items
+}
+
+// nullTimeStr renders a nullable timestamp as RFC3339, or omits it.
+func nullTimeStr(t sql.NullTime) *string {
+	if !t.Valid {
+		return nil
+	}
+	s := t.Time.UTC().Format(time.RFC3339)
+	return &s
+}
+
+// nullStrPtr renders a nullable string as a pointer, or omits it.
+func nullStrPtr(n sql.NullString) *string {
+	if !n.Valid {
+		return nil
+	}
+	return &n.String
 }

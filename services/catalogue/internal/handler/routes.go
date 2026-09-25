@@ -21,6 +21,8 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 	// Public routes — no auth required
 	pub := r.Group("/v1/catalogue/public")
 	// Query-param routes used by the storefront API client
+	pub.GET("/search", h.Search)
+	pub.GET("/products/search", h.SearchProducts)
 	pub.GET("/products", h.ListPublicProductsByQuery)
 	pub.GET("/products/:product_id", h.GetPublicProductByID)
 	pub.GET("/categories", h.ListPublicCategories)
@@ -32,6 +34,9 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 	v1 := r.Group("/v1/catalogue")
 	v1.Use(middleware.RequireUser())
 	{
+		// Shared catalogue typeahead used by the product form.
+		v1.GET("/canonical-products/search", h.SearchCanonicalProducts)
+
 		// Products (MERCHANT.PRODUCTS dashboard section)
 		products := v1.Group("/products")
 		products.GET("", h.ListProducts)

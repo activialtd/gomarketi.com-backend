@@ -9,6 +9,9 @@ type OrderStatus string
 const (
 	OrderStatusPending   OrderStatus = "pending"
 	OrderStatusConfirmed OrderStatus = "confirmed"
+	// OrderStatusAtHub means the vendor delivered to the GoMarketi hub. The
+	// buyer does not have the goods yet, so escrow stays held.
+	OrderStatusAtHub     OrderStatus = "at_hub"
 	OrderStatusShipped   OrderStatus = "shipped"
 	OrderStatusDelivered OrderStatus = "delivered"
 	OrderStatusCancelled OrderStatus = "cancelled"
@@ -35,8 +38,23 @@ type OrderResp struct {
 	Items           []OrderItem `json:"items"`
 	TotalKobo       int64       `json:"total_kobo"`
 	DeliveryAddress string      `json:"delivery_address"`
-	CreatedAt       string      `json:"created_at"`
-	UpdatedAt       string      `json:"updated_at"`
+	// DeliveryFeeKobo is included in TotalKobo, not additional to it.
+	DeliveryFeeKobo     int64  `json:"delivery_fee_kobo"`
+	DeliveryOptionTitle string `json:"delivery_option_title,omitempty"`
+	// EscrowStatus is held | released | reversed — whether the vendor's
+	// credit for this order has become withdrawable yet.
+	EscrowStatus        string  `json:"escrow_status"`
+	HubReceivedAt       *string `json:"hub_received_at,omitempty"`
+	DispatchedAt        *string `json:"dispatched_at,omitempty"`
+	DeliveredAt         *string `json:"delivered_at,omitempty"`
+	DeliveryConfirmedAt *string `json:"delivery_confirmed_at,omitempty"`
+	// A dispute runs alongside status: the order stays 'shipped' while the
+	// claim is open, but escrow stops moving.
+	DisputeStatus *string `json:"dispute_status,omitempty"`
+	DisputeReason *string `json:"dispute_reason,omitempty"`
+	DisputedAt    *string `json:"disputed_at,omitempty"`
+	CreatedAt     string  `json:"created_at"`
+	UpdatedAt     string  `json:"updated_at"`
 }
 
 // OrderListResp wraps a paginated list of orders.
@@ -68,11 +86,16 @@ type CreateOrderReq struct {
 	DeliveryAddress string            `json:"delivery_address"`
 	Items           []CreateOrderItem `json:"items"             validate:"required,min=1,dive"`
 	PaymentRef      string            `json:"payment_reference" validate:"required"`
+	// DeliveryOptionID names one of the store's delivery options. When set,
+	// the price is read from that option — DeliveryFeeKobo is only trusted as
+	// a fallback for stores that have not configured any options.
+	DeliveryOptionID string `json:"delivery_option_id" validate:"omitempty,uuid"`
+	DeliveryFeeKobo  int64  `json:"delivery_fee_kobo"  validate:"min=0"`
 }
 
 // UpdateOrderStatusReq is the body for PATCH /v1/orders/:id/status.
 type UpdateOrderStatusReq struct {
-	Status OrderStatus `json:"status" validate:"required,oneof=confirmed shipped delivered cancelled"`
+	Status OrderStatus `json:"status" validate:"required,oneof=confirmed at_hub shipped delivered cancelled"`
 	Note   *string     `json:"note"`
 }
 
@@ -125,7 +148,7 @@ type AnalyticsOverviewResp struct {
 
 // RevenueTrendPoint is one day's aggregated revenue for the trend chart.
 type RevenueTrendPoint struct {
-	Date        string `json:"date"`         // "2026-07-03"
+	Date        string `json:"date"` // "2026-07-03"
 	RevenueKobo int64  `json:"revenue_kobo"`
 	Orders      int    `json:"orders"`
 }
@@ -133,11 +156,11 @@ type RevenueTrendPoint struct {
 // TopProductResp is a single entry in the top-selling products list,
 // aggregated from order_items across all of a store's orders.
 type TopProductResp struct {
-	ProductID    string `json:"product_id"`
-	Name         string `json:"name"`
-	ImageURL     string `json:"image_url,omitempty"`
-	UnitsSold    int64  `json:"units_sold"`
-	RevenueKobo  int64  `json:"revenue_kobo"`
+	ProductID   string `json:"product_id"`
+	Name        string `json:"name"`
+	ImageURL    string `json:"image_url,omitempty"`
+	UnitsSold   int64  `json:"units_sold"`
+	RevenueKobo int64  `json:"revenue_kobo"`
 }
 
 // ── Wallet ────────────────────────────────────────────────────────────────────
@@ -158,8 +181,8 @@ type WalletTransactionResp struct {
 
 // WalletResp is returned by GET /v1/wallet.
 type WalletResp struct {
-	BalanceKobo  int64                    `json:"balance_kobo"`
-	TotalEarned  int64                    `json:"total_earned_kobo"`
+	BalanceKobo  int64                   `json:"balance_kobo"`
+	TotalEarned  int64                   `json:"total_earned_kobo"`
 	Transactions []WalletTransactionResp `json:"transactions"`
 }
 
@@ -213,11 +236,11 @@ type SubscribeReq struct {
 
 // SubscriberResp is a single newsletter subscriber.
 type SubscriberResp struct {
-	ID           string  `json:"id"`
-	Email        string  `json:"email"`
-	Name         string  `json:"name"`
-	SubscribedAt string  `json:"subscribed_at"`
-	Unsubscribed bool    `json:"unsubscribed"`
+	ID           string `json:"id"`
+	Email        string `json:"email"`
+	Name         string `json:"name"`
+	SubscribedAt string `json:"subscribed_at"`
+	Unsubscribed bool   `json:"unsubscribed"`
 }
 
 // SubscriberListResp wraps a paginated subscriber list.
@@ -236,12 +259,12 @@ type CreateCampaignReq struct {
 
 // CampaignResp is a single email campaign.
 type CampaignResp struct {
-	ID             string  `json:"id"`
-	Subject        string  `json:"subject"`
-	Status         string  `json:"status"`
-	RecipientsCount int    `json:"recipients_count"`
-	CreatedAt      string  `json:"created_at"`
-	SentAt         *string `json:"sent_at,omitempty"`
+	ID              string  `json:"id"`
+	Subject         string  `json:"subject"`
+	Status          string  `json:"status"`
+	RecipientsCount int     `json:"recipients_count"`
+	CreatedAt       string  `json:"created_at"`
+	SentAt          *string `json:"sent_at,omitempty"`
 }
 
 // CampaignListResp wraps a list of campaigns.
@@ -282,4 +305,55 @@ type ValidationErrorResp struct {
 type FieldError struct {
 	Field   string `json:"field"`
 	Message string `json:"message"`
+}
+
+// ── Multi-vendor checkout ─────────────────────────────────────────────────────
+
+// CheckoutStoreOrder is one vendor's share of a multi-vendor cart.
+type CheckoutStoreOrder struct {
+	StoreID   string            `json:"store_id"   validate:"required,uuid"`
+	StoreSlug string            `json:"store_slug"`
+	StoreName string            `json:"store_name"`
+	Items     []CreateOrderItem `json:"items"      validate:"required,min=1,dive"`
+}
+
+// CreateCheckoutReq is the body for POST /v1/orders/public/checkout — the
+// consumer app's cart, which may span several vendors, paid for in one go.
+//
+// Delivery is charged once for the whole checkout, not once per vendor: the
+// buyer receives a single consolidated delivery.
+type CreateCheckoutReq struct {
+	CustomerName    string               `json:"customer_name"     validate:"required"`
+	CustomerEmail   string               `json:"customer_email"    validate:"required,email"`
+	CustomerPhone   string               `json:"customer_phone"`
+	DeliveryAddress string               `json:"delivery_address"`
+	PaymentRef      string               `json:"payment_reference" validate:"required"`
+	Stores          []CheckoutStoreOrder `json:"stores"            validate:"required,min=1,dive"`
+	// DeliveryOptionID must name an active option belonging to one of the
+	// stores in the basket. The price is read from that row server-side.
+	DeliveryOptionID string `json:"delivery_option_id" validate:"omitempty,uuid"`
+	// Only honoured when no store in the basket has options configured.
+	DeliveryFeeKobo int64 `json:"delivery_fee_kobo" validate:"min=0"`
+}
+
+// CheckoutResp is what the consumer app receives back: the per-vendor orders
+// plus the checkout-level totals.
+type CheckoutResp struct {
+	CheckoutID          string      `json:"checkout_id"`
+	Orders              []OrderResp `json:"orders"`
+	ItemsKobo           int64       `json:"items_kobo"`
+	DeliveryFeeKobo     int64       `json:"delivery_fee_kobo"`
+	DeliveryOptionTitle string      `json:"delivery_option_title,omitempty"`
+	TotalKobo           int64       `json:"total_kobo"`
+}
+
+// ConfirmDeliveryReq is the body for POST /v1/orders/public/:id/confirm-delivery.
+type ConfirmDeliveryReq struct {
+	Email string `json:"email" validate:"required,email"`
+}
+
+// ReportMissingReq is the body for POST /v1/orders/public/:id/report-missing.
+type ReportMissingReq struct {
+	Email  string `json:"email"  validate:"required,email"`
+	Reason string `json:"reason" validate:"omitempty,max=1000"`
 }

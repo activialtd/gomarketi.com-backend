@@ -10,11 +10,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
-	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
-	"github.com/activialtd/gomarketi.com-backend/shared/pkg/middleware"
 	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/dto"
 	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/service"
 	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/sse"
+	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
+	"github.com/activialtd/gomarketi.com-backend/shared/pkg/middleware"
 )
 
 // Handler holds the service and validator.
@@ -53,6 +53,23 @@ func (h *Handler) callerStoreID(c *gin.Context) (uuid.UUID, bool) {
 		return uuid.UUID{}, false
 	}
 	return storeID, true
+}
+
+// callerID is the signed-in user, from the gateway's X-User-ID header. Used
+// by the buyer-facing routes, which are scoped to a person rather than to a
+// store.
+func (h *Handler) callerID(c *gin.Context) (uuid.UUID, bool) {
+	raw := c.GetString(middleware.CtxKeyUserID)
+	if raw == "" {
+		c.JSON(http.StatusUnauthorized, dto.ErrorResp{Error: "authentication required"})
+		return uuid.UUID{}, false
+	}
+	id, err := uuid.Parse(raw)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, dto.ErrorResp{Error: "invalid user id"})
+		return uuid.UUID{}, false
+	}
+	return id, true
 }
 
 func (h *Handler) pathUUID(c *gin.Context, param string) (uuid.UUID, bool) {
