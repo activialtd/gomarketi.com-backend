@@ -1,0 +1,80 @@
+# Production stack for the EC2 host.
+#
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Postgres is NOT here: DATABASE_URL points at Neon.
+# Only Caddy publishes ports; everything else talks over gomarketi-net.
+# Every service listens on 8080 inside its container.
+
+networks:
+  gomarketi-net:
+    driver: bridge
+
+x-service: &service
+  restart: unless-stopped
+  env_file: .env
+  networks: [gomarketi-net]
+  environment:
+    PORT: "8080"
+  volumes:
+    # RS256 keypair + Apple .p8, generated once on the host (see deploy notes)
+    - ./keys:/keys:ro
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+
+services:
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [gomarketi-net]
+    depends_on: [gateway]
+
+  # Optional: only used for SSE fan-out across multiple orders instances.
+  # Orders falls back to an in-memory broker if this is absent.
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --save "" --appendonly no
+    networks: [gomarketi-net]
+
+  gateway:
+    <<: *service
+    build: ./services/gateway
+
+  auth:
+    <<: *service
+    build: ./services/auth
+
+  identity:
+    <<: *service
+    build: ./services/identity
+
+  storefront:
+    <<: *service
+    build: ./services/storefront
+
+  catalogue:
+    <<: *service
+    build: ./services/catalogue
+
+  orders:
+    <<: *service
+    build: ./services/orders
+
+  # admin-api (Node/Fastify) — uncomment once it lives in this repo.
+  # admin-api:
+  #   <<: *service
+  #   build: ./services/admin-api
+
+volumes:
+  caddy_data:
+  caddy_config:
