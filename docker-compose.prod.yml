@@ -2,9 +2,11 @@
 #
 #   docker compose -f docker-compose.prod.yml up -d --build
 #
-# Postgres is NOT here: DATABASE_URL points at Neon.
 # Only Caddy publishes ports; everything else talks over gomarketi-net.
 # Every service listens on 8080 inside its container.
+#
+# Build context is the repo ROOT for every service, because the Dockerfiles
+# copy both shared/pkg/ and services/<name>/.
 
 networks:
   gomarketi-net:
@@ -16,14 +18,46 @@ x-service: &service
   networks: [gomarketi-net]
   environment:
     PORT: "8080"
+  depends_on:
+    postgres:
+      condition: service_healthy
   volumes:
-    # RS256 keypair + Apple .p8, generated once on the host (see deploy notes)
+    # RS256 keypair + Apple .p8, copied onto the host (never baked into images)
     - ./keys:/keys:ro
   logging:
     driver: json-file
     options: { max-size: "10m", max-file: "3" }
 
 services:
+
+  # PostGIS build: shared/migrations/0006 does CREATE EXTENSION postgis.
+  # If this image has no arm64 build, swap to imresamu/postgis:16-3.4.
+  postgres:
+    image: postgis/postgis:16-3.4
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB:       ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backups:/backups
+    networks: [gomarketi-net]
+    # Modest settings for a 2 GB box shared with eight other containers
+    command: >
+      postgres
+      -c shared_buffers=256MB
+      -c effective_cache_size=768MB
+      -c max_connections=100
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
 
   caddy:
     image: caddy:2
@@ -38,7 +72,7 @@ services:
     networks: [gomarketi-net]
     depends_on: [gateway]
 
-  # Optional: only used for SSE fan-out across multiple orders instances.
+  # Only used for SSE fan-out across multiple orders instances.
   # Orders falls back to an in-memory broker if this is absent.
   redis:
     image: redis:7-alpine
@@ -48,33 +82,48 @@ services:
 
   gateway:
     <<: *service
-    build: ./services/gateway
+    build:
+      context: .
+      dockerfile: services/gateway/Dockerfile
 
   auth:
     <<: *service
-    build: ./services/auth
+    build:
+      context: .
+      dockerfile: services/auth/Dockerfile
 
   identity:
     <<: *service
-    build: ./services/identity
+    build:
+      context: .
+      dockerfile: services/identity/Dockerfile
 
   storefront:
     <<: *service
-    build: ./services/storefront
+    build:
+      context: .
+      dockerfile: services/storefront/Dockerfile
 
   catalogue:
     <<: *service
-    build: ./services/catalogue
+    build:
+      context: .
+      dockerfile: services/catalogue/Dockerfile
 
   orders:
     <<: *service
-    build: ./services/orders
+    build:
+      context: .
+      dockerfile: services/orders/Dockerfile
 
   # admin-api (Node/Fastify) — uncomment once it lives in this repo.
   # admin-api:
   #   <<: *service
-  #   build: ./services/admin-api
+  #   build:
+  #     context: .
+  #     dockerfile: services/admin-api/Dockerfile
 
 volumes:
+  postgres_data:
   caddy_data:
   caddy_config:
