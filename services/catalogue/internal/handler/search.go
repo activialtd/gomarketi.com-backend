@@ -41,50 +41,6 @@ func (h *Handler) Search(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
-// SearchProducts godoc
-// GET /v1/catalogue/public/products/search — no auth required.
-//
-// Product-only search in the paginated shape the consumer app already
-// expects (page/per_page/total). store_ids is optional: without it the
-// search covers every published product on the platform.
-func (h *Handler) SearchProducts(c *gin.Context) {
-	params, ok := h.searchParams(c)
-	if !ok {
-		return
-	}
-	params.Include = "products"
-
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	if page < 1 {
-		page = 1
-	}
-	perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "24"))
-	if perPage < 1 || perPage > 50 {
-		perPage = 24
-	}
-	params.Limit = perPage
-	params.Offset = (page - 1) * perPage
-
-	resp, err := h.svc.Search(c.Request.Context(), params)
-	if err != nil {
-		h.writeError(c, err)
-		return
-	}
-
-	// total is what the caller needs to know whether to fetch another page.
-	// Reporting an exact count would cost a second scan, so this reports the
-	// end of the list once there is no more to fetch.
-	total := int64(params.Offset + len(resp.Products))
-	if resp.ProductsHasMore {
-		total++
-	}
-	c.JSON(http.StatusOK, dto.ProductListResp{
-		Products: resp.Products,
-		Total:    total,
-		Page:     page,
-		PerPage:  perPage,
-	})
-}
 
 // searchParams reads the query parameters shared by both search endpoints.
 func (h *Handler) searchParams(c *gin.Context) (service.SearchParams, bool) {

@@ -116,14 +116,36 @@ func (s *CatalogueService) SearchProducts(ctx context.Context, storeIDs []string
 	args := []any{pq.Array(storeIDs)}
 	i := 2
 
+	// Matching mirrors the unified search (see search.go): trigram for
+	// misspellings, full text for multi-word queries, plus tags and the
+	// canonical name. Without this the same query behaved differently
+	// depending on which search endpoint the client happened to call.
+	rank := "0::float"
 	if q != "" {
-		base += fmt.Sprintf(` AND (name ILIKE $%d OR EXISTS (
-			SELECT 1 FROM canonical_products cp
-			WHERE cp.id = products.canonical_product_id
-			  AND similarity(cp.normalized_name, $%d) > 0.25
-		))`, i, i+1)
-		args = append(args, "%"+q+"%", strings.ToLower(q))
-		i += 2
+		term := strings.ToLower(q)
+		base += fmt.Sprintf(` AND (
+			LOWER(name) %% $%[1]d
+			OR similarity(LOWER(name), $%[1]d) >= %[2]f
+			OR LOWER(name) LIKE '%%' || $%[1]d || '%%'
+			OR search_doc @@ websearch_to_tsquery('simple', $%[1]d)
+			OR EXISTS (
+				SELECT 1 FROM unnest(tags) t
+				WHERE LOWER(t) %% $%[1]d OR LOWER(t) LIKE '%%' || $%[1]d || '%%'
+			)
+			OR EXISTS (
+				SELECT 1 FROM canonical_products cp
+				WHERE cp.id = products.canonical_product_id
+				  AND similarity(cp.normalized_name, $%[1]d) > 0.25
+			)
+		)`, i, trigramFloor)
+		rank = fmt.Sprintf(`(
+			CASE WHEN LOWER(name) LIKE $%[1]d || '%%' THEN 3.0 ELSE 0 END
+			+ CASE WHEN LOWER(name) LIKE '%%' || $%[1]d || '%%' THEN 2.0 ELSE 0 END
+			+ similarity(LOWER(name), $%[1]d) * 2.0
+			+ ts_rank(search_doc, websearch_to_tsquery('simple', $%[1]d))
+		)`, i)
+		args = append(args, term)
+		i++
 	}
 
 	var total int64
@@ -135,7 +157,7 @@ func (s *CatalogueService) SearchProducts(ctx context.Context, storeIDs []string
 	rows, err := s.db.QueryxContext(ctx,
 		`SELECT id, store_id, name, description, category_id, price_kobo, stock, sku,
 		        images, tags, is_digital, is_published, canonical_product_id, created_at, updated_at `+
-			base+fmt.Sprintf(` ORDER BY (canonical_product_id IS NOT NULL) DESC, created_at DESC LIMIT $%d OFFSET $%d`, i, i+1),
+			base+fmt.Sprintf(` ORDER BY %s DESC, (canonical_product_id IS NOT NULL) DESC, created_at DESC LIMIT $%d OFFSET $%d`, rank, i, i+1),
 		listArgs...)
 	if err != nil {
 		return dto.ProductSearchListResp{}, fmt.Errorf("search products: %w", err)
