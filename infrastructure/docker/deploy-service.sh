@@ -29,6 +29,15 @@ set -a
 source .env
 set +a
 
+# Re-pull secrets from SSM before every deploy, exactly as deploy.sh does
+# for a full boot. Without this, `env_file:` reads whatever env/<service>.env
+# happened to be on disk since the instance first booted — so a secret added
+# or rotated in SSM afterwards (PAYSTACK_SECRET_KEY, INTERNAL_API_KEY, …)
+# silently never reaches the container, and the service keeps running as if
+# it were unset. That is not hypothetical: it is why vendor virtual accounts
+# stopped being provisioned.
+./fetch-env.sh
+
 aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 docker compose -f docker-compose.prod.yml pull "$SERVICE"
 docker compose -f docker-compose.prod.yml up -d --no-deps "$SERVICE"

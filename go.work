@@ -1,6 +1,7 @@
 go 1.25.0
 
 use (
+	./scripts/dva-audit
 	./scripts/migrate
 	./scripts/seed-marketplace
 	./shared/pkg

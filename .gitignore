@@ -91,3 +91,8 @@ logs/
 .env.railway
 .env.railway.staging
 .env.railway.production
+
+# `go build` inside a scripts/ module drops its binary beside main.go
+scripts/*/dva-audit
+scripts/*/migrate
+scripts/*/seed-marketplace

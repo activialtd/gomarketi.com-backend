@@ -99,6 +99,13 @@ func run(log zerolog.Logger) error {
 
 	svc := service.New(store, encKey, kycClient, paystackClient, accountMailer, log)
 
+	// Vendor DVA backfill: store creation triggers provisioning (storefront's
+	// CreateStore), but that call is async and best-effort, so anything it
+	// drops — a Paystack outage, a restart mid-flight, a bad INTERNAL_API_KEY
+	// — used to leave a vendor with no account number and no way back. This
+	// sweep retries them hourly and at every boot. See StartDVABackfillLoop.
+	go svc.StartDVABackfillLoop(context.Background())
+
 	isProduction := viper.GetString("ENV") == "production"
 	if isProduction {
 		gin.SetMode(gin.ReleaseMode)

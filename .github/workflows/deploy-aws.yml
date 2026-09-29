@@ -97,7 +97,7 @@ jobs:
           # This is a Go workspace, so ./... from the root only covers the
           # root module — each module is built and tested on its own.
           failed=0
-          for dir in shared/pkg scripts/migrate services/*/; do
+          for dir in shared/pkg scripts/migrate scripts/dva-audit services/*/; do
             [ -f "$dir/go.mod" ] || continue
             echo "── $dir"
             (cd "$dir" && go build ./... && go test ./...) || failed=1

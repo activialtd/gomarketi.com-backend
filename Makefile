@@ -1,7 +1,7 @@
 # GoMarket Backend — top-level Makefile
 # Always run from the repo root (gomarketi.com-backend/).
 
-.PHONY: help docker-up docker-down docker-logs migrate gen tidy test \
+.PHONY: help docker-up docker-down docker-logs migrate dva-audit gen tidy test \
         test-verbose test-cover gen-keys
 
 SERVICES     := auth identity catalogue orders storefront
@@ -26,6 +26,12 @@ migrate:
 	@echo "→ Running migrations..."
 	go run ./scripts/migrate
 
+# Lists vendors who have a store but no Paystack virtual account. Read-only;
+# add ARGS=-provision to create the missing ones (needs IDENTITY_INTERNAL_URL
+# and INTERNAL_API_KEY as well).
+dva-audit:
+	go run ./scripts/dva-audit $(ARGS)
+
 # ── Code generation ───────────────────────────────────────────────────────────
 
 gen:
@@ -35,7 +41,7 @@ gen:
 
 tidy:
 	@go work sync
-	@for dir in shared/pkg scripts/migrate $(GO_SERVICES); do \
+	@for dir in shared/pkg scripts/migrate scripts/dva-audit $(GO_SERVICES); do \
 		if [ -f $$dir/go.mod ]; then \
 			echo "→ go mod tidy: $$dir"; \
 			(cd $$dir && go mod tidy); \
