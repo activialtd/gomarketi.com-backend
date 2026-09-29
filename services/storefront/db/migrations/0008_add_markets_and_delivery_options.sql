@@ -23,27 +23,42 @@ CREATE INDEX IF NOT EXISTS idx_markets_city  ON markets (city);
 
 -- Seed list. ON CONFLICT keeps this migration safe to re-run and lets you add
 -- rows here later without breaking existing databases.
-INSERT INTO markets (name, slug, city, state) VALUES
-    ('General Market',            'general-market',            'Any',           'Any'),
-    ('Balogun Market',            'balogun-market',            'Lagos Island',  'Lagos'),
-    ('Computer Village',          'computer-village',          'Ikeja',         'Lagos'),
-    ('Alaba International Market','alaba-international-market','Ojo',           'Lagos'),
-    ('Mile 12 Market',            'mile-12-market',            'Kosofe',        'Lagos'),
-    ('Oyingbo Market',            'oyingbo-market',            'Ebute Metta',   'Lagos'),
-    ('Ladipo Market',             'ladipo-market',             'Mushin',        'Lagos'),
-    ('Tejuosho Market',           'tejuosho-market',           'Yaba',          'Lagos'),
-    ('Trade Fair Complex',        'trade-fair-complex',        'Ojo',           'Lagos'),
-    ('Idumota Market',            'idumota-market',            'Lagos Island',  'Lagos'),
-    ('Wuse Market',               'wuse-market',               'Wuse',          'FCT'),
-    ('Garki Market',              'garki-market',              'Garki',         'FCT'),
-    ('Utako Market',              'utako-market',              'Utako',         'FCT'),
-    ('Onitsha Main Market',       'onitsha-main-market',       'Onitsha',       'Anambra'),
-    ('Ariaria International Market','ariaria-international-market','Aba',       'Abia'),
-    ('Kurmi Market',              'kurmi-market',              'Kano',          'Kano'),
-    ('Bodija Market',             'bodija-market',             'Ibadan',        'Oyo'),
-    ('Ogbete Main Market',        'ogbete-main-market',        'Enugu',         'Enugu'),
-    ('Oil Mill Market',           'oil-mill-market',           'Port Harcourt', 'Rivers')
-ON CONFLICT (slug) DO NOTHING;
+-- Guarded because this migration collides with staging's
+-- 0009_create_markets.sql, which creates `markets` without a slug column.
+-- On a database where that one landed first the CREATE TABLE above is a
+-- no-op, so this INSERT would abort on the missing column and take
+-- storefront's startup with it. Skipping here is safe: 0012 reconciles the
+-- two schemas and re-seeds whatever this could not.
+DO $seed$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'markets' AND column_name = 'slug'
+    ) THEN
+        INSERT INTO markets (name, slug, city, state) VALUES
+            ('General Market',            'general-market',            'Any',           'Any'),
+            ('Balogun Market',            'balogun-market',            'Lagos Island',  'Lagos'),
+            ('Computer Village',          'computer-village',          'Ikeja',         'Lagos'),
+            ('Alaba International Market','alaba-international-market','Ojo',           'Lagos'),
+            ('Mile 12 Market',            'mile-12-market',            'Kosofe',        'Lagos'),
+            ('Oyingbo Market',            'oyingbo-market',            'Ebute Metta',   'Lagos'),
+            ('Ladipo Market',             'ladipo-market',             'Mushin',        'Lagos'),
+            ('Tejuosho Market',           'tejuosho-market',           'Yaba',          'Lagos'),
+            ('Trade Fair Complex',        'trade-fair-complex',        'Ojo',           'Lagos'),
+            ('Idumota Market',            'idumota-market',            'Lagos Island',  'Lagos'),
+            ('Wuse Market',               'wuse-market',               'Wuse',          'FCT'),
+            ('Garki Market',              'garki-market',              'Garki',         'FCT'),
+            ('Utako Market',              'utako-market',              'Utako',         'FCT'),
+            ('Onitsha Main Market',       'onitsha-main-market',       'Onitsha',       'Anambra'),
+            ('Ariaria International Market','ariaria-international-market','Aba',       'Abia'),
+            ('Kurmi Market',              'kurmi-market',              'Kano',          'Kano'),
+            ('Bodija Market',             'bodija-market',             'Ibadan',        'Oyo'),
+            ('Ogbete Main Market',        'ogbete-main-market',        'Enugu',         'Enugu'),
+            ('Oil Mill Market',           'oil-mill-market',           'Port Harcourt', 'Rivers')
+        ON CONFLICT (slug) DO NOTHING;
+    END IF;
+END
+$seed$;
 
 -- Nullable: stores created before this migration have no market, and the
 -- vendor-web form can still submit without one.

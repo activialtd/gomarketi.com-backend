@@ -767,7 +767,12 @@ func (s *StorefrontService) SearchStores(ctx context.Context, req dto.StoreSearc
 // ListMarkets returns major markets, optionally filtered by state and/or
 // city — populates the vendor-web "which market is your store in?" dropdown.
 func (s *StorefrontService) ListMarkets(ctx context.Context, req dto.MarketReq) ([]dto.MarketResp, error) {
-	whereParts := []string{"1=1"}
+	// is_active is the curation switch: 0011 deactivated the markets outside
+	// the launch set rather than deleting them, because stores may still
+	// reference one. Without this filter every deactivated market came back
+	// in the dropdown anyway, which is exactly what that migration set out to
+	// prevent.
+	whereParts := []string{"is_active = TRUE"}
 	var args []interface{}
 	argN := 1
 
