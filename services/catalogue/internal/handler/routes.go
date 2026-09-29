@@ -43,9 +43,6 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 	v1 := r.Group("/v1/catalogue")
 	v1.Use(middleware.RequireUser())
 	{
-		// Shared catalogue typeahead used by the product form.
-		v1.GET("/canonical-products/search", h.SearchCanonicalProducts)
-
 		// Products (MERCHANT.PRODUCTS dashboard section)
 		products := v1.Group("/products")
 		products.GET("", h.ListProducts)
