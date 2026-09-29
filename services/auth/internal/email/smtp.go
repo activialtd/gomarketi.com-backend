@@ -38,6 +38,15 @@ func NewSMTPClient(cfg SMTPConfig) (*SMTPClient, error) {
 // SendOTP sends a verification code email via STARTTLS SMTP.
 // ctx deadline is respected for the dial phase; SMTP itself is synchronous.
 func (c *SMTPClient) SendOTP(ctx context.Context, to, otp string) error {
+	return c.sendCode(ctx, to, buildOTPMessage(c.cfg.From, to, otp))
+}
+
+// SendPasswordReset sends a password reset code email via STARTTLS SMTP.
+func (c *SMTPClient) SendPasswordReset(ctx context.Context, to, otp string) error {
+	return c.sendCode(ctx, to, buildPasswordResetMessage(c.cfg.From, to, otp))
+}
+
+func (c *SMTPClient) sendCode(ctx context.Context, to, msg string) error {
 	addr := net.JoinHostPort(c.cfg.Host, c.cfg.Port)
 
 	// Dial with context deadline awareness.
@@ -97,7 +106,6 @@ func (c *SMTPClient) SendOTP(ctx context.Context, to, otp string) error {
 	}
 	defer wc.Close()
 
-	msg := buildOTPMessage(c.cfg.From, to, otp)
 	if _, err = wc.Write([]byte(msg)); err != nil {
 		return fmt.Errorf("smtp write message: %w", err)
 	}
@@ -106,9 +114,20 @@ func (c *SMTPClient) SendOTP(ctx context.Context, to, otp string) error {
 }
 
 func buildOTPMessage(from, to, otp string) string {
-	subject := "Your GoMarket verification code"
-	body := otpHTMLBody(otp)
+	return buildCodeMessage(from, to,
+		"Your GoMarket verification code",
+		"Your GoMarket verification code is: "+otp,
+		otpHTMLBody(otp))
+}
 
+func buildPasswordResetMessage(from, to, otp string) string {
+	return buildCodeMessage(from, to,
+		"Reset your GoMarket password",
+		"Your GoMarket password reset code is: "+otp,
+		passwordResetHTMLBody(otp))
+}
+
+func buildCodeMessage(from, to, subject, plainBody, htmlBody string) string {
 	// RFC 2822 message with MIME multipart for plain+HTML.
 	boundary := "gomarket-boundary-001"
 	var sb strings.Builder
@@ -122,13 +141,13 @@ func buildOTPMessage(from, to, otp string) string {
 	// Plain text part.
 	sb.WriteString("--" + boundary + "\r\n")
 	sb.WriteString("Content-Type: text/plain; charset=UTF-8\r\n\r\n")
-	sb.WriteString("Your GoMarket verification code is: " + otp + "\r\n")
+	sb.WriteString(plainBody + "\r\n")
 	sb.WriteString("This code expires in 10 minutes. Do not share it with anyone.\r\n\r\n")
 
 	// HTML part.
 	sb.WriteString("--" + boundary + "\r\n")
 	sb.WriteString("Content-Type: text/html; charset=UTF-8\r\n\r\n")
-	sb.WriteString(body + "\r\n")
+	sb.WriteString(htmlBody + "\r\n")
 
 	sb.WriteString("--" + boundary + "--\r\n")
 	return sb.String()
@@ -147,6 +166,24 @@ func otpHTMLBody(otp string) string {
   </div>
   <p style="font-size:12px;color:#999;margin-top:24px;">
     If you did not request this code, ignore this email.
+  </p>
+</body>
+</html>`, otp)
+}
+
+func passwordResetHTMLBody(otp string) string {
+	return fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<body style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px 16px;background:#fff;">
+  <h2 style="color:#1a1a1a;margin-bottom:8px;">Reset your GoMarket password</h2>
+  <p style="font-size:14px;color:#555;margin-bottom:24px;">
+    Use the code below to reset your password. It expires in 10 minutes.
+  </p>
+  <div style="background:#f5f5f5;border-radius:8px;padding:32px;text-align:center;">
+    <span style="font-size:40px;font-weight:700;letter-spacing:10px;color:#1a1a1a;">%s</span>
+  </div>
+  <p style="font-size:12px;color:#999;margin-top:24px;">
+    If you did not request this, ignore this email — your password won't be changed.
   </p>
 </body>
 </html>`, otp)

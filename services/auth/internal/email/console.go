@@ -26,3 +26,12 @@ func (c *ConsoleEmailer) SendOTP(_ context.Context, to, otp string) error {
 	fmt.Printf("╚══════════════════════════════════╝\n\n")
 	return nil
 }
+
+func (c *ConsoleEmailer) SendPasswordReset(_ context.Context, to, otp string) error {
+	c.log.Warn().Str("to", to).Str("otp", otp).Msg("DEV MODE — password reset code not emailed, check terminal")
+	fmt.Printf("\n╔══════════════════════════════════╗\n")
+	fmt.Printf("║   DEV PASSWORD RESET for %-6s║\n", to)
+	fmt.Printf("║   Code: %-25s║\n", otp)
+	fmt.Printf("╚══════════════════════════════════╝\n\n")
+	return nil
+}

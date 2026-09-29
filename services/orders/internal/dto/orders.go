@@ -9,9 +9,12 @@ type OrderStatus string
 const (
 	OrderStatusPending   OrderStatus = "pending"
 	OrderStatusConfirmed OrderStatus = "confirmed"
-	// OrderStatusAtHub means the vendor delivered to the GoMarketi hub. The
-	// buyer does not have the goods yet, so escrow stays held.
-	OrderStatusAtHub     OrderStatus = "at_hub"
+	// OrderStatusAtHub means the vendor has delivered this order's items to
+	// the central GoMarketi office (admin-confirmed hub intake).
+	OrderStatusAtHub OrderStatus = "at_hub"
+	// OrderStatusShipped means GoMarketi has dispatched the (possibly
+	// multi-vendor) consolidated batch from the hub to the customer — not
+	// that the vendor shipped it themselves.
 	OrderStatusShipped   OrderStatus = "shipped"
 	OrderStatusDelivered OrderStatus = "delivered"
 	OrderStatusCancelled OrderStatus = "cancelled"
@@ -27,34 +30,53 @@ type OrderItem struct {
 	PriceKobo int64  `json:"price_kobo"`
 }
 
+// EscrowStatus summarizes the held/released/reversed state of the vendor's
+// wallet credit for an order — derived from wallet_transactions.status, not
+// stored directly.
+type EscrowStatus string
+
+const (
+	EscrowHeld     EscrowStatus = "held"
+	EscrowReleased EscrowStatus = "released"
+	EscrowReversed EscrowStatus = "reversed"
+)
+
+// DisputeStatus tracks a buyer's "I never received this" report — orthogonal
+// to OrderStatus, which stays 'shipped'/'delivered' for fulfillment tracking
+// even while a dispute is open. Reported disputes block the 7-day escrow
+// auto-release (see releaseOverdueEscrow) until an admin resolves them.
+type DisputeStatus string
+
+const (
+	DisputeReported  DisputeStatus = "reported"
+	DisputeRefunded  DisputeStatus = "refunded"
+	DisputeDismissed DisputeStatus = "dismissed"
+)
+
 // OrderResp is returned for any order read operation.
 type OrderResp struct {
-	ID              string      `json:"id"`
-	StoreID         string      `json:"store_id"`
-	CustomerID      string      `json:"customer_id"`
-	CustomerName    string      `json:"customer_name"`
-	CustomerEmail   string      `json:"customer_email"`
-	Status          OrderStatus `json:"status"`
-	Items           []OrderItem `json:"items"`
-	TotalKobo       int64       `json:"total_kobo"`
-	DeliveryAddress string      `json:"delivery_address"`
-	// DeliveryFeeKobo is included in TotalKobo, not additional to it.
-	DeliveryFeeKobo     int64  `json:"delivery_fee_kobo"`
-	DeliveryOptionTitle string `json:"delivery_option_title,omitempty"`
-	// EscrowStatus is held | released | reversed — whether the vendor's
-	// credit for this order has become withdrawable yet.
-	EscrowStatus        string  `json:"escrow_status"`
-	HubReceivedAt       *string `json:"hub_received_at,omitempty"`
-	DispatchedAt        *string `json:"dispatched_at,omitempty"`
-	DeliveredAt         *string `json:"delivered_at,omitempty"`
-	DeliveryConfirmedAt *string `json:"delivery_confirmed_at,omitempty"`
-	// A dispute runs alongside status: the order stays 'shipped' while the
-	// claim is open, but escrow stops moving.
-	DisputeStatus *string `json:"dispute_status,omitempty"`
-	DisputeReason *string `json:"dispute_reason,omitempty"`
-	DisputedAt    *string `json:"disputed_at,omitempty"`
-	CreatedAt     string  `json:"created_at"`
-	UpdatedAt     string  `json:"updated_at"`
+	ID                  string         `json:"id"`
+	StoreID             string         `json:"store_id"`
+	CustomerID          string         `json:"customer_id"`
+	CustomerName        string         `json:"customer_name"`
+	CustomerEmail       string         `json:"customer_email"`
+	Status              OrderStatus    `json:"status"`
+	Items               []OrderItem    `json:"items"`
+	TotalKobo           int64          `json:"total_kobo"`
+	DeliveryFeeKobo     int64          `json:"delivery_fee_kobo"`
+	DeliveryAddress     string         `json:"delivery_address"`
+	PaymentRef          string         `json:"payment_reference,omitempty"`
+	HubReceivedAt       *string        `json:"hub_received_at,omitempty"`
+	DispatchedAt        *string        `json:"dispatched_at,omitempty"`
+	DeliveredAt         *string        `json:"delivered_at,omitempty"`
+	DeliveryConfirmedAt *string        `json:"delivery_confirmed_at,omitempty"`
+	CancelledReason     *string        `json:"cancelled_reason,omitempty"`
+	EscrowStatus        EscrowStatus   `json:"escrow_status"`
+	DisputeStatus       *DisputeStatus `json:"dispute_status,omitempty"`
+	DisputeReason       *string        `json:"dispute_reason,omitempty"`
+	DisputedAt          *string        `json:"disputed_at,omitempty"`
+	CreatedAt           string         `json:"created_at"`
+	UpdatedAt           string         `json:"updated_at"`
 }
 
 // OrderListResp wraps a paginated list of orders.
@@ -93,10 +115,58 @@ type CreateOrderReq struct {
 	DeliveryFeeKobo  int64  `json:"delivery_fee_kobo"  validate:"min=0"`
 }
 
+// CreateCheckoutStoreOrder is one vendor's slice of a multi-store checkout —
+// same shape as CreateOrderReq but without its own payment_reference, since
+// one payment covers every store in the checkout.
+type CreateCheckoutStoreOrder struct {
+	StoreID   string            `json:"store_id"   validate:"required,uuid"`
+	StoreSlug string            `json:"store_slug"`
+	StoreName string            `json:"store_name"`
+	Items     []CreateOrderItem `json:"items"       validate:"required,min=1,dive"`
+}
+
+// CreateCheckoutReq is the body for POST /v1/orders/public/checkout — used
+// when a single checkout spans more than one vendor store. One Paystack
+// charge (payment_reference) is verified once against the sum of every
+// store's items, then one order per store is created atomically.
+type CreateCheckoutReq struct {
+	CustomerName    string                     `json:"customer_name"     validate:"required"`
+	CustomerEmail   string                     `json:"customer_email"    validate:"required,email"`
+	CustomerPhone   string                     `json:"customer_phone"`
+	DeliveryAddress string                     `json:"delivery_address"`
+	PaymentRef      string                     `json:"payment_reference" validate:"required"`
+	Stores          []CreateCheckoutStoreOrder `json:"stores"            validate:"required,min=1,dive"`
+}
+
+// CreateCheckoutResp returns one order per store in the same order the
+// request's Stores array was given in.
+type CreateCheckoutResp struct {
+	Orders []OrderResp `json:"orders"`
+}
+
 // UpdateOrderStatusReq is the body for PATCH /v1/orders/:id/status.
+// Deliberately restricted to confirmed/cancelled — under the hub
+// fulfillment model, at_hub/shipped/delivered are only ever set by admin
+// hub intake, admin batch dispatch, and buyer delivery confirmation
+// respectively, never by the vendor directly. This is a trust-boundary
+// safeguard: a vendor cannot self-report their way to an escrow release.
 type UpdateOrderStatusReq struct {
-	Status OrderStatus `json:"status" validate:"required,oneof=confirmed at_hub shipped delivered cancelled"`
+	Status OrderStatus `json:"status" validate:"required,oneof=confirmed cancelled"`
 	Note   *string     `json:"note"`
+}
+
+// ConfirmDeliveryReq is the body for POST /v1/orders/public/:id/confirm-delivery.
+type ConfirmDeliveryReq struct {
+	Email string `json:"email" validate:"required,email"`
+}
+
+// ReportMissingReq is the body for POST /v1/orders/public/:id/report-missing —
+// a buyer flagging that a specific order within a batch (possibly already
+// dispatched or delivered) never actually arrived. Same email-gated trust
+// model as ConfirmDeliveryReq, since checkout has no real buyer JWT identity.
+type ReportMissingReq struct {
+	Email  string  `json:"email"  validate:"required,email"`
+	Reason *string `json:"reason"`
 }
 
 // AbandonedCartResp is a single abandoned cart entry.
@@ -183,6 +253,7 @@ type WalletTransactionResp struct {
 type WalletResp struct {
 	BalanceKobo  int64                   `json:"balance_kobo"`
 	TotalEarned  int64                   `json:"total_earned_kobo"`
+	HeldKobo     int64                   `json:"held_kobo"` // credits still in escrow — not yet withdrawable
 	Transactions []WalletTransactionResp `json:"transactions"`
 }
 
@@ -317,24 +388,6 @@ type CheckoutStoreOrder struct {
 	Items     []CreateOrderItem `json:"items"      validate:"required,min=1,dive"`
 }
 
-// CreateCheckoutReq is the body for POST /v1/orders/public/checkout — the
-// consumer app's cart, which may span several vendors, paid for in one go.
-//
-// Delivery is charged once for the whole checkout, not once per vendor: the
-// buyer receives a single consolidated delivery.
-type CreateCheckoutReq struct {
-	CustomerName    string               `json:"customer_name"     validate:"required"`
-	CustomerEmail   string               `json:"customer_email"    validate:"required,email"`
-	CustomerPhone   string               `json:"customer_phone"`
-	DeliveryAddress string               `json:"delivery_address"`
-	PaymentRef      string               `json:"payment_reference" validate:"required"`
-	Stores          []CheckoutStoreOrder `json:"stores"            validate:"required,min=1,dive"`
-	// DeliveryOptionID must name an active option belonging to one of the
-	// stores in the basket. The price is read from that row server-side.
-	DeliveryOptionID string `json:"delivery_option_id" validate:"omitempty,uuid"`
-	// Only honoured when no store in the basket has options configured.
-	DeliveryFeeKobo int64 `json:"delivery_fee_kobo" validate:"min=0"`
-}
 
 // CheckoutResp is what the consumer app receives back: the per-vendor orders
 // plus the checkout-level totals.
@@ -347,13 +400,4 @@ type CheckoutResp struct {
 	TotalKobo           int64       `json:"total_kobo"`
 }
 
-// ConfirmDeliveryReq is the body for POST /v1/orders/public/:id/confirm-delivery.
-type ConfirmDeliveryReq struct {
-	Email string `json:"email" validate:"required,email"`
-}
 
-// ReportMissingReq is the body for POST /v1/orders/public/:id/report-missing.
-type ReportMissingReq struct {
-	Email  string `json:"email"  validate:"required,email"`
-	Reason string `json:"reason" validate:"omitempty,max=1000"`
-}

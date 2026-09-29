@@ -118,14 +118,3 @@ func (h *Handler) searchParams(c *gin.Context) (service.SearchParams, bool) {
 	p.Offset, _ = strconv.Atoi(c.Query("offset"))
 	return p, true
 }
-
-// SearchCanonicalProducts godoc
-// GET /v1/catalogue/canonical-products/search?q= — vendor product form.
-func (h *Handler) SearchCanonicalProducts(c *gin.Context) {
-	resp, err := h.svc.SearchCanonicalProducts(c.Request.Context(), c.Query("q"))
-	if err != nil {
-		h.writeError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, resp)
-}

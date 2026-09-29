@@ -10,7 +10,7 @@ import "encoding/json"
 type CreateStoreReq struct {
 	Name         string  `json:"name"          validate:"required,min=2,max=200"`
 	Slug         string  `json:"slug"          validate:"required,min=2,max=40"`
-	Category     string  `json:"category"      validate:"required,oneof=fashion beauty food electronics home health sports books auto kids jewelry digital agriculture art other"`
+	Category     string  `json:"category"      validate:"required,oneof=fashion beauty food electronics home health sports books auto kids jewelry digital agriculture art other groceries thrift"`
 	Currency     string  `json:"currency"      validate:"required,oneof=NGN USD"`
 	TeamSize     *string `json:"team_size"     validate:"omitempty,oneof=solo 2-10 11-50 51-200 200+"`
 	SupportPhone *string `json:"support_phone" validate:"omitempty,min=7,max=20"`
@@ -32,37 +32,109 @@ type UpdateStoreReq struct {
 	State           *string         `json:"state"            validate:"omitempty,max=100"`
 	MarketID        *string         `json:"market_id"        validate:"omitempty,uuid"`
 	ThemeConfig     json.RawMessage `json:"theme_config"` // raw JSON, stored as JSONB
+
+	// Delivery — a vendor-set flat fee charged on physical orders, waived
+	// above FreeDeliveryThresholdKobo or for all-digital carts. Both
+	// int64-typed and nil-checked with a pointer, not a bare 0 default, so
+	// "explicitly set to free (0)" is distinguishable from "not sent" and
+	// won't clobber an existing value on an unrelated PATCH.
+	DeliveryFeeKobo           *int64 `json:"delivery_fee_kobo"            validate:"omitempty,min=0"`
+	FreeDeliveryThresholdKobo *int64 `json:"free_delivery_threshold_kobo" validate:"omitempty,min=0"`
 }
 
 // StoreResp is returned for any store read or write operation.
 type StoreResp struct {
-	ID                 string          `json:"id"`
-	VendorID           string          `json:"vendor_id"`
-	Name               string          `json:"name"`
-	Slug               string          `json:"slug"`
-	Category           string          `json:"category"`
-	Currency           string          `json:"currency"`
-	TeamSize           *string         `json:"team_size,omitempty"`
-	StaffRange         *string         `json:"staff_range,omitempty"`
-	Tagline            *string         `json:"tagline,omitempty"`
-	LogoURL            *string         `json:"logo_url,omitempty"`
-	HeroImageURL       *string         `json:"hero_image_url,omitempty"`
-	SiteDescription    *string         `json:"site_description,omitempty"`
-	SocialLinks        json.RawMessage `json:"social_links,omitempty"`
-	SupportPhone       *string         `json:"support_phone,omitempty"`
-	Address            *string         `json:"address,omitempty"`
-	City               *string         `json:"city,omitempty"`
-	State              *string         `json:"state,omitempty"`
-	MarketID           *string         `json:"market_id,omitempty"`
-	MarketName         *string         `json:"market_name,omitempty"`
-	CustomDomain       *string         `json:"custom_domain,omitempty"`
-	CustomDomainStatus string          `json:"custom_domain_status,omitempty"`
-	ThemeConfig        json.RawMessage `json:"theme_config,omitempty"` // raw JSON
-	IsActive           bool            `json:"is_active"`
-	CreatedAt          string          `json:"created_at"`
-	// DeliveryOptions is populated on public store reads so checkout can
-	// render the vendor's own delivery choices. Omitted on vendor reads.
-	DeliveryOptions []DeliveryOptionResp `json:"delivery_options,omitempty"`
+	ID                        string          `json:"id"`
+	VendorID                  string          `json:"vendor_id"`
+	Name                      string          `json:"name"`
+	Slug                      string          `json:"slug"`
+	Category                  string          `json:"category"`
+	Currency                  string          `json:"currency"`
+	TeamSize                  *string         `json:"team_size,omitempty"`
+	StaffRange                *string         `json:"staff_range,omitempty"`
+	Tagline                   *string         `json:"tagline,omitempty"`
+	LogoURL                   *string         `json:"logo_url,omitempty"`
+	HeroImageURL              *string         `json:"hero_image_url,omitempty"`
+	SiteDescription           *string         `json:"site_description,omitempty"`
+	SocialLinks               json.RawMessage `json:"social_links,omitempty"`
+	SupportPhone              *string         `json:"support_phone,omitempty"`
+	Address                   *string         `json:"address,omitempty"`
+	City                      *string         `json:"city,omitempty"`
+	State                     *string         `json:"state,omitempty"`
+	MarketID                  *string         `json:"market_id,omitempty"`
+	MarketName                *string         `json:"market_name,omitempty"`
+	CustomDomain              *string         `json:"custom_domain,omitempty"`
+	CustomDomainStatus        string          `json:"custom_domain_status,omitempty"`
+	ThemeConfig               json.RawMessage `json:"theme_config,omitempty"` // raw JSON
+	DeliveryFeeKobo           int64           `json:"delivery_fee_kobo"`
+	FreeDeliveryThresholdKobo int64           `json:"free_delivery_threshold_kobo"`
+	IsActive                  bool            `json:"is_active"`
+	CreatedAt                 string          `json:"created_at"`
+}
+
+// StoreSearchReq is the query params for GET /v1/storefront/public/stores/search.
+type StoreSearchReq struct {
+	Q        *string  `form:"q"`
+	Category *string  `form:"category" validate:"omitempty,oneof=fashion beauty food electronics home health sports books auto kids jewelry digital agriculture art other groceries thrift"`
+	Lat      *float64 `form:"lat"      validate:"omitempty,min=-90,max=90"`
+	Lng      *float64 `form:"lng"      validate:"omitempty,min=-180,max=180"`
+	RadiusKm *float64 `form:"radius_km" validate:"omitempty,min=0"`
+	MarketID *string  `form:"market_id" validate:"omitempty,uuid"`
+	Limit    int      `form:"limit"`
+	Offset   int      `form:"offset"`
+}
+
+// StoreSearchResp is a single store result from the search endpoint.
+type StoreSearchResp struct {
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	Slug         string   `json:"slug"`
+	Category     string   `json:"category"`
+	Tagline      *string  `json:"tagline,omitempty"`
+	LogoURL      *string  `json:"logo_url,omitempty"`
+	HeroImageURL *string  `json:"hero_image_url,omitempty"`
+	Address      *string  `json:"address,omitempty"`
+	City         *string  `json:"city,omitempty"`
+	State        *string  `json:"state,omitempty"`
+	MarketID     *string  `json:"market_id,omitempty"`
+	MarketName   *string  `json:"market_name,omitempty"`
+	DistanceKm   *float64 `json:"distance_km,omitempty"`
+}
+
+// StoreSearchListResp wraps a page of search results with pagination info,
+// so the client can prefetch the next page before the user scrolls to it.
+//
+// MatchType/RemainingQuery expose the query-parsing SearchStores already
+// does internally to filter its own results — the consumer app's product
+// search reuses this same call to resolve which stores are eligible
+// (a named vendor, a named market, or the nearest N by distance) before
+// ever calling catalogue's cross-vendor product search. See matchVendor,
+// matchMarket, matchCity, stripMatchedPhrase.
+type StoreSearchListResp struct {
+	Stores  []StoreSearchResp `json:"stores"`
+	HasMore bool              `json:"has_more"`
+	// MatchType is "vendor" | "market" | "city" | "distance" | "none".
+	MatchType       string  `json:"match_type"`
+	MatchedStoreID  *string `json:"matched_store_id,omitempty"`
+	MatchedMarketID *string `json:"matched_market_id,omitempty"`
+	// RemainingQuery is Q with the matched vendor/market/city phrase (and a
+	// leading connector word, if any) stripped out — the product term(s)
+	// left over, safe to pass to a product-name search.
+	RemainingQuery string `json:"remaining_query"`
+}
+
+// MarketReq is the query params for GET /v1/storefront/public/markets.
+type MarketReq struct {
+	State *string `form:"state"`
+	City  *string `form:"city"`
+}
+
+// MarketResp is a single major market (e.g. Balogun Market).
+type MarketResp struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	City  string `json:"city"`
+	State string `json:"state"`
 }
 
 // SlugCheckResp is returned by GET /v1/storefront/slugs/check.
@@ -147,13 +219,6 @@ type FieldError struct {
 
 // ── Markets ───────────────────────────────────────────────────────────────────
 
-// MarketResp is a single market in GET /v1/storefront/public/markets.
-type MarketResp struct {
-	ID    string `json:"id"`
-	Name  string `json:"name"`
-	City  string `json:"city"`
-	State string `json:"state"`
-}
 
 // StoreSearchResult is a single store in a public search response. It is a
 // trimmed StoreResp — enough for a result card, no private fields.
@@ -172,17 +237,6 @@ type StoreSearchResult struct {
 	MarketName *string `json:"market_name,omitempty"`
 }
 
-// StoreSearchResp is returned by GET /v1/storefront/public/stores/search.
-// MatchType tells the client which tier resolved the query so it can word the
-// results header: a named vendor, a named market, a city, or no match.
-type StoreSearchResp struct {
-	Stores          []StoreSearchResult `json:"stores"`
-	HasMore         bool                `json:"has_more"`
-	MatchType       string              `json:"match_type"`
-	MatchedStoreID  *string             `json:"matched_store_id,omitempty"`
-	MatchedMarketID *string             `json:"matched_market_id,omitempty"`
-	RemainingQuery  string              `json:"remaining_query"`
-}
 
 // ── Delivery options ──────────────────────────────────────────────────────────
 

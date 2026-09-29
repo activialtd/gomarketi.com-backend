@@ -161,7 +161,7 @@ func run(log zerolog.Logger) error {
 
 	r := gin.New()
 	allowedOrigins := viper.GetStringSlice("ALLOWED_ORIGINS")
-	handler.Register(r, h, log, allowedOrigins)
+	handler.Register(r, h, log, allowedOrigins, db)
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
 	port := viper.GetString("PORT")

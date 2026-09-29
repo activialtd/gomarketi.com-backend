@@ -43,14 +43,23 @@ func NewMailgunClient(cfg MailgunConfig) (*MailgunClient, error) {
 
 // SendOTP sends a verification code email to the given address.
 func (m *MailgunClient) SendOTP(ctx context.Context, to, otp string) error {
+	return m.sendCode(ctx, to, "Your GoMarket verification code", otpEmailText(otp), otpEmailHTML(otp))
+}
+
+// SendPasswordReset sends a password reset code email to the given address.
+func (m *MailgunClient) SendPasswordReset(ctx context.Context, to, otp string) error {
+	return m.sendCode(ctx, to, "Reset your GoMarket password", resetEmailText(otp), resetEmailHTML(otp))
+}
+
+func (m *MailgunClient) sendCode(ctx context.Context, to, subject, text, html string) error {
 	endpoint := fmt.Sprintf("https://api.mailgun.net/v3/%s/messages", m.domain)
 
 	body := url.Values{}
 	body.Set("from", m.from)
 	body.Set("to", to)
-	body.Set("subject", "Your GoMarket verification code")
-	body.Set("text", otpEmailText(otp))
-	body.Set("html", otpEmailHTML(otp))
+	body.Set("subject", subject)
+	body.Set("text", text)
+	body.Set("html", html)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint,
 		strings.NewReader(body.Encode()))
@@ -91,6 +100,27 @@ func otpEmailHTML(otp string) string {
     <span style="font-size:36px;font-weight:700;letter-spacing:8px;color:#1a1a1a;">%s</span>
   </div>
   <p style="font-size:12px;color:#999;">This code expires in 10 minutes. Do not share it with anyone.</p>
+</body>
+</html>`, otp)
+}
+
+func resetEmailText(otp string) string {
+	return fmt.Sprintf(
+		"Your GoMarket password reset code is: %s\n\nThis code expires in 10 minutes.\nIf you didn't request this, ignore this email — your password won't be changed.",
+		otp,
+	)
+}
+
+func resetEmailHTML(otp string) string {
+	return fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<body style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px 16px;">
+  <h2 style="color:#1a1a1a;">Reset your GoMarket password</h2>
+  <p style="font-size:14px;color:#555;">Use the code below to reset your password.</p>
+  <div style="background:#f5f5f5;border-radius:8px;padding:24px;text-align:center;margin:24px 0;">
+    <span style="font-size:36px;font-weight:700;letter-spacing:8px;color:#1a1a1a;">%s</span>
+  </div>
+  <p style="font-size:12px;color:#999;">This code expires in 10 minutes. If you didn't request this, ignore this email — your password won't be changed.</p>
 </body>
 </html>`, otp)
 }

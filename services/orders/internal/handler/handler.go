@@ -55,18 +55,15 @@ func (h *Handler) callerStoreID(c *gin.Context) (uuid.UUID, bool) {
 	return storeID, true
 }
 
-// callerID is the signed-in user, from the gateway's X-User-ID header. Used
-// by the buyer-facing routes, which are scoped to a person rather than to a
-// store.
-func (h *Handler) callerID(c *gin.Context) (uuid.UUID, bool) {
+// callerUserID reads the authenticated caller's user ID — buyer or vendor,
+// unlike callerStoreID which is vendor-only. Used by the buyer-facing
+// "my orders" routes, which are gated by RequireUser() but not
+// callerStoreID (a buyer has no store).
+func (h *Handler) callerUserID(c *gin.Context) (uuid.UUID, bool) {
 	raw := c.GetString(middleware.CtxKeyUserID)
-	if raw == "" {
-		c.JSON(http.StatusUnauthorized, dto.ErrorResp{Error: "authentication required"})
-		return uuid.UUID{}, false
-	}
 	id, err := uuid.Parse(raw)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, dto.ErrorResp{Error: "invalid user id"})
+		c.JSON(http.StatusUnauthorized, dto.ErrorResp{Error: "authentication required"})
 		return uuid.UUID{}, false
 	}
 	return id, true

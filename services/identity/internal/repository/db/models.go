@@ -80,6 +80,11 @@ type VendorProfile struct {
 	ReferralCode    sql.NullString `db:"referral_code"`
 	CreatedAt       time.Time      `db:"created_at"`
 	UpdatedAt       time.Time      `db:"updated_at"`
+
+	PaystackCustomerCode     sql.NullString `db:"paystack_customer_code"`
+	PaystackDVAAccountNumber sql.NullString `db:"paystack_dva_account_number"`
+	PaystackDVABankName      sql.NullString `db:"paystack_dva_bank_name"`
+	PaystackDVAAccountName   sql.NullString `db:"paystack_dva_account_name"`
 }
 
 // VendorBank mirrors vendor_banks.

@@ -1,7 +1,10 @@
 package handler
 
 import (
+	"net/http"
+
 	"github.com/gin-gonic/gin"
+	"github.com/jmoiron/sqlx"
 	"github.com/rs/zerolog"
 
 	"github.com/activialtd/gomarketi.com-backend/shared/pkg/middleware"
@@ -9,9 +12,15 @@ import (
 
 // Register mounts all catalogue routes onto r.
 // All routes require an authenticated vendor with at least one store (injected by Envoy).
-func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []string) {
+func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []string, db *sqlx.DB) {
+	// Health check — load balancer target group probe. Registered before any
+	// middleware so it never depends on CORS/auth/recovery being healthy.
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+
 	r.Use(
-		middleware.Recovery(log),
+		middleware.Recovery(log, db, "catalogue"),
 		middleware.RequestID(),
 		middleware.RequestLogger(log),
 		middleware.CORS(allowedOrigins),
@@ -24,6 +33,7 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 	pub.GET("/search", h.Search)
 	pub.GET("/products/search", h.SearchProducts)
 	pub.GET("/products", h.ListPublicProductsByQuery)
+	pub.GET("/products/search", h.SearchPublicProducts) // cross-vendor — registered before the :product_id wildcard
 	pub.GET("/products/:product_id", h.GetPublicProductByID)
 	pub.GET("/categories", h.ListPublicCategories)
 	pub.GET("/collections", h.ListPublicCollections)
@@ -48,6 +58,9 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 		product.DELETE("", h.DeleteProduct)
 		product.POST("/publish", h.PublishProduct)
 		product.POST("/unpublish", h.UnpublishProduct)
+
+		// Canonical product typeahead for the create/edit product form
+		v1.GET("/canonical-products/search", h.SearchCanonicalProducts)
 
 		// Categories (MERCHANT.CATEGORIES dashboard section)
 		categories := v1.Group("/categories")

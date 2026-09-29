@@ -14,6 +14,9 @@ const (
 	OTPLength      = 6
 	OTPExpiry      = 10 * time.Minute
 	MaxOTPAttempts = 5
+
+	OTPPurposeLogin         = "login"
+	OTPPurposePasswordReset = "password_reset"
 )
 
 // Sentinel errors — the service layer maps these to AppErrors with HTTP codes.
@@ -44,6 +47,7 @@ type OTPSession struct {
 	Attempts     int
 	ExpiresAt    time.Time
 	UsedAt       *time.Time
+	Purpose      string
 }
 
 // ValidateForVerification checks all state invariants before a verify attempt.

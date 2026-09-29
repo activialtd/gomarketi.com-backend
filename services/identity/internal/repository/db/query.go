@@ -248,7 +248,8 @@ const getVendorProfileByUserID = `
 SELECT id, user_id, business_name, business_type, employee_range, year_established,
        social_url, bvn, nin, tin, cac_number, cac_document_url,
        id_type, id_number, id_document_url, selfie_url,
-       kyc_status, onboarding_step, is_active, referral_code, created_at, updated_at
+       kyc_status, onboarding_step, is_active, referral_code, created_at, updated_at,
+       paystack_customer_code, paystack_dva_account_number, paystack_dva_bank_name, paystack_dva_account_name
 FROM vendor_profiles WHERE user_id = $1`
 
 func (q *Queries) GetVendorProfileByUserID(ctx context.Context, userID uuid.UUID) (VendorProfile, error) {
@@ -263,7 +264,8 @@ ON CONFLICT (user_id) DO NOTHING
 RETURNING id, user_id, business_name, business_type, employee_range, year_established,
           social_url, bvn, nin, tin, cac_number, cac_document_url,
           id_type, id_number, id_document_url, selfie_url,
-          kyc_status, onboarding_step, is_active, referral_code, created_at, updated_at`
+          kyc_status, onboarding_step, is_active, referral_code, created_at, updated_at,
+          paystack_customer_code, paystack_dva_account_number, paystack_dva_bank_name, paystack_dva_account_name`
 
 func (q *Queries) CreateVendorProfile(ctx context.Context, userID uuid.UUID) (VendorProfile, error) {
 	row := q.db.QueryRowContext(ctx, createVendorProfile, userID)
@@ -293,7 +295,8 @@ WHERE id = $1
 RETURNING id, user_id, business_name, business_type, employee_range, year_established,
           social_url, bvn, nin, tin, cac_number, cac_document_url,
           id_type, id_number, id_document_url, selfie_url,
-          kyc_status, onboarding_step, is_active, referral_code, created_at, updated_at`
+          kyc_status, onboarding_step, is_active, referral_code, created_at, updated_at,
+          paystack_customer_code, paystack_dva_account_number, paystack_dva_bank_name, paystack_dva_account_name`
 
 func (q *Queries) UpdateVendorBusiness(ctx context.Context, arg UpdateVendorBusinessParams) (VendorProfile, error) {
 	row := q.db.QueryRowContext(ctx, updateVendorBusiness,
@@ -336,7 +339,8 @@ WHERE id = $1
 RETURNING id, user_id, business_name, business_type, employee_range, year_established,
           social_url, bvn, nin, tin, cac_number, cac_document_url,
           id_type, id_number, id_document_url, selfie_url,
-          kyc_status, onboarding_step, is_active, referral_code, created_at, updated_at`
+          kyc_status, onboarding_step, is_active, referral_code, created_at, updated_at,
+          paystack_customer_code, paystack_dva_account_number, paystack_dva_bank_name, paystack_dva_account_name`
 
 func (q *Queries) UpdateVendorKYC(ctx context.Context, arg UpdateVendorKYCParams) (VendorProfile, error) {
 	row := q.db.QueryRowContext(ctx, updateVendorKYC,
@@ -355,8 +359,39 @@ func scanVendor(row *sql.Row) (VendorProfile, error) {
 		&v.CacNumber, &v.CacDocumentUrl, &v.IdType, &v.IdNumber,
 		&v.IdDocumentUrl, &v.SelfieUrl, &v.KycStatus, &v.OnboardingStep,
 		&v.IsActive, &v.ReferralCode, &v.CreatedAt, &v.UpdatedAt,
+		&v.PaystackCustomerCode, &v.PaystackDVAAccountNumber,
+		&v.PaystackDVABankName, &v.PaystackDVAAccountName,
 	)
 	return v, err
+}
+
+type UpdateVendorPaystackAccountParams struct {
+	ID            uuid.UUID
+	CustomerCode  string
+	AccountNumber string
+	BankName      string
+	AccountName   string
+}
+
+const updateVendorPaystackAccount = `
+UPDATE vendor_profiles SET
+    paystack_customer_code      = $2,
+    paystack_dva_account_number = $3,
+    paystack_dva_bank_name      = $4,
+    paystack_dva_account_name   = $5,
+    updated_at = now()
+WHERE id = $1
+RETURNING id, user_id, business_name, business_type, employee_range, year_established,
+          social_url, bvn, nin, tin, cac_number, cac_document_url,
+          id_type, id_number, id_document_url, selfie_url,
+          kyc_status, onboarding_step, is_active, referral_code, created_at, updated_at,
+          paystack_customer_code, paystack_dva_account_number, paystack_dva_bank_name, paystack_dva_account_name`
+
+func (q *Queries) UpdateVendorPaystackAccount(ctx context.Context, arg UpdateVendorPaystackAccountParams) (VendorProfile, error) {
+	row := q.db.QueryRowContext(ctx, updateVendorPaystackAccount,
+		arg.ID, arg.CustomerCode, arg.AccountNumber, arg.BankName, arg.AccountName,
+	)
+	return scanVendor(row)
 }
 
 // ── vendor_banks ──────────────────────────────────────────────────────────────

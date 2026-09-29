@@ -61,7 +61,7 @@ jobs:
               echo "services=$ARRAY" >> $GITHUB_OUTPUT
             fi
           else
-            echo "services=${{ steps.filter.outputs.changes }}" >> $GITHUB_OUTPUT
+            echo 'services=${{ steps.filter.outputs.changes }}' >> $GITHUB_OUTPUT
           fi
 
   # ── Deploy changed services to the matching Railway environment ────────────

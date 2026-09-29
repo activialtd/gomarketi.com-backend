@@ -76,6 +76,16 @@ func run(log zerolog.Logger) error {
 				return
 			}
 
+			// Admin routes are pass-through too — admin-api mints and verifies
+			// its own RS256 tokens (distinct is_admin/admin_role claims) entirely
+			// independently of the buyer/vendor Claims shape this gateway checks
+			// below, and doesn't need the X-User-ID/X-Is-Vendor/X-Store-IDs
+			// headers that check injects.
+			if strings.HasPrefix(r.URL.Path, "/v1/admin/") {
+				proxy.ServeHTTP(w, r)
+				return
+			}
+
 			// Public storefront routes (e.g. store lookup by slug) require no auth.
 			if strings.HasPrefix(r.URL.Path, "/v1/storefront/public/") {
 				proxy.ServeHTTP(w, r)
@@ -94,8 +104,8 @@ func run(log zerolog.Logger) error {
 				return
 			}
 
-			// WebSocket and EventSource cannot send custom headers — accept token
-			// as ?token= query param and promote it to Authorization before auth.
+			// Browser WebSocket cannot send custom headers — accept token as
+			// ?token= query param and promote it to Authorization before auth.
 			isWS := strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
 			if isWS && r.Header.Get("Authorization") == "" {
 				if tok := r.URL.Query().Get("token"); tok != "" {
@@ -349,7 +359,12 @@ func needsStoreIDs(prefix string) bool {
 		strings.HasPrefix(prefix, "/v1/orders/") ||
 		strings.HasPrefix(prefix, "/v1/crm/") ||
 		strings.HasPrefix(prefix, "/v1/analytics/") ||
-		strings.HasPrefix(prefix, "/v1/wallet/")
+		strings.HasPrefix(prefix, "/v1/wallet/") ||
+		// identity's vendor/staff endpoints (staff.go's callerStoreID) need
+		// this too — missing here meant every staff list/create/update/delete
+		// call always 403'd with "no store associated with this account",
+		// regardless of plan, for every vendor, unconditionally.
+		strings.HasPrefix(prefix, "/v1/identity/")
 }
 
 // ── Upstream loading ──────────────────────────────────────────────────────────
@@ -374,6 +389,7 @@ func loadUpstreams() (map[string]string, error) {
 		"/v1/crm/":       "UPSTREAM_ORDERS",
 		"/v1/analytics/": "UPSTREAM_ORDERS",
 		"/v1/wallet/":    "UPSTREAM_ORDERS",
+		"/v1/admin/":     "UPSTREAM_ADMIN",
 	}
 
 	result := map[string]string{}

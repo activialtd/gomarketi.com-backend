@@ -22,8 +22,7 @@ func (h *Handler) Register(c *gin.Context) {
 		return
 	}
 
-	h.setRefreshCookie(c, rawToken)
-	c.JSON(http.StatusCreated, resp)
+	h.respondWithAuth(c, http.StatusCreated, resp, rawToken)
 }
 
 // Login godoc
@@ -40,8 +39,40 @@ func (h *Handler) Login(c *gin.Context) {
 		return
 	}
 
-	h.setRefreshCookie(c, rawToken)
+	h.respondWithAuth(c, http.StatusOK, resp, rawToken)
+}
+
+// ForgotPassword godoc
+// POST /v1/auth/password/forgot
+func (h *Handler) ForgotPassword(c *gin.Context) {
+	var req dto.ForgotPasswordReq
+	if !h.bind(c, &req) {
+		return
+	}
+
+	resp, err := h.svc.RequestPasswordReset(c.Request.Context(), req)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+
 	c.JSON(http.StatusOK, resp)
+}
+
+// ResetPassword godoc
+// POST /v1/auth/password/reset
+func (h *Handler) ResetPassword(c *gin.Context) {
+	var req dto.ResetPasswordReq
+	if !h.bind(c, &req) {
+		return
+	}
+
+	if err := h.svc.ResetPassword(c.Request.Context(), req); err != nil {
+		h.writeError(c, err)
+		return
+	}
+
+	c.Status(http.StatusNoContent)
 }
 
 // StaffLogin godoc

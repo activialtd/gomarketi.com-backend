@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jmoiron/sqlx"
 	"github.com/rs/zerolog"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/email"
 	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/sse"
 	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
+	"github.com/activialtd/gomarketi.com-backend/shared/pkg/middleware"
 )
 
 type OrdersService struct {
@@ -24,6 +26,17 @@ type OrdersService struct {
 	log    zerolog.Logger
 	broker *sse.Broker
 }
+
+// orderColumns is the shared SELECT list for every query that scans into
+// orderRow — keeps the hub/escrow columns and the wallet_status subquery
+// (escrow state — see EscrowStatus in rowToOrder) in exactly one place
+// instead of duplicated across five near-identical queries.
+const orderColumns = `id, store_id, customer_id, customer_name, customer_email, status,
+	total_kobo, delivery_fee_kobo, delivery_address, payment_reference,
+	hub_received_at, dispatched_at, delivered_at, delivery_confirmed_at, cancelled_reason,
+	dispute_status, dispute_reason, disputed_at,
+	created_at, updated_at,
+	(SELECT wt.status FROM wallet_transactions wt WHERE wt.order_id = orders.id LIMIT 1) AS wallet_status`
 
 func New(db *sqlx.DB, log zerolog.Logger, broker *sse.Broker) *OrdersService {
 	return &OrdersService{db: db, log: log, broker: broker}
@@ -62,9 +75,7 @@ func (s *OrdersService) ListOrders(ctx context.Context, storeID uuid.UUID, page,
 
 	listArgs := append(args, perPage, offset)
 	rows, err := s.db.QueryxContext(ctx,
-		`SELECT id, store_id, customer_id, customer_name, customer_email, status, total_kobo, delivery_address, delivery_fee_kobo, delivery_option_title,
-		       escrow_status, hub_received_at, dispatched_at, delivered_at, delivery_confirmed_at, dispute_status, dispute_reason, disputed_at,
-		       created_at, updated_at `+
+		`SELECT `+orderColumns+` `+
 			base+fmt.Sprintf(` ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, i, i+1),
 		listArgs...)
 	if err != nil {
@@ -89,10 +100,7 @@ func (s *OrdersService) ListOrders(ctx context.Context, storeID uuid.UUID, page,
 func (s *OrdersService) GetPublicOrder(ctx context.Context, orderID uuid.UUID, email string) (dto.OrderResp, error) {
 	var r orderRow
 	err := s.db.QueryRowxContext(ctx, `
-		SELECT id, store_id, customer_id, customer_name, customer_email,
-		       status, total_kobo, delivery_address, delivery_fee_kobo, delivery_option_title,
-		       escrow_status, hub_received_at, dispatched_at, delivered_at, delivery_confirmed_at, dispute_status, dispute_reason, disputed_at,
-		       created_at, updated_at
+		SELECT `+orderColumns+`
 		FROM orders WHERE id=$1 AND LOWER(customer_email)=LOWER($2)`, orderID, email).StructScan(&r)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.OrderResp{}, apperrors.NotFound("order not found")
@@ -105,13 +113,393 @@ func (s *OrdersService) GetPublicOrder(ctx context.Context, orderID uuid.UUID, e
 	return o, nil
 }
 
+// resolveUserEmail looks up the authenticated caller's own email directly
+// from the shared users table (owned by identity service, read here the
+// same way every other cross-service lookup in this codebase works — no
+// internal HTTP call). Used so GetMyOrders/GetMyOrder scope strictly to the
+// caller's own email server-side, rather than trusting a client-supplied
+// one like the public tracking endpoints do.
+func (s *OrdersService) resolveUserEmail(ctx context.Context, userID uuid.UUID) (string, error) {
+	var email sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT email FROM users WHERE id=$1`, userID).Scan(&email)
+	if errors.Is(err, sql.ErrNoRows) || !email.Valid || email.String == "" {
+		return "", apperrors.NotFound("no email on file for this account")
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolve user email: %w", err)
+	}
+	return email.String, nil
+}
+
+// GetMyOrders returns every order placed by the authenticated buyer,
+// grouped client-side by payment_reference into batches (a multi-vendor
+// cart checkout) — mirrors admin-api's batch view, just scoped to one buyer.
+func (s *OrdersService) GetMyOrders(ctx context.Context, userID uuid.UUID) ([]dto.OrderResp, error) {
+	email, err := s.resolveUserEmail(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := s.db.QueryxContext(ctx, `
+		SELECT `+orderColumns+`
+		FROM orders WHERE LOWER(customer_email)=LOWER($1) ORDER BY created_at DESC`, email)
+	if err != nil {
+		return nil, fmt.Errorf("list my orders: %w", err)
+	}
+	defer rows.Close()
+
+	orders := make([]dto.OrderResp, 0)
+	for rows.Next() {
+		var r orderRow
+		if err := rows.StructScan(&r); err != nil {
+			return nil, err
+		}
+		o := rowToOrder(r)
+		o.Items = s.loadItems(ctx, r.ID)
+		orders = append(orders, o)
+	}
+	return orders, nil
+}
+
+// GetMyOrder returns a single order, scoped to the authenticated buyer's own
+// (server-resolved) email — the same ownership model as GetMyOrders.
+func (s *OrdersService) GetMyOrder(ctx context.Context, userID uuid.UUID, orderID uuid.UUID) (dto.OrderResp, error) {
+	email, err := s.resolveUserEmail(ctx, userID)
+	if err != nil {
+		return dto.OrderResp{}, err
+	}
+	return s.GetPublicOrder(ctx, orderID, email)
+}
+
+// ConfirmDelivery is called by the buyer once their (possibly partial —
+// see batch dispatch) order has physically arrived, gated by email match —
+// the same trust model GetPublicOrder already uses, since orders service
+// has no real per-buyer JWT identity wired through checkout today. This is
+// the trigger that releases the vendor's held wallet credit: it only
+// succeeds from status='shipped' (GoMarketi has actually dispatched the
+// order from the hub — see the admin batch-dispatch flow), so a buyer can
+// never release funds for something that was never sent.
+func (s *OrdersService) ConfirmDelivery(ctx context.Context, orderID uuid.UUID, email string) (dto.OrderResp, error) {
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return dto.OrderResp{}, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var status string
+	err = tx.QueryRowContext(ctx,
+		`SELECT status FROM orders WHERE id=$1 AND LOWER(customer_email)=LOWER($2) FOR UPDATE`,
+		orderID, email,
+	).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return dto.OrderResp{}, apperrors.NotFound("order not found")
+	}
+	if err != nil {
+		return dto.OrderResp{}, fmt.Errorf("lock order: %w", err)
+	}
+	if status != string(dto.OrderStatusShipped) {
+		return dto.OrderResp{}, apperrors.BadRequest(
+			"this order can't be marked received yet — it hasn't been dispatched")
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE orders SET status=$1, delivered_at=NOW(), delivery_confirmed_at=NOW(), updated_at=NOW()
+		WHERE id=$2`,
+		dto.OrderStatusDelivered, orderID,
+	); err != nil {
+		return dto.OrderResp{}, fmt.Errorf("mark delivered: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE wallet_transactions SET status='completed', released_at=NOW()
+		WHERE order_id=$1 AND status='pending'`,
+		orderID,
+	); err != nil {
+		return dto.OrderResp{}, fmt.Errorf("release escrow: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return dto.OrderResp{}, fmt.Errorf("commit: %w", err)
+	}
+
+	return s.GetPublicOrder(ctx, orderID, email)
+}
+
+// ReportMissing lets the buyer flag one order within a batch as never having
+// arrived, even though it was checked in at the hub and dispatched — the gap
+// the no-show path doesn't cover, since that only ever fires BEFORE dispatch.
+// Deliberately does not touch order status (fulfillment tracking stays
+// accurate); dispute_status is a parallel flag. Reporting a dispute is what
+// blocks releaseOverdueEscrow from paying the vendor while it's open — see
+// that function's WHERE clause.
+func (s *OrdersService) ReportMissing(ctx context.Context, orderID uuid.UUID, email string, reason *string) (dto.OrderResp, error) {
+	var status string
+	var disputeStatus sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT status, dispute_status FROM orders WHERE id=$1 AND LOWER(customer_email)=LOWER($2)`,
+		orderID, email,
+	).Scan(&status, &disputeStatus)
+	if errors.Is(err, sql.ErrNoRows) {
+		return dto.OrderResp{}, apperrors.NotFound("order not found")
+	}
+	if err != nil {
+		return dto.OrderResp{}, fmt.Errorf("load order: %w", err)
+	}
+	if status != string(dto.OrderStatusShipped) && status != string(dto.OrderStatusDelivered) {
+		return dto.OrderResp{}, apperrors.BadRequest(
+			"this order hasn't been dispatched yet — there's nothing to report as missing")
+	}
+	if disputeStatus.String == string(dto.DisputeReported) {
+		// Already reported — idempotent, not an error.
+		return s.getOrderByID(ctx, orderID)
+	}
+	if disputeStatus.Valid {
+		return dto.OrderResp{}, apperrors.BadRequest("this order's dispute has already been resolved")
+	}
+
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE orders SET dispute_status='reported', dispute_reason=$1, disputed_at=NOW(), updated_at=NOW()
+		WHERE id=$2`,
+		reason, orderID,
+	); err != nil {
+		return dto.OrderResp{}, fmt.Errorf("report missing: %w", err)
+	}
+
+	return s.getOrderByID(ctx, orderID)
+}
+
+// DisputeRefund resolves a reported dispute by refunding the buyer for real —
+// the claw-back path the escrow model was missing entirely: until this
+// existed, an admin had no way to reverse money for an order already past
+// dispatch. Called by admin-api the same way NoShowRefund is (the only step
+// needing orders service's own Paystack secret key). Reverses the vendor's
+// wallet credit regardless of whether it was still held or already released
+// — if the vendor already withdrew it, their balance goes negative, which is
+// the correct signal that they now owe the platform for this reversal.
+func (s *OrdersService) DisputeRefund(ctx context.Context, orderID uuid.UUID) (dto.OrderResp, error) {
+	var status, disputeStatus, paymentRef sql.NullString
+	var totalKobo int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT status, dispute_status, payment_reference, total_kobo FROM orders WHERE id=$1`, orderID,
+	).Scan(&status, &disputeStatus, &paymentRef, &totalKobo)
+	if errors.Is(err, sql.ErrNoRows) {
+		return dto.OrderResp{}, apperrors.NotFound("order not found")
+	}
+	if err != nil {
+		return dto.OrderResp{}, fmt.Errorf("load order: %w", err)
+	}
+	if disputeStatus.String == string(dto.DisputeRefunded) {
+		// Already handled — return current state rather than refunding twice.
+		return s.getOrderByID(ctx, orderID)
+	}
+	if disputeStatus.String != string(dto.DisputeReported) {
+		return dto.OrderResp{}, apperrors.BadRequest("order has no reported dispute to refund")
+	}
+	if !paymentRef.Valid || paymentRef.String == "" {
+		return dto.OrderResp{}, apperrors.Internal(fmt.Errorf("order %s has no payment_reference to refund", orderID))
+	}
+
+	refundRef, err := s.refundPaystackTransaction(ctx, paymentRef.String, totalKobo)
+	if err != nil {
+		return dto.OrderResp{}, err
+	}
+
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return dto.OrderResp{}, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE orders SET status=$1, cancelled_reason=$2, refund_reference=$3, refunded_at=NOW(),
+		                   dispute_status=$4, dispute_resolved_at=NOW(), updated_at=NOW()
+		WHERE id=$5`,
+		dto.OrderStatusCancelled, "buyer_reported_not_received", refundRef, dto.DisputeRefunded, orderID,
+	); err != nil {
+		return dto.OrderResp{}, fmt.Errorf("mark cancelled: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE wallet_transactions SET status='failed' WHERE order_id=$1 AND status IN ('pending','completed')`,
+		orderID,
+	); err != nil {
+		return dto.OrderResp{}, fmt.Errorf("reverse wallet credit: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return dto.OrderResp{}, fmt.Errorf("commit: %w", err)
+	}
+
+	return s.getOrderByID(ctx, orderID)
+}
+
+// NoShowRefund cancels one order in a batch and refunds the buyer for that
+// portion, because its vendor didn't deliver to the GoMarketi hub in time
+// for dispatch. Called by admin-api's batch-dispatch action (the one
+// internal service-to-service call in the hub/escrow feature, since this is
+// the only step that needs orders service's own Paystack secret key —
+// everything else admin-api does as a direct DB write). Idempotent: calling
+// it twice on an already-cancelled order is a no-op, not a double refund.
+func (s *OrdersService) NoShowRefund(ctx context.Context, orderID uuid.UUID) (dto.OrderResp, error) {
+	return s.cancelAndRefund(ctx, orderID, "vendor_no_show_at_dispatch")
+}
+
+// cancelAndRefund refunds the buyer, marks the order cancelled with the given
+// reason, and voids the vendor's pending wallet credit — the shared path
+// behind both a dispatch no-show and a vendor cancelling an order outright.
+// Idempotent: an already-cancelled order is returned untouched.
+func (s *OrdersService) cancelAndRefund(ctx context.Context, orderID uuid.UUID, reason string) (dto.OrderResp, error) {
+	var status, paymentRef sql.NullString
+	var totalKobo int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT status, payment_reference, total_kobo FROM orders WHERE id=$1`, orderID,
+	).Scan(&status, &paymentRef, &totalKobo)
+	if errors.Is(err, sql.ErrNoRows) {
+		return dto.OrderResp{}, apperrors.NotFound("order not found")
+	}
+	if err != nil {
+		return dto.OrderResp{}, fmt.Errorf("load order: %w", err)
+	}
+	if status.String == string(dto.OrderStatusCancelled) {
+		// Already handled — return the current state rather than refunding twice.
+		return s.getOrderByID(ctx, orderID)
+	}
+	if status.String == string(dto.OrderStatusShipped) || status.String == string(dto.OrderStatusDelivered) {
+		return dto.OrderResp{}, apperrors.BadRequest("order has already been dispatched — cancel it through a dispute instead")
+	}
+	if !paymentRef.Valid || paymentRef.String == "" {
+		return dto.OrderResp{}, apperrors.Internal(fmt.Errorf("order %s has no payment_reference to refund", orderID))
+	}
+
+	refundRef, err := s.refundPaystackTransaction(ctx, paymentRef.String, totalKobo)
+	if err != nil {
+		return dto.OrderResp{}, err
+	}
+
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return dto.OrderResp{}, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE orders SET status=$1, cancelled_reason=$2, refund_reference=$3, refunded_at=NOW(), updated_at=NOW()
+		WHERE id=$4`,
+		dto.OrderStatusCancelled, reason, refundRef, orderID,
+	); err != nil {
+		return dto.OrderResp{}, fmt.Errorf("mark cancelled: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE wallet_transactions SET status='failed' WHERE order_id=$1 AND status='pending'`,
+		orderID,
+	); err != nil {
+		return dto.OrderResp{}, fmt.Errorf("reverse wallet credit: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return dto.OrderResp{}, fmt.Errorf("commit: %w", err)
+	}
+
+	return s.getOrderByID(ctx, orderID)
+}
+
+// getOrderByID fetches an order by ID alone, no store or email scoping —
+// only used by internal flows (NoShowRefund) that have already authorized
+// the caller by other means.
+func (s *OrdersService) getOrderByID(ctx context.Context, orderID uuid.UUID) (dto.OrderResp, error) {
+	var r orderRow
+	err := s.db.QueryRowxContext(ctx, `SELECT `+orderColumns+` FROM orders WHERE id=$1`, orderID).StructScan(&r)
+	if errors.Is(err, sql.ErrNoRows) {
+		return dto.OrderResp{}, apperrors.NotFound("order not found")
+	}
+	if err != nil {
+		return dto.OrderResp{}, fmt.Errorf("get order by id: %w", err)
+	}
+	o := rowToOrder(r)
+	o.Items = s.loadItems(ctx, r.ID)
+	return o, nil
+}
+
+// escrowAutoReleaseWindow is how long a dispatched order can sit unconfirmed
+// before its vendor's held funds release automatically — the buyer-never-
+// confirms fallback. Matches the 7-day window agreed with the user.
+const escrowAutoReleaseWindow = 7 * 24 * time.Hour
+
+// StartAutoReleaseLoop runs forever (until ctx is cancelled), releasing any
+// order that's been dispatched for longer than escrowAutoReleaseWindow with
+// no buyer confirmation. Never blocks or panics the caller — matches the
+// "background goroutine, log and continue" shape used elsewhere in this
+// codebase (e.g. identity's Paystack DVA provisioning) since no cron/scheduler
+// infra exists anywhere in this backend.
+func (s *OrdersService) StartAutoReleaseLoop(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+	// Run once immediately on startup too, not just after the first tick.
+	s.releaseOverdueEscrow(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.releaseOverdueEscrow(ctx)
+		}
+	}
+}
+
+func (s *OrdersService) releaseOverdueEscrow(ctx context.Context) {
+	cutoff := time.Now().Add(-escrowAutoReleaseWindow)
+
+	// No explicit row locking here — the two UPDATEs below are each
+	// conditioned on the current status (status='shipped' /
+	// wallet_transactions.status='pending'), so a duplicate run (e.g. a
+	// second instance on the same tick) is a harmless no-op, not a
+	// double-release.
+	// dispute_status IS DISTINCT FROM 'reported' — an open "buyer says this
+	// never arrived" dispute must block auto-release; the vendor only gets
+	// paid automatically once that's resolved (refunded or dismissed) by an
+	// admin, or never was reported at all.
+	rows, err := s.db.QueryxContext(ctx, `
+		SELECT id FROM orders
+		WHERE status='shipped' AND dispatched_at < $1 AND delivery_confirmed_at IS NULL
+		  AND dispute_status IS DISTINCT FROM 'reported'`, cutoff)
+	if err != nil {
+		s.log.Warn().Err(err).Msg("escrow auto-release: query failed")
+		middleware.RecordBackgroundError(s.db, s.log, "orders", "escrow auto-release: query failed: "+err.Error(), nil)
+		return
+	}
+	var orderIDs []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err == nil {
+			orderIDs = append(orderIDs, id)
+		}
+	}
+	rows.Close()
+
+	for _, id := range orderIDs {
+		if _, err := s.db.ExecContext(ctx, `
+			UPDATE orders SET status=$1, delivered_at=NOW(), delivery_confirmed_at=NOW(), updated_at=NOW()
+			WHERE id=$2 AND status='shipped'`, dto.OrderStatusDelivered, id,
+		); err != nil {
+			s.log.Warn().Err(err).Str("order_id", id.String()).Msg("escrow auto-release: mark delivered failed")
+			middleware.RecordBackgroundError(s.db, s.log, "orders", "escrow auto-release: mark delivered failed: "+err.Error(),
+				map[string]any{"order_id": id.String()})
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, `
+			UPDATE wallet_transactions SET status='completed', released_at=NOW()
+			WHERE order_id=$1 AND status='pending'`, id,
+		); err != nil {
+			s.log.Warn().Err(err).Str("order_id", id.String()).Msg("escrow auto-release: release wallet failed")
+			middleware.RecordBackgroundError(s.db, s.log, "orders", "escrow auto-release: release wallet failed: "+err.Error(),
+				map[string]any{"order_id": id.String()})
+			continue
+		}
+		s.log.Info().Str("order_id", id.String()).Msg("escrow auto-released after 7-day window")
+	}
+}
+
 func (s *OrdersService) GetOrder(ctx context.Context, storeID uuid.UUID, orderID uuid.UUID) (dto.OrderResp, error) {
 	var r orderRow
 	err := s.db.QueryRowxContext(ctx, `
-		SELECT id, store_id, customer_id, customer_name, customer_email,
-		       status, total_kobo, delivery_address, delivery_fee_kobo, delivery_option_title,
-		       escrow_status, hub_received_at, dispatched_at, delivered_at, delivery_confirmed_at, dispute_status, dispute_reason, disputed_at,
-		       created_at, updated_at
+		SELECT `+orderColumns+`
 		FROM orders WHERE id=$1 AND store_id=$2`, orderID, storeID).StructScan(&r)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.OrderResp{}, apperrors.NotFound("order not found")
@@ -138,10 +526,7 @@ func (s *OrdersService) UpdateOrderStatus(ctx context.Context, storeID uuid.UUID
 			delivered_at  = CASE WHEN $1 = 'delivered' THEN COALESCE(delivered_at, NOW())  ELSE delivered_at  END,
 			updated_at = NOW()
 		WHERE id=$3 AND store_id=$4
-		RETURNING id, store_id, customer_id, customer_name, customer_email,
-		          status, total_kobo, delivery_address, delivery_fee_kobo, delivery_option_title,
-		          escrow_status, hub_received_at, dispatched_at, delivered_at, delivery_confirmed_at, dispute_status, dispute_reason, disputed_at,
-		       created_at, updated_at`,
+		RETURNING `+orderColumns,
 		req.Status, req.Note, orderID, storeID).StructScan(&r)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.OrderResp{}, apperrors.NotFound("order not found")
@@ -149,11 +534,19 @@ func (s *OrdersService) UpdateOrderStatus(ctx context.Context, storeID uuid.UUID
 	if err != nil {
 		return dto.OrderResp{}, fmt.Errorf("update status: %w", err)
 	}
-	// A cancelled order never earns the vendor anything: take the held
-	// credit back so it can't be withdrawn, and the buyer is owed a refund.
+
+	// A vendor cancelling a paid order must not leave the buyer's money with
+	// us and the vendor's credit sitting claimable. Refund the buyer and void
+	// the pending credit, the same way a no-show at dispatch is handled.
+	// Reported separately from the status change: the cancellation itself has
+	// already been recorded, so a refund failure must not undo it.
 	if req.Status == dto.OrderStatusCancelled {
-		if err := s.ReverseEscrow(ctx, orderID); err != nil {
-			s.log.Warn().Err(err).Str("order_id", orderID.String()).Msg("escrow reversal failed")
+		if _, refundErr := s.cancelAndRefund(ctx, orderID, "vendor_cancelled"); refundErr != nil {
+			s.log.Error().Err(refundErr).Str("order_id", orderID.String()).
+				Msg("cancelled order: refund and escrow reversal failed — needs manual settlement")
+			middleware.RecordBackgroundError(s.db, s.log, "orders",
+				"cancelled order refund failed: "+refundErr.Error(),
+				map[string]any{"order_id": orderID.String()})
 		}
 	}
 
@@ -175,6 +568,8 @@ func (s *OrdersService) UpdateOrderStatus(ctx context.Context, storeID uuid.UUID
 				custEmail, custName, oidStr, slug, name, statusVal,
 			); err != nil {
 				s.log.Warn().Err(err).Str("order_id", oidStr).Msg("status update email failed")
+				middleware.RecordBackgroundError(s.db, s.log, "orders", "status update email failed: "+err.Error(),
+					map[string]any{"order_id": oidStr})
 			}
 		}()
 	}
@@ -187,65 +582,298 @@ func (s *OrdersService) UpdateOrderStatus(ctx context.Context, storeID uuid.UUID
 // customerUUID derives a stable UUID from store+email so repeat buyers
 // collapse into a single CRM customer record instead of one row per order.
 // Storefront buyers aren't authenticated accounts, so email is the only
-// durable identity we have at checkout time.
+// durable identity we have at checkout time. Deliberately store-scoped: one
+// buyer gets a separate CRM identity per vendor, so this must be called once
+// per store, never hoisted above a multi-store loop.
 func customerUUID(storeID uuid.UUID, email string) uuid.UUID {
 	return uuid.NewSHA1(storeID, []byte(strings.ToLower(strings.TrimSpace(email))))
 }
 
-// resolveDeliveryFee decides what delivery actually costs for this order.
+// isUniqueViolation reports whether err is a PostgreSQL unique-constraint
+// violation (SQLSTATE 23505). This service connects via pgx (sqlx.Open("pgx", ...)),
+// so errors surface as *pgconn.PgError — NOT *pq.Error, the type the auth and
+// catalogue services check for the same purpose. Auth actually connects via
+// lib/pq's "postgres" driver, so that check is correct there; catalogue
+// connects via pgx like this service does, so its equivalent check is
+// silently dead code. Verified against a real Postgres before trusting this.
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+// claimPaymentReference inserts a row that can only ever exist once per
+// payment_reference, inside the same transaction as the order writes it
+// guards — so a committed claim guarantees the corresponding order(s) exist,
+// and a crash between the two is impossible. A conflict means this
+// reference has already been spent; the caller should roll back and look up
+// what was created rather than creating a duplicate.
 //
-// The price is read from the store's own store_delivery_options row (owned by
-// the storefront service, same database) so a tampered client cannot invent a
-// cheaper fee — Paystack is then verified against a total the vendor set.
+// This MUST be a direct INSERT, never a SELECT-then-INSERT: Postgres
+// serializes concurrent inserts of the same key under READ COMMITTED, so the
+// bare INSERT is what actually makes this replay-safe. A check-then-insert
+// reopens the exact race this exists to close.
+func claimPaymentReference(ctx context.Context, tx *sqlx.Tx, ref string, amountKobo int64) error {
+	_, err := tx.ExecContext(ctx,
+		`INSERT INTO checkout_payments (payment_reference, amount_kobo) VALUES ($1,$2)`,
+		ref, amountKobo,
+	)
+	if err != nil && isUniqueViolation(err) {
+		return apperrors.Conflict("payment reference already used")
+	}
+	return err
+}
+
+// computeDeliveryFeeKobo determines the delivery fee for a direct-storefront
+// order: free for an all-digital cart, free once itemsKobo clears the
+// store's configured free-delivery threshold (a 0 threshold disables that
+// tier — always charge the fee unless digital), otherwise the store's own
+// flat delivery_fee_kobo. Reads stores/products directly rather than
+// trusting a client-supplied fee, so a vendor's dashboard setting actually
+// takes effect and can't be spoofed by a tampered frontend — reading
+// storefront/catalogue-owned tables directly is this codebase's established
+// cross-service pattern (no cross-service FKs, direct reads are fine).
 //
-// Stores that have configured no options at all fall back to the client's
-// delivery_fee_kobo, which preserves the old behaviour for storefronts still
-// on the hardcoded zone list.
-func (s *OrdersService) resolveDeliveryFee(ctx context.Context, storeID uuid.UUID, req dto.CreateOrderReq) (int64, string, error) {
-	if req.DeliveryOptionID != "" {
-		optionID, err := uuid.Parse(req.DeliveryOptionID)
-		if err != nil {
+// Pricing comes from the vendor's own store_delivery_options row, which the
+// buyer picks at checkout. There is no fallback: a store that has published
+// no options cannot take a physical order, and the buyer is told so plainly
+// rather than being charged a number nobody set. Digital-only orders are
+// free and skip the check entirely.
+func (s *OrdersService) computeDeliveryFeeKobo(ctx context.Context, storeID uuid.UUID, items []dto.CreateOrderItem, deliveryOptionID string) (int64, string, error) {
+	allDigital := s.allItemsDigital(ctx, items)
+
+	if deliveryOptionID != "" {
+		optionID, parseErr := uuid.Parse(deliveryOptionID)
+		if parseErr != nil {
 			return 0, "", apperrors.BadRequest("invalid delivery_option_id")
 		}
 		var (
 			priceKobo int64
 			title     string
 		)
-		err = s.db.QueryRowContext(ctx, `
+		lookupErr := s.db.QueryRowContext(ctx, `
 			SELECT price_kobo, title FROM store_delivery_options
 			WHERE id = $1 AND store_id = $2 AND is_active = TRUE`,
 			optionID, storeID,
 		).Scan(&priceKobo, &title)
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(lookupErr, sql.ErrNoRows) {
 			return 0, "", apperrors.BadRequest("delivery option not found for this store")
 		}
-		if err != nil {
-			return 0, "", fmt.Errorf("lookup delivery option: %w", err)
+		if lookupErr != nil {
+			return 0, "", fmt.Errorf("lookup delivery option: %w", lookupErr)
+		}
+		if allDigital {
+			return 0, "", nil
 		}
 		return priceKobo, title, nil
 	}
 
-	if req.DeliveryFeeKobo <= 0 {
-		return 0, "", nil
-	}
-
-	// No option named, but a fee was sent. Only honour it when the store has
-	// no options configured — otherwise the client should have picked one.
+	// No option named. A physical order cannot be priced without one, so the
+	// checkout stops here rather than guessing a fee.
 	var configured int
-	if err := s.db.QueryRowContext(ctx,
+	if countErr := s.db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM store_delivery_options WHERE store_id=$1 AND is_active=TRUE`, storeID,
-	).Scan(&configured); err != nil {
-		return 0, "", fmt.Errorf("count delivery options: %w", err)
+	).Scan(&configured); countErr != nil {
+		return 0, "", fmt.Errorf("count delivery options: %w", countErr)
 	}
 	if configured > 0 {
-		return 0, "", apperrors.BadRequest("delivery_option_id is required for this store")
+		return 0, "", apperrors.BadRequest("choose a delivery option before paying")
 	}
-	return req.DeliveryFeeKobo, "", nil
+	return 0, "", apperrors.BadRequest(
+		"this vendor has not set a delivery fee yet — please contact the store")
+}
+
+// allItemsDigital reports whether every line is a digital product, which is
+// always delivered free. A product row that cannot be read defaults to
+// physical — the safer side, since it charges rather than silently waives.
+func (s *OrdersService) allItemsDigital(ctx context.Context, items []dto.CreateOrderItem) bool {
+	for _, it := range items {
+		productID, parseErr := uuid.Parse(it.ProductID)
+		if parseErr != nil {
+			return false
+		}
+		var isDigital bool
+		if scanErr := s.db.QueryRowContext(ctx,
+			`SELECT is_digital FROM products WHERE id=$1`, productID,
+		).Scan(&isDigital); scanErr != nil {
+			return false
+		}
+		if !isDigital {
+			return false
+		}
+	}
+	return len(items) > 0
+}
+
+// insertOrderTx inserts one order, its line items, and the vendor's wallet
+// credit, all within the given transaction. Shared by CreateOrder (one
+// store) and CreateCheckout (N stores, one per vendor, sharing one payment).
+func insertOrderTx(ctx context.Context, tx *sqlx.Tx, storeID uuid.UUID, customerName, customerEmail, deliveryAddress string, items []dto.CreateOrderItem, deliveryFeeKobo int64, paymentRef string) (uuid.UUID, int64, error) {
+	var itemsKobo int64
+	for _, it := range items {
+		itemsKobo += it.PriceKobo * int64(it.Quantity)
+	}
+	if itemsKobo <= 0 {
+		return uuid.Nil, 0, apperrors.BadRequest("order total must be greater than zero")
+	}
+	totalKobo := itemsKobo + deliveryFeeKobo
+
+	custID := customerUUID(storeID, customerEmail)
+
+	var orderID uuid.UUID
+	err := tx.QueryRowContext(ctx, `
+		INSERT INTO orders (store_id, customer_id, customer_name, customer_email, status, total_kobo, delivery_fee_kobo, delivery_address, payment_reference)
+		VALUES ($1,$2,$3,$4,'confirmed',$5,$6,$7,$8)
+		RETURNING id`,
+		storeID, custID, customerName, customerEmail, totalKobo, deliveryFeeKobo, deliveryAddress, paymentRef,
+	).Scan(&orderID)
+	if err != nil {
+		return uuid.Nil, 0, fmt.Errorf("insert order: %w", err)
+	}
+
+	for _, it := range items {
+		productID, err := uuid.Parse(it.ProductID)
+		if err != nil {
+			return uuid.Nil, 0, apperrors.BadRequest("invalid product_id in items")
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO order_items (order_id, product_id, name, image_url, quantity, price_kobo)
+			VALUES ($1,$2,$3,$4,$5,$6)`,
+			orderID, productID, it.Name, it.ImageURL, it.Quantity, it.PriceKobo,
+		); err != nil {
+			return uuid.Nil, 0, fmt.Errorf("insert order item: %w", err)
+		}
+	}
+
+	// Credit the vendor's wallet for the items total only — GoMarketi's hub
+	// handles delivery, not the vendor, so the delivery fee (if any) is
+	// platform revenue and isn't credited here. Held in escrow
+	// (status='pending', excluded from GetWallet's available-balance query)
+	// until the buyer confirms receipt — see ConfirmDelivery below and the
+	// auto-release goroutine in cmd/server/main.go.
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO wallet_transactions (store_id, type, amount_kobo, description, reference, order_id, status)
+		VALUES ($1,'credit',$2,$3,$4,$5,'pending')`,
+		storeID, itemsKobo, fmt.Sprintf("Sale — order #%s", orderID.String()[:8]), paymentRef, orderID,
+	); err != nil {
+		return uuid.Nil, 0, fmt.Errorf("credit wallet: %w", err)
+	}
+
+	return orderID, totalKobo, nil
+}
+
+// notifyOrderCreated fires the post-commit side effects for one newly
+// created order: the SSE broadcast to the vendor's dashboard, the customer
+// invoice email, and the vendor alert email. All three fire asynchronously
+// and never block the caller, matching CreateOrder's original behavior.
+func (s *OrdersService) notifyOrderCreated(storeID, orderID uuid.UUID, totalKobo, deliveryFeeKobo int64, deliveryTitle string, customerName, customerEmail, customerPhone, deliveryAddress, storeSlug, storeName string, items []dto.CreateOrderItem) {
+	// Notify any open SSE/WebSocket dashboard connections.
+	go s.broker.Publish(storeID.String(), sse.Event{
+		Type: "order_created",
+		Data: fmt.Sprintf(`{"order_id":%q,"total_kobo":%d}`, orderID, totalKobo),
+	})
+
+	invoiceItems := make([]email.InvoiceItem, len(items))
+	for i, it := range items {
+		invoiceItems[i] = email.InvoiceItem{
+			Name:      it.Name,
+			ImageURL:  it.ImageURL,
+			Quantity:  int(it.Quantity),
+			PriceKobo: it.PriceKobo,
+		}
+	}
+	if storeName == "" {
+		storeName = "GoMarketi Store"
+	}
+	orderIDStr := orderID.String()
+
+	// Send invoice email to customer asynchronously — never block checkout on email delivery.
+	if customerEmail != "" {
+		go func() {
+			if err := email.SendInvoice(
+				context.Background(),
+				customerEmail,
+				customerName,
+				orderIDStr,
+				storeSlug,
+				storeName,
+				totalKobo,
+				deliveryFeeKobo,
+				deliveryTitle,
+				invoiceItems,
+			); err != nil {
+				s.log.Warn().Err(err).Str("order_id", orderIDStr).Msg("invoice email failed")
+				middleware.RecordBackgroundError(s.db, s.log, "orders", "invoice email failed: "+err.Error(),
+					map[string]any{"order_id": orderIDStr})
+			}
+		}()
+	}
+
+	// Notify vendor of the new order.
+	go func() {
+		vendorEmail, err := s.getVendorEmail(context.Background(), storeID)
+		if err != nil || vendorEmail == "" {
+			s.log.Warn().Err(err).Str("store_id", storeID.String()).Msg("vendor email lookup failed")
+			msg := "vendor email lookup failed: no email on file"
+			if err != nil {
+				msg = "vendor email lookup failed: " + err.Error()
+			}
+			middleware.RecordBackgroundError(s.db, s.log, "orders", msg,
+				map[string]any{"store_id": storeID.String(), "order_id": orderIDStr})
+			return
+		}
+		if err := email.SendVendorAlert(
+			context.Background(),
+			vendorEmail,
+			storeName,
+			orderIDStr,
+			customerName,
+			customerEmail,
+			customerPhone,
+			deliveryAddress,
+			totalKobo,
+			deliveryFeeKobo,
+			deliveryTitle,
+			invoiceItems,
+		); err != nil {
+			s.log.Warn().Err(err).Str("order_id", orderIDStr).Msg("vendor alert email failed")
+			middleware.RecordBackgroundError(s.db, s.log, "orders", "vendor alert email failed: "+err.Error(),
+				map[string]any{"order_id": orderIDStr})
+		}
+	}()
+}
+
+// findOrdersByPaymentRef returns every order created against a given
+// payment_reference, oldest first — used to answer a replayed checkout
+// request with what actually happened, instead of erroring on a purchase
+// that already succeeded (e.g. a dropped response on a flaky connection).
+func (s *OrdersService) findOrdersByPaymentRef(ctx context.Context, ref string) ([]dto.OrderResp, error) {
+	rows, err := s.db.QueryxContext(ctx, `
+		SELECT `+orderColumns+`
+		FROM orders WHERE payment_reference=$1 ORDER BY created_at ASC`, ref)
+	if err != nil {
+		return nil, fmt.Errorf("find orders by payment_reference: %w", err)
+	}
+	defer rows.Close()
+
+	orders := make([]dto.OrderResp, 0)
+	for rows.Next() {
+		var r orderRow
+		if err := rows.StructScan(&r); err != nil {
+			return nil, err
+		}
+		o := rowToOrder(r)
+		o.PaymentRef = ref
+		o.Items = s.loadItems(ctx, r.ID)
+		orders = append(orders, o)
+	}
+	return orders, nil
 }
 
 // CreateOrder is called by the storefront checkout after a (simulated)
 // successful Paystack charge. It creates the order, its line items, and
 // credits the vendor's wallet for the full amount in a single transaction.
+// A replayed payment_reference returns the original order instead of
+// erroring or double-crediting.
 func (s *OrdersService) CreateOrder(ctx context.Context, req dto.CreateOrderReq) (dto.OrderResp, error) {
 	storeID, err := uuid.Parse(req.StoreID)
 	if err != nil {
@@ -260,13 +888,16 @@ func (s *OrdersService) CreateOrder(ctx context.Context, req dto.CreateOrderReq)
 		return dto.OrderResp{}, apperrors.BadRequest("order total must be greater than zero")
 	}
 
-	deliveryFeeKobo, deliveryTitle, err := s.resolveDeliveryFee(ctx, storeID, req)
+	// Delivery fee is computed here, server-side, from the store's own
+	// configured settings — not trusted from the client — so a vendor's
+	// dashboard setting actually takes effect and can't be spoofed by a
+	// tampered frontend. The storefront still needs to know this number
+	// before CreateOrder is ever called (it's charged through Paystack up
+	// front), but what actually gets recorded/verified is recomputed here.
+	deliveryFeeKobo, deliveryTitle, err := s.computeDeliveryFeeKobo(ctx, storeID, req.Items, req.DeliveryOptionID)
 	if err != nil {
 		return dto.OrderResp{}, err
 	}
-
-	// total_kobo is the full amount charged — line items plus delivery — which
-	// is also the amount Paystack must have collected.
 	totalKobo := itemsKobo + deliveryFeeKobo
 
 	// Verify the Paystack charge before touching the database.
@@ -275,125 +906,127 @@ func (s *OrdersService) CreateOrder(ctx context.Context, req dto.CreateOrderReq)
 		return dto.OrderResp{}, err
 	}
 
-	custID := customerUUID(storeID, req.CustomerEmail)
-
 	tx, err := s.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return dto.OrderResp{}, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	var orderID uuid.UUID
-	err = tx.QueryRowContext(ctx, `
-		INSERT INTO orders (store_id, customer_id, customer_name, customer_email, status, total_kobo,
-		                    delivery_address, delivery_fee_kobo, delivery_option_title)
-		VALUES ($1,$2,$3,$4,'confirmed',$5,$6,$7,$8)
-		RETURNING id`,
-		storeID, custID, req.CustomerName, req.CustomerEmail, totalKobo,
-		req.DeliveryAddress, deliveryFeeKobo, deliveryTitle,
-	).Scan(&orderID)
+	if err := claimPaymentReference(ctx, tx, req.PaymentRef, totalKobo); err != nil {
+		if apperrors.IsConflict(err) {
+			_ = tx.Rollback()
+			if existing, findErr := s.findOrdersByPaymentRef(ctx, req.PaymentRef); findErr == nil && len(existing) > 0 {
+				return existing[0], nil
+			}
+			return dto.OrderResp{}, err
+		}
+		return dto.OrderResp{}, fmt.Errorf("claim payment reference: %w", err)
+	}
+
+	orderID, insertedTotal, err := insertOrderTx(ctx, tx, storeID, req.CustomerName, req.CustomerEmail, req.DeliveryAddress, req.Items, deliveryFeeKobo, req.PaymentRef)
 	if err != nil {
-		return dto.OrderResp{}, fmt.Errorf("insert order: %w", err)
-	}
-
-	for _, it := range req.Items {
-		productID, err := uuid.Parse(it.ProductID)
-		if err != nil {
-			return dto.OrderResp{}, apperrors.BadRequest("invalid product_id in items")
-		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO order_items (order_id, product_id, name, image_url, quantity, price_kobo)
-			VALUES ($1,$2,$3,$4,$5,$6)`,
-			orderID, productID, it.Name, it.ImageURL, it.Quantity, it.PriceKobo,
-		); err != nil {
-			return dto.OrderResp{}, fmt.Errorf("insert order item: %w", err)
-		}
-	}
-
-	// Credit the vendor for their items only — the delivery fee belongs to
-	// the platform, which does the delivering. The credit lands 'pending':
-	// escrow holds it until the buyer confirms delivery (or auto-release
-	// elapses), and GetWallet counts only completed rows.
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO wallet_transactions (store_id, type, amount_kobo, description, reference, order_id, status)
-		VALUES ($1,'credit',$2,$3,$4,$5,'pending')`,
-		storeID, itemsKobo, fmt.Sprintf("Sale — order #%s", orderID.String()[:8]), req.PaymentRef, orderID,
-	); err != nil {
-		return dto.OrderResp{}, fmt.Errorf("credit wallet: %w", err)
+		return dto.OrderResp{}, err
 	}
 
 	if err := tx.Commit(); err != nil {
 		return dto.OrderResp{}, fmt.Errorf("commit: %w", err)
 	}
 
-	// Notify any open SSE dashboard connections.
-	go s.broker.Publish(storeID.String(), sse.Event{
-		Type: "order_created",
-		Data: fmt.Sprintf(`{"order_id":%q,"total_kobo":%d}`, orderID, totalKobo),
-	})
-
-	// Send invoice email to customer asynchronously — never block checkout on email delivery.
-	invoiceItems := make([]email.InvoiceItem, len(req.Items))
-	for i, it := range req.Items {
-		invoiceItems[i] = email.InvoiceItem{
-			Name:      it.Name,
-			ImageURL:  it.ImageURL,
-			Quantity:  int(it.Quantity),
-			PriceKobo: it.PriceKobo,
-		}
-	}
-	storeSlug := req.StoreSlug
-	storeName := req.StoreName
-	if storeName == "" {
-		storeName = "GoMarketi Store"
-	}
-	orderIDStr := orderID.String()
-
-	if req.CustomerEmail != "" {
-		go func() {
-			if err := email.SendInvoice(
-				context.Background(),
-				req.CustomerEmail,
-				req.CustomerName,
-				orderIDStr,
-				storeSlug,
-				storeName,
-				totalKobo,
-				deliveryFeeKobo,
-				deliveryTitle,
-				invoiceItems,
-			); err != nil {
-				s.log.Warn().Err(err).Str("order_id", orderIDStr).Msg("invoice email failed")
-			}
-		}()
-	}
-
-	// Notify vendor of the new order.
-	go func() {
-		vendorEmail, err := s.getVendorEmail(context.Background(), storeID)
-		if err != nil || vendorEmail == "" {
-			s.log.Warn().Err(err).Str("store_id", storeID.String()).Msg("vendor email lookup failed")
-			return
-		}
-		if err := email.SendVendorAlert(
-			context.Background(),
-			vendorEmail,
-			storeName,
-			orderIDStr,
-			req.CustomerName,
-			req.CustomerEmail,
-			req.CustomerPhone,
-			req.DeliveryAddress,
-			totalKobo,
-			deliveryFeeKobo,
-			deliveryTitle,
-			invoiceItems,
-		); err != nil {
-			s.log.Warn().Err(err).Str("order_id", orderIDStr).Msg("vendor alert email failed")
-		}
-	}()
+	s.notifyOrderCreated(storeID, orderID, insertedTotal, deliveryFeeKobo, deliveryTitle, req.CustomerName, req.CustomerEmail, req.CustomerPhone, req.DeliveryAddress, req.StoreSlug, req.StoreName, req.Items)
 
 	return s.GetOrder(ctx, storeID, orderID)
+}
+
+// CreateCheckout is called by the consumer app when a cart spans more than
+// one vendor store. One Paystack charge (req.PaymentRef) is verified once
+// against the sum of every store's items, then one order is created per
+// store inside a single transaction — either all of them land or none do.
+// A replayed payment_reference returns the original orders instead of
+// erroring or double-crediting.
+func (s *OrdersService) CreateCheckout(ctx context.Context, req dto.CreateCheckoutReq) ([]dto.OrderResp, error) {
+	var grandTotal int64
+	for _, so := range req.Stores {
+		for _, it := range so.Items {
+			grandTotal += it.PriceKobo * int64(it.Quantity)
+		}
+	}
+	if grandTotal <= 0 {
+		return nil, apperrors.BadRequest("order total must be greater than zero")
+	}
+
+	// Cheap latency/cost optimization for an obvious replay (e.g. a
+	// double-tapped Pay button) — NOT the idempotency guard itself, which is
+	// the transactional claim below. Skipping this check would still be correct.
+	var alreadyClaimed bool
+	_ = s.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM checkout_payments WHERE payment_reference=$1)`,
+		req.PaymentRef,
+	).Scan(&alreadyClaimed)
+	if alreadyClaimed {
+		if existing, err := s.findOrdersByPaymentRef(ctx, req.PaymentRef); err == nil && len(existing) > 0 {
+			return existing, nil
+		}
+	}
+
+	// Verify the Paystack charge once, against the full multi-store total.
+	if err := s.verifyPaystackTransaction(ctx, req.PaymentRef, grandTotal); err != nil {
+		return nil, err
+	}
+
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if err := claimPaymentReference(ctx, tx, req.PaymentRef, grandTotal); err != nil {
+		if apperrors.IsConflict(err) {
+			_ = tx.Rollback()
+			if existing, findErr := s.findOrdersByPaymentRef(ctx, req.PaymentRef); findErr == nil && len(existing) > 0 {
+				return existing, nil
+			}
+			return nil, err
+		}
+		return nil, fmt.Errorf("claim payment reference: %w", err)
+	}
+
+	type createdOrder struct {
+		storeID   uuid.UUID
+		orderID   uuid.UUID
+		totalKobo int64
+		storeSlug string
+		storeName string
+		items     []dto.CreateOrderItem
+	}
+	created := make([]createdOrder, 0, len(req.Stores))
+
+	for _, so := range req.Stores {
+		storeID, err := uuid.Parse(so.StoreID)
+		if err != nil {
+			return nil, apperrors.BadRequest("invalid store_id")
+		}
+		orderID, subTotal, err := insertOrderTx(ctx, tx, storeID, req.CustomerName, req.CustomerEmail, req.DeliveryAddress, so.Items, 0, req.PaymentRef)
+		if err != nil {
+			return nil, err
+		}
+		created = append(created, createdOrder{storeID, orderID, subTotal, so.StoreSlug, so.StoreName, so.Items})
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+
+	resp := make([]dto.OrderResp, 0, len(created))
+	for _, c := range created {
+		s.notifyOrderCreated(c.storeID, c.orderID, c.totalKobo, 0, "", req.CustomerName, req.CustomerEmail, req.CustomerPhone, req.DeliveryAddress, c.storeSlug, c.storeName, c.items)
+		o, err := s.GetOrder(ctx, c.storeID, c.orderID)
+		if err != nil {
+			return nil, err
+		}
+		resp = append(resp, o)
+	}
+
+	return resp, nil
 }
 
 // getVendorEmail returns the email of the user who owns the given store.
@@ -427,10 +1060,11 @@ func (s *OrdersService) GetWallet(ctx context.Context, storeID uuid.UUID) (dto.W
 	var resp dto.WalletResp
 	err := s.db.QueryRowContext(ctx, `
 		SELECT
-			COALESCE(SUM(CASE WHEN type='credit' THEN amount_kobo ELSE -amount_kobo END), 0),
-			COALESCE(SUM(CASE WHEN type='credit' THEN amount_kobo ELSE 0 END), 0)
-		FROM wallet_transactions WHERE store_id=$1 AND status='completed'`, storeID,
-	).Scan(&resp.BalanceKobo, &resp.TotalEarned)
+			COALESCE(SUM(CASE WHEN status='completed' THEN (CASE WHEN type='credit' THEN amount_kobo ELSE -amount_kobo END) ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status='completed' AND type='credit' THEN amount_kobo ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status='pending'   AND type='credit' THEN amount_kobo ELSE 0 END), 0)
+		FROM wallet_transactions WHERE store_id=$1`, storeID,
+	).Scan(&resp.BalanceKobo, &resp.TotalEarned, &resp.HeldKobo)
 	if err != nil {
 		return dto.WalletResp{}, fmt.Errorf("wallet balance: %w", err)
 	}
@@ -799,26 +1433,27 @@ func (s *OrdersService) GetTopProducts(ctx context.Context, storeID uuid.UUID, l
 // ── Row types ─────────────────────────────────────────────────────────────────
 
 type orderRow struct {
-	ID              uuid.UUID      `db:"id"`
-	StoreID         uuid.UUID      `db:"store_id"`
-	CustomerID      uuid.UUID      `db:"customer_id"`
-	CustomerName    string         `db:"customer_name"`
-	CustomerEmail   string         `db:"customer_email"`
-	Status          string         `db:"status"`
-	TotalKobo       int64          `db:"total_kobo"`
-	DeliveryAddress string         `db:"delivery_address"`
-	DeliveryFeeKobo int64          `db:"delivery_fee_kobo"`
-	DeliveryOption  string         `db:"delivery_option_title"`
-	EscrowStatus    string         `db:"escrow_status"`
-	HubReceivedAt   sql.NullTime   `db:"hub_received_at"`
-	DispatchedAt    sql.NullTime   `db:"dispatched_at"`
-	DeliveredAt     sql.NullTime   `db:"delivered_at"`
-	ConfirmedAt     sql.NullTime   `db:"delivery_confirmed_at"`
-	DisputeStatus   sql.NullString `db:"dispute_status"`
-	DisputeReason   sql.NullString `db:"dispute_reason"`
-	DisputedAt      sql.NullTime   `db:"disputed_at"`
-	CreatedAt       time.Time      `db:"created_at"`
-	UpdatedAt       time.Time      `db:"updated_at"`
+	ID                  uuid.UUID      `db:"id"`
+	StoreID             uuid.UUID      `db:"store_id"`
+	CustomerID          uuid.UUID      `db:"customer_id"`
+	CustomerName        string         `db:"customer_name"`
+	CustomerEmail       string         `db:"customer_email"`
+	Status              string         `db:"status"`
+	TotalKobo           int64          `db:"total_kobo"`
+	DeliveryFeeKobo     int64          `db:"delivery_fee_kobo"`
+	DeliveryAddress     string         `db:"delivery_address"`
+	PaymentReference    sql.NullString `db:"payment_reference"`
+	HubReceivedAt       sql.NullTime   `db:"hub_received_at"`
+	DispatchedAt        sql.NullTime   `db:"dispatched_at"`
+	DeliveredAt         sql.NullTime   `db:"delivered_at"`
+	DeliveryConfirmedAt sql.NullTime   `db:"delivery_confirmed_at"`
+	CancelledReason     sql.NullString `db:"cancelled_reason"`
+	DisputeStatus       sql.NullString `db:"dispute_status"`
+	DisputeReason       sql.NullString `db:"dispute_reason"`
+	DisputedAt          sql.NullTime   `db:"disputed_at"`
+	WalletStatus        sql.NullString `db:"wallet_status"`
+	CreatedAt           time.Time      `db:"created_at"`
+	UpdatedAt           time.Time      `db:"updated_at"`
 }
 
 type abandonedRow struct {
@@ -832,28 +1467,69 @@ type abandonedRow struct {
 }
 
 func rowToOrder(r orderRow) dto.OrderResp {
-	return dto.OrderResp{
-		ID:                  r.ID.String(),
-		StoreID:             r.StoreID.String(),
-		CustomerID:          r.CustomerID.String(),
-		CustomerName:        r.CustomerName,
-		CustomerEmail:       r.CustomerEmail,
-		Status:              dto.OrderStatus(r.Status),
-		Items:               []dto.OrderItem{},
-		TotalKobo:           r.TotalKobo,
-		DeliveryAddress:     r.DeliveryAddress,
-		DeliveryFeeKobo:     r.DeliveryFeeKobo,
-		DeliveryOptionTitle: r.DeliveryOption,
-		EscrowStatus:        r.EscrowStatus,
-		HubReceivedAt:       nullTimeStr(r.HubReceivedAt),
-		DispatchedAt:        nullTimeStr(r.DispatchedAt),
-		DeliveredAt:         nullTimeStr(r.DeliveredAt),
-		DeliveryConfirmedAt: nullTimeStr(r.ConfirmedAt),
-		DisputeStatus:       nullStrPtr(r.DisputeStatus),
-		DisputeReason:       nullStrPtr(r.DisputeReason),
-		DisputedAt:          nullTimeStr(r.DisputedAt),
-		CreatedAt:           r.CreatedAt.UTC().Format(time.RFC3339),
-		UpdatedAt:           r.UpdatedAt.UTC().Format(time.RFC3339),
+	o := dto.OrderResp{
+		ID:              r.ID.String(),
+		StoreID:         r.StoreID.String(),
+		CustomerID:      r.CustomerID.String(),
+		CustomerName:    r.CustomerName,
+		CustomerEmail:   r.CustomerEmail,
+		Status:          dto.OrderStatus(r.Status),
+		Items:           []dto.OrderItem{},
+		TotalKobo:       r.TotalKobo,
+		DeliveryFeeKobo: r.DeliveryFeeKobo,
+		DeliveryAddress: r.DeliveryAddress,
+		EscrowStatus:    escrowStatus(r.WalletStatus),
+		CreatedAt:       r.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:       r.UpdatedAt.UTC().Format(time.RFC3339),
+	}
+	if r.PaymentReference.Valid {
+		o.PaymentRef = r.PaymentReference.String
+	}
+	if r.HubReceivedAt.Valid {
+		s := r.HubReceivedAt.Time.UTC().Format(time.RFC3339)
+		o.HubReceivedAt = &s
+	}
+	if r.DispatchedAt.Valid {
+		s := r.DispatchedAt.Time.UTC().Format(time.RFC3339)
+		o.DispatchedAt = &s
+	}
+	if r.DeliveredAt.Valid {
+		s := r.DeliveredAt.Time.UTC().Format(time.RFC3339)
+		o.DeliveredAt = &s
+	}
+	if r.DeliveryConfirmedAt.Valid {
+		s := r.DeliveryConfirmedAt.Time.UTC().Format(time.RFC3339)
+		o.DeliveryConfirmedAt = &s
+	}
+	if r.CancelledReason.Valid {
+		o.CancelledReason = &r.CancelledReason.String
+	}
+	if r.DisputeStatus.Valid {
+		ds := dto.DisputeStatus(r.DisputeStatus.String)
+		o.DisputeStatus = &ds
+	}
+	if r.DisputeReason.Valid {
+		o.DisputeReason = &r.DisputeReason.String
+	}
+	if r.DisputedAt.Valid {
+		s := r.DisputedAt.Time.UTC().Format(time.RFC3339)
+		o.DisputedAt = &s
+	}
+	return o
+}
+
+// escrowStatus derives the buyer-visible escrow state from the underlying
+// wallet_transactions row's status. No row at all (e.g. an order created
+// before this feature, or a data inconsistency) reads as "held" — the safe
+// default, since it means we've made no promise the money is available.
+func escrowStatus(walletStatus sql.NullString) dto.EscrowStatus {
+	switch walletStatus.String {
+	case "completed":
+		return dto.EscrowReleased
+	case "failed":
+		return dto.EscrowReversed
+	default:
+		return dto.EscrowHeld
 	}
 }
 

@@ -80,18 +80,18 @@ func run(log zerolog.Logger) error {
 
 	svc := service.New(db, log, broker)
 
-	// Auto-release escrow that has been held past the window, so a buyer who
-	// never confirms doesn't strand the vendor's money. Stops with the
-	// process; each release is idempotent, so running several instances is
-	// safe.
-	escrowCtx, stopEscrow := context.WithCancel(context.Background())
-	defer stopEscrow()
-	go svc.StartEscrowReleaser(escrowCtx)
+	// Escrow auto-release: a dispatched order the buyer never confirms
+	// receipt of still releases the vendor's held funds after 7 days —
+	// see StartAutoReleaseLoop. No cron infra exists in this backend, so
+	// this is a plain goroutine started at boot, same shape as identity's
+	// Paystack DVA provisioning background work.
+	go svc.StartAutoReleaseLoop(context.Background())
+
 	h := handler.New(svc, log, broker)
 	r := gin.New()
 
 	allowedOrigins := viper.GetStringSlice("ALLOWED_ORIGINS")
-	handler.Register(r, h, log, allowedOrigins)
+	handler.Register(r, h, log, allowedOrigins, db)
 
 	port := viper.GetString("PORT")
 	if port == "" {

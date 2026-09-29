@@ -7,12 +7,16 @@
 package middleware
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
 	"github.com/rs/zerolog"
 )
 
@@ -22,18 +26,52 @@ import (
 // originating from an allowed origin. Non-matching origins receive no CORS
 // headers (not an error — the browser enforces the restriction).
 //
+// Every configured origin also implicitly allows its subdomains — every
+// vendor's storefront lives on its own subdomain (e.g. cobi.gomarketi.com),
+// so a bare "https://gomarketi.com" entry must cover the whole *.gomarketi.com
+// fleet, not just the apex, or checkout (which calls the orders service
+// cross-origin from the storefront) breaks for every vendor.
+//
 // allowedOrigins should come from config, e.g.:
 //   - development: ["http://localhost:3000"]
 //   - production:  ["https://gomarketi.com", "https://app.gomarketi.com"]
+type originSuffix struct {
+	scheme string // e.g. "https://"
+	host   string // e.g. ".gomarketi.com" — leading dot enforces a real subdomain boundary
+}
+
 func CORS(allowedOrigins []string) gin.HandlerFunc {
 	set := make(map[string]struct{}, len(allowedOrigins))
+	var suffixes []originSuffix
 	for _, o := range allowedOrigins {
 		set[o] = struct{}{}
+		if u, err := url.Parse(o); err == nil && u.Host != "" {
+			suffixes = append(suffixes, originSuffix{scheme: u.Scheme + "://", host: "." + u.Host})
+		}
+	}
+
+	originAllowed := func(origin string) bool {
+		if origin == "" {
+			return false
+		}
+		if _, ok := set[origin]; ok {
+			return true
+		}
+		for _, s := range suffixes {
+			// Matches "scheme://<subdomain>.host" for any non-empty subdomain
+			// — origin must be strictly longer than scheme+host so there's
+			// at least one character in the subdomain label.
+			if strings.HasPrefix(origin, s.scheme) && strings.HasSuffix(origin, s.host) &&
+				len(origin) > len(s.scheme)+len(s.host) {
+				return true
+			}
+		}
+		return false
 	}
 
 	return func(c *gin.Context) {
 		origin := c.GetHeader("Origin")
-		if _, ok := set[origin]; ok {
+		if originAllowed(origin) {
 			c.Header("Access-Control-Allow-Origin", origin)
 			c.Header("Vary", "Origin")
 		}
@@ -100,10 +138,14 @@ func RequestLogger(log zerolog.Logger) gin.HandlerFunc {
 
 // ── Recovery ──────────────────────────────────────────────────────────────────
 
-// Recovery catches panics, logs them at ERROR level, and responds with a
-// generic 500 JSON body. Always register this as the outermost middleware so
-// it wraps all other handlers.
-func Recovery(log zerolog.Logger) gin.HandlerFunc {
+// Recovery catches panics, logs them at ERROR level, responds with a generic
+// 500 JSON body, and — for both panics and handlers that return a 5xx without
+// panicking — writes a row to the shared error_events table (owned by
+// admin-api, surfaced in the Admin Center's error queue). db may be nil (e.g.
+// in tests), in which case error capture is skipped but recovery still works.
+// Always register this as the outermost middleware so it wraps all other
+// handlers.
+func Recovery(log zerolog.Logger, db *sqlx.DB, serviceName string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		defer func() {
 			if r := recover(); r != nil {
@@ -114,12 +156,80 @@ func Recovery(log zerolog.Logger) gin.HandlerFunc {
 					Str("method", c.Request.Method).
 					Str("path", c.Request.URL.Path).
 					Msg("panic recovered")
+				recordErrorEvent(db, serviceName, log, c, http.StatusInternalServerError, stringVal(r))
 				c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
 					"error": "an internal error occurred",
 				})
 			}
 		}()
 		c.Next()
+		if status := c.Writer.Status(); !c.IsAborted() && status >= http.StatusInternalServerError {
+			recordErrorEvent(db, serviceName, log, c, status, "")
+		}
+	}
+}
+
+// recordErrorEvent writes one row to error_events for an HTTP-request-scoped
+// failure (panic or 5xx response) caught by Recovery.
+func recordErrorEvent(db *sqlx.DB, serviceName string, log zerolog.Logger, c *gin.Context, status int, panicVal string) {
+	message := panicVal
+	if message == "" {
+		message = "HTTP " + http.StatusText(status)
+	}
+
+	reqID, _ := c.Get("request_id")
+	userID := c.GetString(CtxKeyUserID)
+
+	fields := map[string]any{
+		"request_id": stringVal(reqID),
+		"method":     c.Request.Method,
+	}
+
+	writeErrorEvent(db, log, serviceName, message, c.Request.URL.Path, &status, userID, fields)
+}
+
+// RecordBackgroundError writes an error_events row for a failure that
+// happened OUTSIDE the HTTP request/response cycle — a goroutine, a
+// scheduled job — the same queue Recovery writes to for request-scoped
+// failures, but reachable from anywhere a service holds a *sqlx.DB. These
+// failures (a third-party API call inside a background provisioning step,
+// a transactional email, a scheduled release job) previously only ever hit
+// a zerolog Warn() — invisible to the Admin Center's error queue unless
+// someone went looking at container logs. fields is optional free-form
+// context (e.g. {"vendor_id": "..."}) shown alongside the error.
+func RecordBackgroundError(db *sqlx.DB, log zerolog.Logger, serviceName, message string, fields map[string]any) {
+	if fields == nil {
+		fields = map[string]any{}
+	}
+	writeErrorEvent(db, log, serviceName, message, "", nil, "", fields)
+}
+
+// writeErrorEvent is the shared low-level writer behind both the HTTP-path
+// (recordErrorEvent) and background-path (RecordBackgroundError) capture.
+// Best-effort: a failure to record must never affect the caller — a request
+// already in flight, or a background job already doing its own thing — so
+// errors here are logged (not returned) and the write runs against a short,
+// bounded context rather than whatever context the caller has (which, for
+// an HTTP request, dies the moment the response is written).
+func writeErrorEvent(db *sqlx.DB, log zerolog.Logger, serviceName, message, requestPath string, statusCode *int, userID string, fields map[string]any) {
+	if db == nil {
+		return
+	}
+
+	fieldsJSON, err := json.Marshal(fields)
+	if err != nil {
+		fieldsJSON = []byte("{}")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO error_events (service, level, message, request_path, status_code, user_id, context)
+		VALUES ($1, 'error', $2, NULLIF($3, ''), $4, NULLIF($5, ''), $6)
+	`, serviceName, message, requestPath, statusCode, userID, fieldsJSON)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to record error_event")
 	}
 }
 

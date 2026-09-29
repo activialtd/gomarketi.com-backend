@@ -1,35 +1,95 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
+	"github.com/lib/pq"
 	"github.com/rs/zerolog"
 
 	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/dto"
 	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/email"
 	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/phone"
+	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/vercel"
 	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
+	"github.com/activialtd/gomarketi.com-backend/shared/pkg/middleware"
+	"github.com/activialtd/gomarketi.com-backend/shared/pkg/planlimits"
 )
 
+// gatedTemplates maps a store template id to the plan slug required to use
+// it. Templates not listed here are available on every plan. Kept in sync
+// by hand with the frontend's PLAN_ORDER-driven template picker
+// (apps/vendor-web/components/store-setup/store-customization/StoreCustomize.tsx)
+// — no shared source of truth between Go and TS exists in this codebase.
+var gatedTemplates = map[string]string{
+	"lagos": "starter",
+}
+
+var planTier = map[string]int{"free": 0, "starter": 1, "growth": 2, "scale": 3}
+
+func planAllowsTemplate(planSlug, template string) bool {
+	required, gated := gatedTemplates[template]
+	if !gated {
+		return true
+	}
+	return planTier[planSlug] >= planTier[required]
+}
+
 type StorefrontService struct {
-	db          *sqlx.DB
-	log         zerolog.Logger
-	emailer     email.WelcomeMailer
-	storeDomain string
+	db                  *sqlx.DB
+	log                 zerolog.Logger
+	emailer             email.WelcomeMailer
+	domains             vercel.Registrar
+	storeDomain         string
+	identityInternalURL string
+	internalAPIKey      string
 	// phones may be nil — number format is still checked, the Termii lookup
 	// is simply skipped.
 	phones *phone.Verifier
 }
 
-func New(db *sqlx.DB, emailer email.WelcomeMailer, storeDomain string, phones *phone.Verifier, log zerolog.Logger) *StorefrontService {
-	return &StorefrontService{db: db, emailer: emailer, storeDomain: storeDomain, phones: phones, log: log}
+func New(db *sqlx.DB, emailer email.WelcomeMailer, domains vercel.Registrar, storeDomain, identityInternalURL, internalAPIKey string, phones *phone.Verifier, log zerolog.Logger) *StorefrontService {
+	return &StorefrontService{
+		db: db, emailer: emailer, domains: domains, storeDomain: storeDomain,
+		identityInternalURL: identityInternalURL, internalAPIKey: internalAPIKey,
+		phones: phones, log: log,
+	}
+}
+
+// ── Slug validation ─────────────────────────────────────────────────────────
+// Slugs become live subdomains ({slug}.gomarketi.com) via Vercel domain
+// registration, so they must be DNS-safe: lowercase letters/numbers/hyphens,
+// no leading/trailing hyphen. Also blocks slugs that would collide with a
+// platform subdomain already in use.
+
+var slugPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$`)
+
+var reservedSlugs = map[string]bool{
+	"www": true, "api": true, "vendor": true, "admin": true, "app": true,
+	"mail": true, "cdn": true, "ftp": true, "staging": true, "blog": true,
+	"support": true, "help": true, "status": true, "docs": true,
+	"staging-vendor": true, "api-staging": true,
+}
+
+func validateSlugFormat(slug string) error {
+	if !slugPattern.MatchString(slug) {
+		return apperrors.Wrap(http.StatusBadRequest,
+			"slug must be lowercase letters, numbers, and hyphens only, and can't start or end with a hyphen", nil)
+	}
+	if reservedSlugs[slug] {
+		return apperrors.Wrap(http.StatusBadRequest, "this slug is reserved", nil)
+	}
+	return nil
 }
 
 func (s *StorefrontService) DB() *sqlx.DB { return s.db }
@@ -44,6 +104,10 @@ func (s *StorefrontService) CreateStore(ctx context.Context, userID uuid.UUID, r
 	}
 	if !isNotFound(err) {
 		return dto.StoreResp{}, fmt.Errorf("check existing store: %w", err)
+	}
+
+	if err := validateSlugFormat(req.Slug); err != nil {
+		return dto.StoreResp{}, err
 	}
 
 	// Verify the support phone before creating anything, so a bad number is
@@ -63,11 +127,28 @@ func (s *StorefrontService) CreateStore(ctx context.Context, userID uuid.UUID, r
 		return dto.StoreResp{}, apperrors.Wrap(http.StatusConflict, "slug already taken", nil)
 	}
 
+	limits, err := planlimits.ForVendorUserID(ctx, s.db, userID)
+	if err != nil {
+		return dto.StoreResp{}, fmt.Errorf("resolve plan limits: %w", err)
+	}
+	if !limits.AllowsCurrency(req.Currency) {
+		return dto.StoreResp{}, apperrors.BadRequest("your plan does not support " + req.Currency + " — upgrade to unlock it")
+	}
+	if req.TeamSize != nil && !limits.AllowsTeamSize(*req.TeamSize) {
+		return dto.StoreResp{}, apperrors.BadRequest("your plan does not support a team size of " + *req.TeamSize + " — upgrade to unlock it")
+	}
+
 	var row storeRow
 	err = s.db.QueryRowxContext(ctx, `
 		INSERT INTO stores (vendor_id, name, slug, category, currency, team_size, support_phone, market_id)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-		RETURNING `+storeCols,
+		RETURNING id, vendor_id, name, slug, category, currency,
+		          team_size, staff_range, tagline, logo_url, hero_image_url, site_description,
+		          COALESCE(social_links, '{}') AS social_links,
+		          support_phone, address, city, state, market_id,
+		          (SELECT name FROM markets m WHERE m.id = market_id) AS market_name,
+		          custom_domain, custom_domain_status,
+		          COALESCE(theme_config, '{}') AS theme_config, delivery_fee_kobo, free_delivery_threshold_kobo, is_active, created_at`,
 		userID, req.Name, req.Slug, req.Category, req.Currency,
 		req.TeamSize, req.SupportPhone, nullUUID(req.MarketID),
 	).StructScan(&row)
@@ -94,9 +175,62 @@ func (s *StorefrontService) CreateStore(ctx context.Context, userID uuid.UUID, r
 				vendorEmail, vendorName, storeName, storeSlug, storeDomain,
 			); emailErr != nil {
 				s.log.Warn().Err(emailErr).Str("slug", storeSlug).Msg("welcome email failed")
+				middleware.RecordBackgroundError(s.db, s.log, "storefront", "welcome email failed: "+emailErr.Error(),
+					map[string]any{"slug": storeSlug})
 			}
 		}()
 	}
+
+	// Register {slug}.{storeDomain} on Vercel asynchronously — DNS routing
+	// already works via the *.{storeDomain} wildcard, but Vercel only issues
+	// a working SSL certificate for domains explicitly registered on the
+	// project, so without this the store loads over plain HTTP until
+	// someone adds it by hand.
+	storeSlug := resp.Slug
+	storeSubdomain := storeSlug + "." + s.storeDomain
+	go func() {
+		ctx3, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if domainErr := s.domains.AddDomain(ctx3, storeSubdomain); domainErr != nil {
+			s.log.Warn().Err(domainErr).Str("domain", storeSubdomain).Msg("vercel domain registration failed")
+			middleware.RecordBackgroundError(s.db, s.log, "storefront", "vercel domain registration failed: "+domainErr.Error(),
+				map[string]any{"domain": storeSubdomain})
+		}
+	}()
+
+	// Trigger the vendor's Dedicated Virtual Account provisioning now that a
+	// store — and therefore a store name — exists. Deliberately not done at
+	// plan-selection time (identity's SelectPlan): a plan can be picked long
+	// before a store exists, and the DVA's account_name is meant to read as
+	// the store's name, not the vendor's personal name. Best-effort, async,
+	// same shape as the welcome-email/Vercel-registration goroutines above.
+	storeName := resp.Name
+	go func() {
+		ctx4, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		body, _ := json.Marshal(map[string]string{"user_id": userID.String(), "store_name": storeName})
+		req, reqErr := http.NewRequestWithContext(ctx4, http.MethodPost,
+			s.identityInternalURL+"/v1/identity/internal/provision-dva", bytes.NewReader(body))
+		if reqErr != nil {
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Internal-Key", s.internalAPIKey)
+		httpResp, doErr := (&http.Client{Timeout: 20 * time.Second}).Do(req)
+		if doErr != nil {
+			s.log.Warn().Err(doErr).Str("store", storeName).Msg("dva provisioning request failed")
+			middleware.RecordBackgroundError(s.db, s.log, "storefront", "dva provisioning request failed: "+doErr.Error(),
+				map[string]any{"store": storeName})
+			return
+		}
+		defer httpResp.Body.Close()
+		if httpResp.StatusCode >= 300 {
+			s.log.Warn().Int("status", httpResp.StatusCode).Str("store", storeName).Msg("dva provisioning failed")
+			middleware.RecordBackgroundError(s.db, s.log, "storefront",
+				fmt.Sprintf("dva provisioning failed: identity returned %d", httpResp.StatusCode),
+				map[string]any{"store": storeName})
+		}
+	}()
 
 	return resp, nil
 }
@@ -106,6 +240,23 @@ func (s *StorefrontService) GetMyStore(ctx context.Context, userID uuid.UUID) (d
 }
 
 func (s *StorefrontService) UpdateStore(ctx context.Context, userID uuid.UUID, storeID uuid.UUID, req dto.UpdateStoreReq) (dto.StoreResp, error) {
+	if req.ThemeConfig != nil {
+		var tc struct {
+			Template string `json:"template"`
+		}
+		if err := json.Unmarshal(req.ThemeConfig, &tc); err == nil && tc.Template != "" {
+			limits, err := planlimits.ForVendorUserID(ctx, s.db, userID)
+			if err != nil {
+				return dto.StoreResp{}, fmt.Errorf("resolve plan limits: %w", err)
+			}
+			if !planAllowsTemplate(limits.PlanSlug, tc.Template) {
+				return dto.StoreResp{}, apperrors.BadRequest("your plan does not support the \"" + tc.Template + "\" template — upgrade to unlock it")
+			}
+		}
+	}
+
+	// A changed support number is re-verified, so an edit cannot slip an
+	// unreachable number past the check that store creation applies.
 	if req.SupportPhone != nil && *req.SupportPhone != "" {
 		normalised, err := s.verifyPhone(ctx, *req.SupportPhone)
 		if err != nil {
@@ -127,15 +278,23 @@ func (s *StorefrontService) UpdateStore(ctx context.Context, userID uuid.UUID, s
 			address          = COALESCE($8, address),
 			city             = COALESCE($9, city),
 			state            = COALESCE($10, state),
-			theme_config     = CASE WHEN $11::jsonb IS NOT NULL THEN $11::jsonb ELSE COALESCE(theme_config, '{}') END,
-			market_id        = COALESCE($12::uuid, market_id),
+			market_id        = COALESCE($11::uuid, market_id),
+			theme_config     = CASE WHEN $12::jsonb IS NOT NULL THEN $12::jsonb ELSE COALESCE(theme_config, '{}') END,
+			delivery_fee_kobo            = COALESCE($13, delivery_fee_kobo),
+			free_delivery_threshold_kobo = COALESCE($14, free_delivery_threshold_kobo),
 			updated_at       = NOW()
-		WHERE id=$13 AND vendor_id=$14
-		RETURNING `+storeCols,
+		WHERE id=$15 AND vendor_id=$16
+		RETURNING id, vendor_id, name, slug, category, currency,
+		          team_size, staff_range, tagline, logo_url, hero_image_url, site_description,
+		          COALESCE(social_links, '{}') AS social_links,
+		          support_phone, address, city, state, market_id,
+		          (SELECT name FROM markets m WHERE m.id = market_id) AS market_name,
+		          custom_domain, custom_domain_status,
+		          COALESCE(theme_config, '{}') AS theme_config, delivery_fee_kobo, free_delivery_threshold_kobo, is_active, created_at`,
 		req.Name, req.Tagline, req.LogoURL, req.HeroImageURL, req.SiteDescription,
 		nullJSON(req.SocialLinks), req.SupportPhone,
-		req.Address, req.City, req.State, nullJSON(req.ThemeConfig),
-		nullUUID(req.MarketID),
+		req.Address, req.City, req.State, req.MarketID, nullJSON(req.ThemeConfig),
+		req.DeliveryFeeKobo, req.FreeDeliveryThresholdKobo,
 		storeID, userID,
 	).StructScan(&row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -148,6 +307,9 @@ func (s *StorefrontService) UpdateStore(ctx context.Context, userID uuid.UUID, s
 }
 
 func (s *StorefrontService) CheckSlugAvailable(ctx context.Context, slug string) (dto.SlugCheckResp, error) {
+	if validateSlugFormat(slug) != nil {
+		return dto.SlugCheckResp{Slug: slug, Available: false}, nil
+	}
 	var taken bool
 	_ = s.db.QueryRowContext(ctx, `SELECT TRUE FROM stores WHERE slug=$1`, slug).Scan(&taken)
 	return dto.SlugCheckResp{Slug: slug, Available: !taken}, nil
@@ -156,7 +318,13 @@ func (s *StorefrontService) CheckSlugAvailable(ctx context.Context, slug string)
 func (s *StorefrontService) GetStoreBySlug(ctx context.Context, slug string) (dto.StoreResp, error) {
 	var row storeRow
 	err := s.db.QueryRowxContext(ctx, `
-		SELECT `+storeCols+`
+		SELECT id, vendor_id, name, slug, category, currency,
+		       team_size, staff_range, tagline, logo_url, hero_image_url, site_description,
+		       COALESCE(social_links, '{}') AS social_links,
+		       support_phone, address, city, state, market_id,
+		       (SELECT name FROM markets m WHERE m.id = market_id) AS market_name,
+		       custom_domain, custom_domain_status,
+		       COALESCE(theme_config, '{}') AS theme_config, delivery_fee_kobo, free_delivery_threshold_kobo, is_active, created_at
 		FROM stores WHERE slug=$1 AND is_active=TRUE`, slug).StructScan(&row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.StoreResp{}, apperrors.NotFound("store not found")
@@ -164,13 +332,19 @@ func (s *StorefrontService) GetStoreBySlug(ctx context.Context, slug string) (dt
 	if err != nil {
 		return dto.StoreResp{}, fmt.Errorf("get store by slug: %w", err)
 	}
-	return s.withDeliveryOptions(ctx, rowToResp(row)), nil
+	return rowToResp(row), nil
 }
 
 func (s *StorefrontService) GetStoreByDomain(ctx context.Context, domain string) (dto.StoreResp, error) {
 	var row storeRow
 	err := s.db.QueryRowxContext(ctx, `
-		SELECT `+storeCols+`
+		SELECT id, vendor_id, name, slug, category, currency,
+		       team_size, staff_range, tagline, logo_url, hero_image_url, site_description,
+		       COALESCE(social_links, '{}') AS social_links,
+		       support_phone, address, city, state, market_id,
+		       (SELECT name FROM markets m WHERE m.id = market_id) AS market_name,
+		       custom_domain, custom_domain_status,
+		       COALESCE(theme_config, '{}') AS theme_config, delivery_fee_kobo, free_delivery_threshold_kobo, is_active, created_at
 		FROM stores WHERE custom_domain=$1 AND custom_domain_status='active' AND is_active=TRUE`, domain).StructScan(&row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.StoreResp{}, apperrors.NotFound("store not found")
@@ -178,25 +352,477 @@ func (s *StorefrontService) GetStoreByDomain(ctx context.Context, domain string)
 	if err != nil {
 		return dto.StoreResp{}, fmt.Errorf("get store by domain: %w", err)
 	}
-	return s.withDeliveryOptions(ctx, rowToResp(row)), nil
+	return rowToResp(row), nil
 }
 
-// withDeliveryOptions attaches the store's active delivery options to a public
-// store payload so checkout can render them in one round trip. A failure here
-// is logged and swallowed — a storefront that loads without delivery choices
-// beats one that does not load at all.
-func (s *StorefrontService) withDeliveryOptions(ctx context.Context, resp dto.StoreResp) dto.StoreResp {
-	storeID, err := uuid.Parse(resp.ID)
-	if err != nil {
-		return resp
+// ── Search ────────────────────────────────────────────────────────────────────
+
+// categoryKeywords maps free-text search phrases to store categories, so a
+// query like "men's wear" resolves to the "fashion" category. Matching is a
+// simple case-insensitive substring check — no NLP/ML, just enough to cover
+// how people actually phrase a shopping search.
+var categoryKeywords = map[string][]string{
+	"fashion":     {"cloth", "wear", "dress", "shirt", "trouser", "fashion", "outfit", "men's", "mens", "women's", "womens", "shoe", "sneaker", "kaftan", "ankara"},
+	"thrift":      {"thrift", "okrika", "bend down", "bend-down", "second hand", "second-hand", "used cloth"},
+	"jewelry":     {"jewel", "gold", "necklace", "ring", "bracelet", "earring", "accessor"},
+	"electronics": {"gadget", "phone", "laptop", "electronic", "charger", "earpiece", "tech", "television", " tv ", "computer"},
+	"food":        {"food", "restaurant", "eat", "meal", "kitchen", "suya", "amala", "jollof"},
+	"groceries":   {"grocery", "groceries", "provision", "foodstuff", "food stuff", "rice", "beans", "cooking oil", "spaghetti"},
+	"beauty":      {"beauty", "makeup", "make-up", "cosmetic", "skincare", "perfume", "wig"},
+	"home":        {"furniture", "home decor", "kitchenware", "appliance"},
+}
+
+// matchCategories returns every store category whose keyword set appears in
+// the query. Returns nil if nothing matched — the caller falls back to a
+// free-text name search in that case.
+func matchCategories(q string) []string {
+	q = " " + strings.ToLower(q) + " "
+	var matched []string
+	for category, keywords := range categoryKeywords {
+		for _, kw := range keywords {
+			if strings.Contains(q, kw) {
+				matched = append(matched, category)
+				break
+			}
+		}
 	}
-	opts, err := s.ListDeliveryOptions(ctx, storeID, true)
-	if err != nil {
-		s.log.Warn().Err(err).Str("store_id", resp.ID).Msg("delivery options lookup failed")
-		return resp
+	return matched
+}
+
+// cityAliases maps a spoken/typed area name to the exact stores.city value(s)
+// it should match. Hand-curated (like categoryKeywords) rather than derived
+// automatically from stores.city, so a generic word doesn't over-match.
+// This is the "general area" tier — "men's wear in ikeja" — one level
+// coarser than a specific named market like "balogun".
+var cityAliases = map[string][]string{
+	"ikeja":           {"Ikeja", "Ikeja City Mall Area"},
+	"yaba":            {"Yaba"},
+	"surulere":        {"Surulere"},
+	"lekki":           {"Lekki"},
+	"victoria island": {"Victoria Island"},
+	"ajah":            {"Ajah"},
+	"apapa":           {"Apapa"},
+	"ikorodu":         {"Ikorodu"},
+	"agege":           {"Agege"},
+	"oshodi":          {"Oshodi"},
+	"ojo":             {"Ojo"},
+	"ebute metta":     {"Ebute-Metta"},
+	"ebute-metta":     {"Ebute-Metta"},
+	"ketu":            {"Ketu"},
+	"kosofe":          {"Kosofe"},
+	"okokomaiko":      {"Okokomaiko"},
+	"lagos island":    {"Lagos Island"},
+	"awka":            {"Awka"},
+	"onitsha":         {"Onitsha"},
+	"nnewi":           {"Nnewi"},
+}
+
+// matchCity returns the stores.city value(s) to filter by if the query
+// names a general area, plus the matched keyword itself (for stripping it
+// back out of the query to isolate the product term) — or ("", nil) if
+// nothing matched.
+func matchCity(q string) (keyword string, cities []string) {
+	q = " " + strings.ToLower(q) + " "
+	for kw, c := range cityAliases {
+		if strings.Contains(q, kw) {
+			return kw, c
+		}
 	}
-	resp.DeliveryOptions = opts
-	return resp
+	return "", nil
+}
+
+type marketRow struct {
+	ID      uuid.UUID      `db:"id"`
+	Name    string         `db:"name"`
+	Aliases pq.StringArray `db:"aliases"`
+}
+
+// matchMarket finds the single named market (e.g. "Balogun Market") a query
+// refers to, by checking the market's name and hand-seeded aliases against
+// the query text. This is the "specific market" tier — one level more
+// precise than a general area — so "men's wear in balogun" resolves to
+// exactly Balogun Market, not every fashion store in Lagos Island.
+func (s *StorefrontService) matchMarket(ctx context.Context, q string) (*marketRow, error) {
+	var markets []marketRow
+	if err := s.db.SelectContext(ctx, &markets, `SELECT id, name, aliases FROM markets`); err != nil {
+		return nil, fmt.Errorf("load markets: %w", err)
+	}
+
+	padded := " " + strings.ToLower(q) + " "
+	for i := range markets {
+		m := &markets[i]
+		if strings.Contains(padded, strings.ToLower(m.Name)) {
+			return m, nil
+		}
+		for _, alias := range m.Aliases {
+			if strings.Contains(padded, strings.ToLower(alias)) {
+				return m, nil
+			}
+		}
+	}
+	return nil, nil
+}
+
+type vendorNameRow struct {
+	ID   uuid.UUID `db:"id"`
+	Name string    `db:"name"`
+}
+
+// vendorMatch pairs the matched store with the actual substring that
+// matched it — the full name, or (see matchVendor's second pass) just its
+// first word — so the caller strips exactly that text back out of the
+// query, not the store's full name regardless of what was actually typed.
+type vendorMatch struct {
+	Store  vendorNameRow
+	Phrase string
+}
+
+// matchVendor finds the single specific vendor store a query names. This is
+// the highest-priority tier — more specific than a named market — so a
+// query naming both a vendor and a market still resolves to just that
+// vendor, and the cross-vendor carousel is suppressed entirely for it
+// (that's the caller's job once it sees MatchType == "vendor").
+//
+// Two passes, most to least precise:
+//  1. The query contains the store's full name verbatim ("...at TechHub
+//     Store"). Word-boundary padded on BOTH the query and the candidate
+//     name — matchMarket only pads the query side, which is a real gap: it
+//     would treat a market literally named "co" as matching any query
+//     containing "co" as a substring of a longer word (e.g. "coffee").
+//  2. Nothing matched the full name — fall back to just the store's first
+//     word ("...at techhub"). This is how people actually reference a
+//     vendor in a short search query; requiring the full name would make
+//     this tier fire on almost nothing in practice (confirmed by testing
+//     "iphone at techhub" against a store literally named "TechHub Store"
+//     — pass 1 alone misses it entirely). Riskier since a single word
+//     matches more broadly, so it's a distinct, lower-priority pass rather
+//     than loosening pass 1's own matching.
+//
+// Both passes skip candidate strings under 4 characters (blunt guard
+// against short-name false positives) and prefer the longest match if
+// several candidates match within the same pass.
+func (s *StorefrontService) matchVendor(ctx context.Context, q string) (*vendorMatch, error) {
+	var vendors []vendorNameRow
+	if err := s.db.SelectContext(ctx, &vendors, `SELECT id, name FROM stores WHERE is_active = TRUE`); err != nil {
+		return nil, fmt.Errorf("load vendors: %w", err)
+	}
+
+	padded := " " + strings.ToLower(q) + " "
+
+	var best *vendorNameRow
+	for i := range vendors {
+		v := &vendors[i]
+		name := strings.ToLower(v.Name)
+		if len(name) < 4 {
+			continue
+		}
+		if strings.Contains(padded, " "+name+" ") && (best == nil || len(name) > len(strings.ToLower(best.Name))) {
+			best = v
+		}
+	}
+	if best != nil {
+		return &vendorMatch{Store: *best, Phrase: best.Name}, nil
+	}
+
+	var bestWord *vendorNameRow
+	var bestWordText string
+	for i := range vendors {
+		v := &vendors[i]
+		first, _, _ := strings.Cut(strings.ToLower(v.Name), " ")
+		if len(first) < 4 {
+			continue
+		}
+		if strings.Contains(padded, " "+first+" ") && len(first) > len(bestWordText) {
+			bestWord = v
+			bestWordText = first
+		}
+	}
+	if bestWord != nil {
+		return &vendorMatch{Store: *bestWord, Phrase: bestWordText}, nil
+	}
+
+	return nil, nil
+}
+
+// stripMatchedPhrase removes a matched vendor/market/city phrase from the
+// query — plus one leading connector word, if present immediately before
+// it — leaving the product term(s) to search catalogue with. Without this,
+// a query like "iphone at techhub" would never ILIKE-match a product named
+// "iPhone 14": "iphone at techhub" isn't a substring of any product name,
+// but the stripped remainder "iphone" is.
+func stripMatchedPhrase(q, phrase string) string {
+	if phrase == "" {
+		return strings.TrimSpace(q)
+	}
+	withConnector := regexp.MustCompile(`(?i)\b(in|at|near|from)\s+` + regexp.QuoteMeta(phrase) + `\b`)
+	remaining := withConnector.ReplaceAllString(q, "")
+	if remaining == q {
+		bare := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(phrase) + `\b`)
+		remaining = bare.ReplaceAllString(q, "")
+	}
+	remaining = regexp.MustCompile(`\s+`).ReplaceAllString(remaining, " ")
+	return strings.TrimSpace(remaining)
+}
+
+type storeSearchRow struct {
+	ID           uuid.UUID       `db:"id"`
+	Name         string          `db:"name"`
+	Slug         string          `db:"slug"`
+	Category     string          `db:"category"`
+	Tagline      sql.NullString  `db:"tagline"`
+	LogoURL      sql.NullString  `db:"logo_url"`
+	HeroImageURL sql.NullString  `db:"hero_image_url"`
+	Address      sql.NullString  `db:"address"`
+	City         sql.NullString  `db:"city"`
+	State        sql.NullString  `db:"state"`
+	MarketID     sql.NullString  `db:"market_id"`
+	MarketName   sql.NullString  `db:"market_name"`
+	DistanceKm   sql.NullFloat64 `db:"distance_km"`
+}
+
+// SearchStores finds stores by free-text query and/or explicit category,
+// optionally sorted by distance from a buyer's location. Powers the
+// consumer-app text and voice search, including resolving which stores are
+// eligible for a cross-vendor product search (see MatchType/RemainingQuery
+// on the response).
+//
+// Location precision, most to least specific:
+//  0. a specific vendor named in the query ("...at TechHub Store") —
+//     filters to exactly that store. Most specific tier: even if a market
+//     is also named, the vendor wins.
+//  1. explicit market_id, or a named market recognized in the query
+//     ("...in balogun") — filters to exactly that market, no distance
+//     fallback, even if that returns zero results.
+//  2. a general area recognized in the query ("...in ikeja") — filters to
+//     that city value, no distance fallback.
+//  3. neither — falls back to distance-from-buyer (if lat/lng given) or a
+//     plain name search.
+func (s *StorefrontService) SearchStores(ctx context.Context, req dto.StoreSearchReq) (dto.StoreSearchListResp, error) {
+	limit := req.Limit
+	if limit <= 0 || limit > 50 {
+		limit = 20
+	}
+	offset := req.Offset
+	if offset < 0 {
+		offset = 0
+	}
+
+	var categoryList []string
+	if req.Category != nil && *req.Category != "" {
+		categoryList = []string{*req.Category}
+	} else if req.Q != nil && *req.Q != "" {
+		categoryList = matchCategories(*req.Q)
+	}
+
+	var matchedStoreID, matchedPhrase string
+	if req.Q != nil && *req.Q != "" {
+		v, err := s.matchVendor(ctx, *req.Q)
+		if err != nil {
+			return dto.StoreSearchListResp{}, err
+		}
+		if v != nil {
+			matchedStoreID = v.Store.ID.String()
+			matchedPhrase = v.Phrase
+		}
+	}
+
+	var matchedMarketID string
+	if matchedStoreID == "" {
+		if req.MarketID != nil && *req.MarketID != "" {
+			matchedMarketID = *req.MarketID
+		} else if req.Q != nil && *req.Q != "" {
+			m, err := s.matchMarket(ctx, *req.Q)
+			if err != nil {
+				return dto.StoreSearchListResp{}, err
+			}
+			if m != nil {
+				matchedMarketID = m.ID.String()
+				matchedPhrase = m.Name
+				// The query may contain an alias rather than the market's
+				// canonical name — prefer whichever string actually appears,
+				// so stripMatchedPhrase removes the right text.
+				lowerQ := strings.ToLower(*req.Q)
+				if !strings.Contains(lowerQ, strings.ToLower(m.Name)) {
+					for _, alias := range m.Aliases {
+						if strings.Contains(lowerQ, strings.ToLower(alias)) {
+							matchedPhrase = alias
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
+	var matchedCities []string
+	var matchedCityKeyword string
+	if matchedStoreID == "" && matchedMarketID == "" && req.Q != nil && *req.Q != "" {
+		matchedCityKeyword, matchedCities = matchCity(*req.Q)
+		if matchedCityKeyword != "" {
+			matchedPhrase = matchedCityKeyword
+		}
+	}
+
+	hasLoc := req.Lat != nil && req.Lng != nil
+	radiusKm := 25.0
+	if req.RadiusKm != nil && *req.RadiusKm > 0 {
+		radiusKm = *req.RadiusKm
+	}
+
+	selectDistance := "NULL::float8 AS distance_km"
+	orderBy := "created_at DESC"
+	whereParts := []string{"is_active = TRUE"}
+	var args []interface{}
+	argN := 1
+	matchType := "none"
+
+	switch {
+	case matchedStoreID != "":
+		whereParts = append(whereParts, fmt.Sprintf("id = $%d::uuid", argN))
+		args = append(args, matchedStoreID)
+		argN++
+		matchType = "vendor"
+	case matchedMarketID != "":
+		whereParts = append(whereParts, fmt.Sprintf("market_id = $%d::uuid", argN))
+		args = append(args, matchedMarketID)
+		argN++
+		matchType = "market"
+	case len(matchedCities) > 0:
+		whereParts = append(whereParts, fmt.Sprintf("city = ANY($%d)", argN))
+		args = append(args, matchedCities)
+		argN++
+		matchType = "city"
+	case hasLoc:
+		selectDistance = fmt.Sprintf(
+			"ST_Distance(coordinates::geography, ST_SetSRID(ST_MakePoint($%d,$%d),4326)::geography) / 1000 AS distance_km",
+			argN, argN+1)
+		args = append(args, *req.Lng, *req.Lat)
+		whereParts = append(whereParts, fmt.Sprintf(
+			"(coordinates IS NULL OR ST_DWithin(coordinates::geography, ST_SetSRID(ST_MakePoint($%d,$%d),4326)::geography, $%d))",
+			argN, argN+1, argN+2))
+		args = append(args, radiusKm*1000)
+		argN += 3
+		orderBy = "(coordinates IS NULL) ASC, distance_km ASC NULLS LAST"
+		matchType = "distance"
+	}
+
+	if len(categoryList) > 0 {
+		whereParts = append(whereParts, fmt.Sprintf("category = ANY($%d)", argN))
+		args = append(args, categoryList)
+		argN++
+	} else if matchedStoreID == "" && matchedMarketID == "" && len(matchedCities) == 0 && req.Q != nil && *req.Q != "" {
+		whereParts = append(whereParts, fmt.Sprintf("(name ILIKE $%d OR tagline ILIKE $%d)", argN, argN))
+		args = append(args, "%"+*req.Q+"%")
+		argN++
+	}
+
+	// Fetch one extra row to know whether there's a next page, without a
+	// separate COUNT(*) query.
+	args = append(args, limit+1, offset)
+	query := fmt.Sprintf(`
+		SELECT id, name, slug, category, tagline, logo_url, hero_image_url, address, city, state,
+		       market_id, (SELECT name FROM markets m WHERE m.id = stores.market_id) AS market_name,
+		       %s
+		FROM stores
+		WHERE %s
+		ORDER BY %s
+		LIMIT $%d OFFSET $%d`,
+		selectDistance, strings.Join(whereParts, " AND "), orderBy, argN, argN+1)
+
+	rows, err := s.db.QueryxContext(ctx, query, args...)
+	if err != nil {
+		return dto.StoreSearchListResp{}, fmt.Errorf("search stores: %w", err)
+	}
+	defer rows.Close()
+
+	out := []dto.StoreSearchResp{}
+	for rows.Next() {
+		var r storeSearchRow
+		if err := rows.StructScan(&r); err != nil {
+			return dto.StoreSearchListResp{}, fmt.Errorf("scan store: %w", err)
+		}
+		item := dto.StoreSearchResp{
+			ID:           r.ID.String(),
+			Name:         r.Name,
+			Slug:         r.Slug,
+			Category:     r.Category,
+			Tagline:      nullToPtr(r.Tagline),
+			LogoURL:      nullToPtr(r.LogoURL),
+			HeroImageURL: nullToPtr(r.HeroImageURL),
+			Address:      nullToPtr(r.Address),
+			City:         nullToPtr(r.City),
+			State:        nullToPtr(r.State),
+			MarketID:     nullToPtr(r.MarketID),
+			MarketName:   nullToPtr(r.MarketName),
+		}
+		if r.DistanceKm.Valid {
+			d := r.DistanceKm.Float64
+			item.DistanceKm = &d
+		}
+		out = append(out, item)
+	}
+
+	hasMore := len(out) > limit
+	if hasMore {
+		out = out[:limit]
+	}
+
+	resp := dto.StoreSearchListResp{
+		Stores:    out,
+		HasMore:   hasMore,
+		MatchType: matchType,
+	}
+	if req.Q != nil {
+		resp.RemainingQuery = stripMatchedPhrase(*req.Q, matchedPhrase)
+	}
+	if matchedStoreID != "" {
+		resp.MatchedStoreID = &matchedStoreID
+	}
+	if matchedMarketID != "" {
+		resp.MatchedMarketID = &matchedMarketID
+	}
+	return resp, nil
+}
+
+// ListMarkets returns major markets, optionally filtered by state and/or
+// city — populates the vendor-web "which market is your store in?" dropdown.
+func (s *StorefrontService) ListMarkets(ctx context.Context, req dto.MarketReq) ([]dto.MarketResp, error) {
+	whereParts := []string{"1=1"}
+	var args []interface{}
+	argN := 1
+
+	if req.State != nil && *req.State != "" {
+		whereParts = append(whereParts, fmt.Sprintf("state ILIKE $%d", argN))
+		args = append(args, *req.State)
+		argN++
+	}
+	if req.City != nil && *req.City != "" {
+		whereParts = append(whereParts, fmt.Sprintf("city ILIKE $%d", argN))
+		args = append(args, *req.City)
+		argN++
+	}
+
+	query := fmt.Sprintf(`SELECT id, name, city, state FROM markets WHERE %s ORDER BY name`, strings.Join(whereParts, " AND "))
+	rows, err := s.db.QueryxContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list markets: %w", err)
+	}
+	defer rows.Close()
+
+	out := []dto.MarketResp{}
+	for rows.Next() {
+		var r struct {
+			ID    uuid.UUID `db:"id"`
+			Name  string    `db:"name"`
+			City  string    `db:"city"`
+			State string    `db:"state"`
+		}
+		if err := rows.StructScan(&r); err != nil {
+			return nil, fmt.Errorf("scan market: %w", err)
+		}
+		out = append(out, dto.MarketResp{ID: r.ID.String(), Name: r.Name, City: r.City, State: r.State})
+	}
+	return out, nil
 }
 
 // ── Staff ─────────────────────────────────────────────────────────────────────
@@ -288,30 +914,32 @@ const storeCols = `id, vendor_id, name, slug, category, currency,
           COALESCE(theme_config, '{}') AS theme_config, is_active, created_at`
 
 type storeRow struct {
-	ID                 uuid.UUID      `db:"id"`
-	VendorID           uuid.UUID      `db:"vendor_id"`
-	Name               string         `db:"name"`
-	Slug               string         `db:"slug"`
-	Category           string         `db:"category"`
-	Currency           string         `db:"currency"`
-	TeamSize           sql.NullString `db:"team_size"`
-	StaffRange         sql.NullString `db:"staff_range"`
-	Tagline            sql.NullString `db:"tagline"`
-	LogoURL            sql.NullString `db:"logo_url"`
-	HeroImageURL       sql.NullString `db:"hero_image_url"`
-	SiteDescription    sql.NullString `db:"site_description"`
-	SocialLinks        []byte         `db:"social_links"`
-	SupportPhone       sql.NullString `db:"support_phone"`
-	Address            sql.NullString `db:"address"`
-	City               sql.NullString `db:"city"`
-	State              sql.NullString `db:"state"`
-	MarketID           uuid.NullUUID  `db:"market_id"`
-	MarketName         sql.NullString `db:"market_name"`
-	CustomDomain       sql.NullString `db:"custom_domain"`
-	CustomDomainStatus string         `db:"custom_domain_status"`
-	ThemeConfig        []byte         `db:"theme_config"`
-	IsActive           bool           `db:"is_active"`
-	CreatedAt          time.Time      `db:"created_at"`
+	ID                        uuid.UUID      `db:"id"`
+	VendorID                  uuid.UUID      `db:"vendor_id"`
+	Name                      string         `db:"name"`
+	Slug                      string         `db:"slug"`
+	Category                  string         `db:"category"`
+	Currency                  string         `db:"currency"`
+	TeamSize                  sql.NullString `db:"team_size"`
+	StaffRange                sql.NullString `db:"staff_range"`
+	Tagline                   sql.NullString `db:"tagline"`
+	LogoURL                   sql.NullString `db:"logo_url"`
+	HeroImageURL              sql.NullString `db:"hero_image_url"`
+	SiteDescription           sql.NullString `db:"site_description"`
+	SocialLinks               []byte         `db:"social_links"`
+	SupportPhone              sql.NullString `db:"support_phone"`
+	Address                   sql.NullString `db:"address"`
+	City                      sql.NullString `db:"city"`
+	State                     sql.NullString `db:"state"`
+	MarketID                  sql.NullString `db:"market_id"`
+	MarketName                sql.NullString `db:"market_name"`
+	CustomDomain              sql.NullString `db:"custom_domain"`
+	CustomDomainStatus        string         `db:"custom_domain_status"`
+	ThemeConfig               []byte         `db:"theme_config"`
+	DeliveryFeeKobo           int64          `db:"delivery_fee_kobo"`
+	FreeDeliveryThresholdKobo int64          `db:"free_delivery_threshold_kobo"`
+	IsActive                  bool           `db:"is_active"`
+	CreatedAt                 time.Time      `db:"created_at"`
 }
 
 type staffRow struct {
@@ -326,7 +954,13 @@ type staffRow struct {
 func (s *StorefrontService) getStoreByVendor(ctx context.Context, userID uuid.UUID) (dto.StoreResp, error) {
 	var row storeRow
 	err := s.db.QueryRowxContext(ctx, `
-		SELECT `+storeCols+`
+		SELECT id, vendor_id, name, slug, category, currency,
+		       team_size, staff_range, tagline, logo_url, hero_image_url, site_description,
+		       COALESCE(social_links, '{}') AS social_links,
+		       support_phone, address, city, state, market_id,
+		       (SELECT name FROM markets m WHERE m.id = market_id) AS market_name,
+		       custom_domain, custom_domain_status,
+		       COALESCE(theme_config, '{}') AS theme_config, delivery_fee_kobo, free_delivery_threshold_kobo, is_active, created_at
 		FROM stores WHERE vendor_id=$1`, userID).StructScan(&row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.StoreResp{}, apperrors.NotFound("store not found")
@@ -348,31 +982,30 @@ func (s *StorefrontService) assertOwner(ctx context.Context, userID, storeID uui
 
 func rowToResp(r storeRow) dto.StoreResp {
 	resp := dto.StoreResp{
-		ID:                 r.ID.String(),
-		VendorID:           r.VendorID.String(),
-		Name:               r.Name,
-		Slug:               r.Slug,
-		Category:           r.Category,
-		Currency:           r.Currency,
-		TeamSize:           nullToPtr(r.TeamSize),
-		StaffRange:         nullToPtr(r.StaffRange),
-		Tagline:            nullToPtr(r.Tagline),
-		LogoURL:            nullToPtr(r.LogoURL),
-		HeroImageURL:       nullToPtr(r.HeroImageURL),
-		SiteDescription:    nullToPtr(r.SiteDescription),
-		SupportPhone:       nullToPtr(r.SupportPhone),
-		Address:            nullToPtr(r.Address),
-		City:               nullToPtr(r.City),
-		State:              nullToPtr(r.State),
-		MarketName:         nullToPtr(r.MarketName),
-		CustomDomain:       nullToPtr(r.CustomDomain),
-		CustomDomainStatus: r.CustomDomainStatus,
-		IsActive:           r.IsActive,
-		CreatedAt:          r.CreatedAt.UTC().Format(time.RFC3339),
-	}
-	if r.MarketID.Valid {
-		id := r.MarketID.UUID.String()
-		resp.MarketID = &id
+		ID:                        r.ID.String(),
+		VendorID:                  r.VendorID.String(),
+		Name:                      r.Name,
+		Slug:                      r.Slug,
+		Category:                  r.Category,
+		Currency:                  r.Currency,
+		TeamSize:                  nullToPtr(r.TeamSize),
+		StaffRange:                nullToPtr(r.StaffRange),
+		Tagline:                   nullToPtr(r.Tagline),
+		LogoURL:                   nullToPtr(r.LogoURL),
+		HeroImageURL:              nullToPtr(r.HeroImageURL),
+		SiteDescription:           nullToPtr(r.SiteDescription),
+		SupportPhone:              nullToPtr(r.SupportPhone),
+		Address:                   nullToPtr(r.Address),
+		City:                      nullToPtr(r.City),
+		State:                     nullToPtr(r.State),
+		MarketID:                  nullToPtr(r.MarketID),
+		MarketName:                nullToPtr(r.MarketName),
+		CustomDomain:              nullToPtr(r.CustomDomain),
+		CustomDomainStatus:        r.CustomDomainStatus,
+		DeliveryFeeKobo:           r.DeliveryFeeKobo,
+		FreeDeliveryThresholdKobo: r.FreeDeliveryThresholdKobo,
+		IsActive:                  r.IsActive,
+		CreatedAt:                 r.CreatedAt.UTC().Format(time.RFC3339),
 	}
 	// social_links and theme_config are JSONB — only set when non-empty.
 	if len(r.SocialLinks) > 0 && string(r.SocialLinks) != "{}" && string(r.SocialLinks) != "null" {

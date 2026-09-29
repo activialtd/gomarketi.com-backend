@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/activialtd/gomarketi.com-backend/services/identity/internal/dto"
 )
@@ -54,4 +55,28 @@ func (h *Handler) GetSubscription(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, sub)
+}
+
+// ProvisionDVA godoc
+// POST /v1/identity/internal/provision-dva
+// Internal service-to-service only (X-Internal-Key) — called by storefront's
+// CreateStore right after a store row exists, so the vendor's Dedicated
+// Virtual Account is named after their store instead of their personal name.
+func (h *Handler) ProvisionDVA(c *gin.Context) {
+	var req dto.ProvisionDVAReq
+	if !h.bind(c, &req) {
+		return
+	}
+
+	userID, err := uuid.Parse(req.UserID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.ErrorResp{Error: "invalid user_id"})
+		return
+	}
+
+	if err := h.svc.ProvisionVendorDVA(c.Request.Context(), userID, req.StoreName); err != nil {
+		h.writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"provisioned": true})
 }

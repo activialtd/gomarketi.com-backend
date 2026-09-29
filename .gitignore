@@ -28,10 +28,14 @@ bin/
 # Ignore compiled binaries named "server" at repo root or one level deep,
 # but NOT cmd/server source directories (which are Go package entry points)
 /server
+services/gateway/server
 scripts/migrate/migrate
 *.test
 coverage.out
 coverage.html
+
+# ── Local-only scripts with embedded credentials — never commit ──────────────
+scripts/seed-cobi/
 
 # ── macOS ─────────────────────────────────────────────────────────────────────
 .DS_Store
@@ -74,9 +78,13 @@ logs/
 **/.terraform/
 *.tfstate
 *.tfstate.backup
+*.tfplan
 *.tfvars
 !*.tfvars.example
-.terraform.lock.hcl
+# infrastructure/terraform/environments/*.tfvars hold only non-secret
+# metadata (environment name, region, CLI profile) — safe and necessary to
+# commit for reproducibility. Real secrets live in SSM Parameter Store.
+!infrastructure/terraform/environments/*.tfvars
 .vercel
 
 # ── Railway env files — contain real secrets, never commit ────────────────────

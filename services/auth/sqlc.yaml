@@ -8,6 +8,8 @@ sql:
       - "../../shared/migrations/0003_create_otp_sessions.sql"
       - "../../shared/migrations/0004_create_refresh_tokens.sql"
       - "../../shared/migrations/0005_create_buyer_profiles.sql"
+      - "../../shared/migrations/0009_add_password_hash.sql"
+      - "../../shared/migrations/0014_add_otp_purpose.sql"
     gen:
       go:
         package: "db"

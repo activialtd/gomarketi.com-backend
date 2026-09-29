@@ -11,9 +11,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
 
-	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
 	"github.com/activialtd/gomarketi.com-backend/services/auth/internal/dto"
 	"github.com/activialtd/gomarketi.com-backend/services/auth/internal/service"
+	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
 )
 
 // Handler holds the service and any handler-level config.
@@ -85,6 +85,27 @@ func (h *Handler) setRefreshCookie(c *gin.Context, rawToken string) {
 		h.secure,
 		true, // HttpOnly
 	)
+}
+
+// isMobileClient reports whether the caller is a native app rather than a
+// browser. Native clients (Expo/React Native) can't rely on a cookie jar the
+// way a browser does, so they identify themselves with this header and get
+// the refresh token in the JSON body instead. Web clients never send this
+// header, so their refresh token stays cookie-only (HttpOnly, XSS-safe).
+func isMobileClient(c *gin.Context) bool {
+	return c.GetHeader("X-Client-Platform") == "mobile"
+}
+
+// respondWithAuth always sets the refresh cookie, and additionally embeds
+// the raw refresh token in the JSON body for mobile clients. Use this for
+// every endpoint that issues a new refresh token (register, login, otp
+// verify, oauth, token refresh).
+func (h *Handler) respondWithAuth(c *gin.Context, status int, resp dto.AuthResp, rawToken string) {
+	h.setRefreshCookie(c, rawToken)
+	if isMobileClient(c) {
+		resp.RefreshToken = rawToken
+	}
+	c.JSON(status, resp)
 }
 
 // clearRefreshCookie expires the refresh token cookie (logout).

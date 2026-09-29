@@ -1,16 +1,25 @@
 package handler
 
 import (
+	"net/http"
+
 	"github.com/gin-gonic/gin"
+	"github.com/jmoiron/sqlx"
 	"github.com/rs/zerolog"
 
 	"github.com/activialtd/gomarketi.com-backend/shared/pkg/middleware"
 )
 
 // Register mounts all auth routes onto r.
-func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []string) {
+func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []string, db *sqlx.DB) {
+	// Health check — load balancer target group probe. Registered before any
+	// middleware so it never depends on CORS/auth/recovery being healthy.
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+
 	r.Use(
-		middleware.Recovery(log),
+		middleware.Recovery(log, db, "auth"),
 		middleware.RequestID(),
 		middleware.RequestLogger(log),
 		middleware.CORS(allowedOrigins),
@@ -23,6 +32,10 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 			// Password-based registration and login
 			auth.POST("/register", h.Register)
 			auth.POST("/login", h.Login)
+
+			password := auth.Group("/password")
+			password.POST("/forgot", h.ForgotPassword)
+			password.POST("/reset", h.ResetPassword)
 
 			// Staff login — separate from vendor/buyer login
 			staff := auth.Group("/staff")

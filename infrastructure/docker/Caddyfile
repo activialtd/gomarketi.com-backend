@@ -1,0 +1,7 @@
+{
+	admin off
+}
+
+{$SITE_ADDRESS} {
+	reverse_proxy gateway:8080
+}

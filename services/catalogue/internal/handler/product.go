@@ -3,6 +3,7 @@ package handler
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -32,6 +33,51 @@ func (h *Handler) ListPublicProductsByQuery(c *gin.Context) {
 	}
 
 	resp, err := h.svc.ListProducts(c.Request.Context(), storeID, page, perPage, catID, q, true)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+// SearchPublicProducts godoc
+// GET /v1/catalogue/public/products/search?q=&store_ids=id1,id2&page=1&per_page=24
+// No auth. Cross-vendor search — store_ids is required (comma-separated);
+// resolving which stores are eligible (named vendor, named market, or
+// nearest-N by distance) happens client-side via the storefront service
+// before calling this. An empty store_ids returns an empty page rather
+// than scanning every store on the platform.
+func (h *Handler) SearchPublicProducts(c *gin.Context) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "24"))
+
+	var storeIDs []string
+	if v := c.Query("store_ids"); v != "" {
+		for _, id := range strings.Split(v, ",") {
+			if id = strings.TrimSpace(id); id != "" {
+				storeIDs = append(storeIDs, id)
+			}
+		}
+	}
+
+	resp, err := h.svc.SearchProducts(c.Request.Context(), storeIDs, c.Query("q"), page, perPage)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+// SearchCanonicalProducts godoc
+// GET /v1/catalogue/canonical-products/search?q=
+// Authenticated (any vendor) — powers the create-product typeahead so a
+// vendor can link their listing to an existing canonical product instead
+// of minting a duplicate.
+func (h *Handler) SearchCanonicalProducts(c *gin.Context) {
+	if _, ok := h.callerStoreID(c); !ok {
+		return
+	}
+	resp, err := h.svc.SearchCanonicalProducts(c.Request.Context(), c.Query("q"))
 	if err != nil {
 		h.writeError(c, err)
 		return

@@ -13,14 +13,14 @@ import (
 	"github.com/rs/zerolog"
 	"golang.org/x/crypto/bcrypt"
 
-	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
-	sharedjwt "github.com/activialtd/gomarketi.com-backend/shared/pkg/jwt"
 	"github.com/activialtd/gomarketi.com-backend/services/auth/internal/domain"
 	"github.com/activialtd/gomarketi.com-backend/services/auth/internal/dto"
 	"github.com/activialtd/gomarketi.com-backend/services/auth/internal/email"
 	"github.com/activialtd/gomarketi.com-backend/services/auth/internal/oauth"
 	"github.com/activialtd/gomarketi.com-backend/services/auth/internal/repository"
 	"github.com/activialtd/gomarketi.com-backend/services/auth/internal/repository/db"
+	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
+	sharedjwt "github.com/activialtd/gomarketi.com-backend/shared/pkg/jwt"
 )
 
 const refreshTTL = 30 * 24 * time.Hour
@@ -181,6 +181,135 @@ func (s *AuthService) LoginWithPassword(ctx context.Context, req dto.LoginReq) (
 	}, refreshToken, nil
 }
 
+// RequestPasswordReset emails a reset code if, and only if, an account with
+// this email exists and has a password set. The response is identical either
+// way (generic OTPRequestResp) so the endpoint never reveals account existence.
+func (s *AuthService) RequestPasswordReset(ctx context.Context, req dto.ForgotPasswordReq) (dto.OTPRequestResp, error) {
+	sessionToken := uuid.New().String()
+	expiresIn := int(domain.OTPExpiry.Seconds())
+
+	loginUser, err := s.store.Queries().GetUserForLogin(ctx, req.Email)
+	if err != nil {
+		// No account with this email — still return a session token so the
+		// response shape is indistinguishable, but never send anything.
+		return dto.OTPRequestResp{SessionToken: sessionToken, ExpiresIn: expiresIn}, nil
+	}
+	if !loginUser.PasswordHash.Valid {
+		// Account exists but was created via Google/Apple — nothing to reset.
+		// The real inbox owner learns this from the (never-sent-here) email
+		// only if we choose to notify them; skipping that is fine for v1.
+		return dto.OTPRequestResp{SessionToken: sessionToken, ExpiresIn: expiresIn}, nil
+	}
+
+	otp, err := domain.GenerateOTP()
+	if err != nil {
+		return dto.OTPRequestResp{}, apperrors.Internal(fmt.Errorf("generate otp: %w", err))
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(otp), bcrypt.DefaultCost)
+	if err != nil {
+		return dto.OTPRequestResp{}, apperrors.Internal(fmt.Errorf("hash otp: %w", err))
+	}
+
+	_, err = s.store.Queries().CreateOTPSession(ctx, db.CreateOTPSessionParams{
+		Email:        req.Email,
+		SessionToken: sessionToken,
+		OtpHash:      string(hash),
+		ExpiresAt:    time.Now().UTC().Add(domain.OTPExpiry),
+		Purpose:      domain.OTPPurposePasswordReset,
+	})
+	if err != nil {
+		return dto.OTPRequestResp{}, apperrors.Internal(fmt.Errorf("create otp session: %w", err))
+	}
+
+	if err = s.emailer.SendPasswordReset(ctx, req.Email, otp); err != nil {
+		s.log.Error().Err(err).Str("email", req.Email).Msg("failed to send password reset email")
+		return dto.OTPRequestResp{}, apperrors.Internal(fmt.Errorf("send password reset email: %w", err))
+	}
+
+	return dto.OTPRequestResp{SessionToken: sessionToken, ExpiresIn: expiresIn}, nil
+}
+
+// ResetPassword verifies a password-reset OTP and sets a new password.
+// All existing sessions for the account are revoked afterwards.
+func (s *AuthService) ResetPassword(ctx context.Context, req dto.ResetPasswordReq) error {
+	if req.NewPassword != req.ConfirmNewPassword {
+		return apperrors.BadRequest("passwords do not match")
+	}
+
+	q := s.store.Queries()
+
+	session, err := q.GetOTPSessionByToken(ctx, req.SessionToken)
+	if err != nil {
+		return apperrors.Unauthorized("invalid session token")
+	}
+	if session.Purpose != domain.OTPPurposePasswordReset {
+		return apperrors.Unauthorized("invalid session token")
+	}
+
+	otpSession := domain.OTPSession{
+		ID:        session.ID.String(),
+		Email:     session.Email,
+		OTPHash:   session.OtpHash,
+		Attempts:  int(session.Attempts),
+		ExpiresAt: session.ExpiresAt,
+		Purpose:   session.Purpose,
+	}
+	if session.UsedAt.Valid {
+		t := session.UsedAt.Time
+		otpSession.UsedAt = &t
+	}
+
+	if err = otpSession.ValidateForVerification(); err != nil {
+		switch {
+		case errors.Is(err, domain.ErrOTPAlreadyUsed):
+			return apperrors.Unauthorized("code already used")
+		case errors.Is(err, domain.ErrOTPExpired):
+			return apperrors.Unauthorized("code expired")
+		case errors.Is(err, domain.ErrOTPExhausted):
+			return apperrors.TooManyRequests("too many attempts")
+		}
+	}
+
+	// Increment attempts BEFORE bcrypt.Compare (timing attack prevention).
+	updatedSession, err := q.IncrementOTPAttempts(ctx, session.ID)
+	if err != nil {
+		return apperrors.Internal(fmt.Errorf("increment attempts: %w", err))
+	}
+
+	if err = bcrypt.CompareHashAndPassword([]byte(updatedSession.OtpHash), []byte(req.OTP)); err != nil {
+		if int(updatedSession.Attempts) >= domain.MaxOTPAttempts {
+			return apperrors.TooManyRequests("too many attempts")
+		}
+		return apperrors.Unauthorized("invalid code")
+	}
+
+	loginUser, err := q.GetUserForLogin(ctx, session.Email)
+	if err != nil {
+		return apperrors.Internal(fmt.Errorf("get user: %w", err))
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return apperrors.Internal(fmt.Errorf("hash password: %w", err))
+	}
+
+	err = s.store.ExecTx(ctx, func(qtx *db.Queries) error {
+		if txErr := qtx.UpdatePasswordHash(ctx, loginUser.ID, string(hash)); txErr != nil {
+			return txErr
+		}
+		if txErr := qtx.MarkOTPSessionUsed(ctx, session.ID); txErr != nil {
+			return txErr
+		}
+		return qtx.RevokeAllRefreshTokensForUser(ctx, loginUser.ID)
+	})
+	if err != nil {
+		return apperrors.Internal(fmt.Errorf("reset password: %w", err))
+	}
+
+	return nil
+}
+
 // ── OTP ───────────────────────────────────────────────────────────────────────
 
 // RequestOTP generates a 6-digit OTP, stores it hashed, and emails it.
@@ -203,6 +332,7 @@ func (s *AuthService) RequestOTP(ctx context.Context, req dto.OTPRequestReq) (dt
 		SessionToken: sessionToken,
 		OtpHash:      string(hash),
 		ExpiresAt:    expiresAt,
+		Purpose:      domain.OTPPurposeLogin,
 	})
 	if err != nil {
 		return dto.OTPRequestResp{}, apperrors.Internal(fmt.Errorf("create otp session: %w", err))
@@ -228,6 +358,10 @@ func (s *AuthService) VerifyOTP(ctx context.Context, req dto.OTPVerifyReq) (dto.
 		return dto.AuthResp{}, "", apperrors.Unauthorized("invalid session token")
 	}
 
+	if session.Purpose != domain.OTPPurposeLogin {
+		return dto.AuthResp{}, "", apperrors.Unauthorized("invalid session token")
+	}
+
 	// Map db row → domain entity.
 	otpSession := domain.OTPSession{
 		ID:        session.ID.String(),
@@ -235,6 +369,7 @@ func (s *AuthService) VerifyOTP(ctx context.Context, req dto.OTPVerifyReq) (dto.
 		OTPHash:   session.OtpHash,
 		Attempts:  int(session.Attempts),
 		ExpiresAt: session.ExpiresAt,
+		Purpose:   session.Purpose,
 	}
 	if session.UsedAt.Valid {
 		t := session.UsedAt.Time
@@ -599,9 +734,9 @@ func (s *AuthService) StaffLogin(ctx context.Context, req dto.LoginReq) (dto.Aut
 	return dto.AuthResp{
 		AccessToken: accessToken,
 		User: dto.UserDTO{
-			ID:      staff.ID,
-			Email:   &email,
-			IsBuyer: false,
+			ID:       staff.ID,
+			Email:    &email,
+			IsBuyer:  false,
 			IsVendor: false,
 		},
 	}, nil

@@ -1,10 +1,10 @@
 -- name: CreateOTPSession :one
-INSERT INTO otp_sessions (email, session_token, otp_hash, expires_at)
-VALUES ($1, $2, $3, $4)
-RETURNING id, email, session_token, otp_hash, attempts, expires_at, used_at, created_at;
+INSERT INTO otp_sessions (email, session_token, otp_hash, expires_at, purpose)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, email, session_token, otp_hash, attempts, expires_at, used_at, created_at, purpose;
 
 -- name: GetOTPSessionByToken :one
-SELECT id, email, session_token, otp_hash, attempts, expires_at, used_at, created_at
+SELECT id, email, session_token, otp_hash, attempts, expires_at, used_at, created_at, purpose
 FROM otp_sessions
 WHERE session_token = $1;
 
@@ -15,7 +15,7 @@ WHERE session_token = $1;
 UPDATE otp_sessions
 SET attempts = attempts + 1
 WHERE id = $1
-RETURNING id, email, session_token, otp_hash, attempts, expires_at, used_at, created_at;
+RETURNING id, email, session_token, otp_hash, attempts, expires_at, used_at, created_at, purpose;
 
 -- name: MarkOTPSessionUsed :exec
 UPDATE otp_sessions

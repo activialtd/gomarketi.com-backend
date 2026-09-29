@@ -28,6 +28,19 @@ type OTPRequestReq struct {
 	Email string `json:"email" validate:"required,email"`
 }
 
+// ForgotPasswordReq is the body for POST /v1/auth/password/forgot.
+type ForgotPasswordReq struct {
+	Email string `json:"email" validate:"required,email"`
+}
+
+// ResetPasswordReq is the body for POST /v1/auth/password/reset.
+type ResetPasswordReq struct {
+	SessionToken       string `json:"session_token"        validate:"required"`
+	OTP                string `json:"otp"                  validate:"required,len=6,numeric"`
+	NewPassword        string `json:"new_password"         validate:"required,min=8"`
+	ConfirmNewPassword string `json:"confirm_new_password" validate:"required"`
+}
+
 // OTPVerifyReq is the body for POST /v1/auth/otp/verify.
 type OTPVerifyReq struct {
 	SessionToken string `json:"session_token" validate:"required"`
@@ -63,10 +76,14 @@ type OTPRequestResp struct {
 }
 
 // AuthResp is returned after any successful authentication.
-// The refresh token is NOT included here — it is set as an HttpOnly cookie.
+// The refresh token is set as an HttpOnly cookie for web clients and is
+// NOT included here by default. Native clients (which can't rely on a
+// cookie jar) send "X-Client-Platform: mobile" and get it in RefreshToken
+// instead — see handler.respondWithAuth.
 type AuthResp struct {
-	AccessToken string  `json:"access_token"`
-	User        UserDTO `json:"user"`
+	AccessToken  string  `json:"access_token"`
+	RefreshToken string  `json:"refresh_token,omitempty"`
+	User         UserDTO `json:"user"`
 }
 
 // UserDTO is the user representation returned to clients.

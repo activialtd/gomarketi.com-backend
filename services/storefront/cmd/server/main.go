@@ -21,6 +21,7 @@ import (
 	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/handler"
 	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/phone"
 	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/service"
+	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/vercel"
 )
 
 func main() {
@@ -104,12 +105,37 @@ func run(log zerolog.Logger) error {
 		storeDomain = "gomarketi.com"
 	}
 
-	svc := service.New(db, welcomeMailer, storeDomain, phones, log)
+	var domainRegistrar vercel.Registrar
+	if token := viper.GetString("VERCEL_API_TOKEN"); token != "" {
+		vc, vcErr := vercel.New(vercel.Config{
+			APIToken:  token,
+			ProjectID: viper.GetString("VERCEL_PROJECT_ID"),
+			TeamID:    viper.GetString("VERCEL_TEAM_ID"),
+		})
+		if vcErr != nil {
+			log.Warn().Err(vcErr).Msg("vercel domain registration: config invalid, using noop")
+			domainRegistrar = vercel.NoopRegistrar{}
+		} else {
+			domainRegistrar = vc
+			log.Info().Msg("vercel domain registration: enabled")
+		}
+	} else {
+		domainRegistrar = vercel.NoopRegistrar{}
+		log.Warn().Msg("vercel domain registration: no VERCEL_API_TOKEN, using noop")
+	}
+
+	identityInternalURL := viper.GetString("IDENTITY_INTERNAL_URL")
+	if identityInternalURL == "" {
+		identityInternalURL = "http://localhost:8081"
+	}
+	internalAPIKey := viper.GetString("INTERNAL_API_KEY")
+
+	svc := service.New(db, welcomeMailer, domainRegistrar, storeDomain, identityInternalURL, internalAPIKey, phones, log)
 	h := handler.New(svc)
 	r := gin.New()
 
 	allowedOrigins := viper.GetStringSlice("ALLOWED_ORIGINS")
-	handler.Register(r, h, log, allowedOrigins)
+	handler.Register(r, h, log, allowedOrigins, db)
 
 	port := viper.GetString("PORT")
 	if port == "" {

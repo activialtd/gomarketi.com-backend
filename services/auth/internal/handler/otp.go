@@ -5,8 +5,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
 	"github.com/activialtd/gomarketi.com-backend/services/auth/internal/dto"
+	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
 )
 
 // RequestOTP godoc
@@ -43,8 +43,7 @@ func (h *Handler) VerifyOTP(c *gin.Context) {
 		return
 	}
 
-	h.setRefreshCookie(c, rawToken)
-	c.JSON(http.StatusOK, resp)
+	h.respondWithAuth(c, http.StatusOK, resp, rawToken)
 }
 
 // writeError maps an AppError to the correct HTTP status and JSON body.

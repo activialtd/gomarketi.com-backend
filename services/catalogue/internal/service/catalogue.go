@@ -5,15 +5,18 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
 	"github.com/rs/zerolog"
 
-	"github.com/activialtd/gomarketi.com-backend/services/catalogue/internal/dto"
 	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
+	"github.com/activialtd/gomarketi.com-backend/shared/pkg/planlimits"
+	"github.com/activialtd/gomarketi.com-backend/services/catalogue/internal/dto"
 )
 
 type CatalogueService struct {
@@ -83,21 +86,204 @@ func (s *CatalogueService) ListProducts(ctx context.Context, storeID uuid.UUID, 
 	return dto.ProductListResp{Products: products, Total: total, Page: page, PerPage: perPage}, nil
 }
 
+// SearchProducts finds published products across an explicit set of stores —
+// it is never a full-table scan. Resolving which stores are eligible (a
+// named vendor, a named market, or the nearest N by geo-distance) is always
+// the caller's job via the storefront service; if storeIDs is empty, this
+// returns an empty page immediately rather than guessing a scope.
+//
+// A product matches if its own name is a plain substring hit (catches
+// everything a same-store search already catches today), OR — if it's
+// linked to a canonical product — that canonical product's name fuzzy-
+// matches the query via pg_trgm similarity. Canonical-linked matches rank
+// first, since they're the higher-confidence signal.
+func (s *CatalogueService) SearchProducts(ctx context.Context, storeIDs []string, q string, page, perPage int) (dto.ProductSearchListResp, error) {
+	if page < 1 {
+		page = 1
+	}
+	if perPage < 1 || perPage > 100 {
+		perPage = 24
+	}
+	offset := (page - 1) * perPage
+
+	if len(storeIDs) == 0 {
+		return dto.ProductSearchListResp{Products: []dto.ProductResp{}, Total: 0, Page: page, PerPage: perPage}, nil
+	}
+
+	q = strings.TrimSpace(q)
+
+	base := `FROM products WHERE store_id = ANY($1::uuid[]) AND is_published = TRUE`
+	args := []any{pq.Array(storeIDs)}
+	i := 2
+
+	if q != "" {
+		base += fmt.Sprintf(` AND (name ILIKE $%d OR EXISTS (
+			SELECT 1 FROM canonical_products cp
+			WHERE cp.id = products.canonical_product_id
+			  AND similarity(cp.normalized_name, $%d) > 0.25
+		))`, i, i+1)
+		args = append(args, "%"+q+"%", strings.ToLower(q))
+		i += 2
+	}
+
+	var total int64
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) `+base, args...).Scan(&total); err != nil {
+		return dto.ProductSearchListResp{}, fmt.Errorf("count search products: %w", err)
+	}
+
+	listArgs := append(args, perPage, offset)
+	rows, err := s.db.QueryxContext(ctx,
+		`SELECT id, store_id, name, description, category_id, price_kobo, stock, sku,
+		        images, tags, is_digital, is_published, canonical_product_id, created_at, updated_at `+
+			base+fmt.Sprintf(` ORDER BY (canonical_product_id IS NOT NULL) DESC, created_at DESC LIMIT $%d OFFSET $%d`, i, i+1),
+		listArgs...)
+	if err != nil {
+		return dto.ProductSearchListResp{}, fmt.Errorf("search products: %w", err)
+	}
+	defer rows.Close()
+
+	products := make([]dto.ProductResp, 0)
+	for rows.Next() {
+		var r productRow
+		if err := rows.StructScan(&r); err != nil {
+			return dto.ProductSearchListResp{}, err
+		}
+		products = append(products, rowToProduct(r))
+	}
+	return dto.ProductSearchListResp{Products: products, Total: total, Page: page, PerPage: perPage}, nil
+}
+
+// CreateProduct always leaves the new listing linked to a canonical product:
+// either the one the vendor picked from the create-form typeahead, or — if
+// they picked none — a freshly minted canonical product. This is never a
+// silent background guess; it only fires because the vendor was already
+// shown candidates and chose not to use one. Pre-existing products created
+// before this feature shipped are not retroactively linked (no backfill,
+// see the migration's comment) — they stay NULL until edited.
 func (s *CatalogueService) CreateProduct(ctx context.Context, storeID uuid.UUID, req dto.CreateProductReq) (dto.ProductResp, error) {
+	limits, err := planlimits.ForStoreID(ctx, s.db, storeID)
+	if err != nil {
+		return dto.ProductResp{}, fmt.Errorf("resolve plan limits: %w", err)
+	}
+	if limits.ProductLimit != -1 {
+		var count int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM products WHERE store_id=$1`, storeID).Scan(&count); err != nil {
+			return dto.ProductResp{}, fmt.Errorf("count products: %w", err)
+		}
+		if count >= limits.ProductLimit {
+			return dto.ProductResp{}, apperrors.BadRequest(fmt.Sprintf("your plan allows up to %d products — upgrade to add more", limits.ProductLimit))
+		}
+	}
+	if maxImg := limits.MaxImagesPerProduct(); len(req.Images) > maxImg {
+		return dto.ProductResp{}, apperrors.BadRequest(fmt.Sprintf("your plan allows up to %d images per product", maxImg))
+	}
+
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return dto.ProductResp{}, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	canonicalID, err := s.resolveCanonicalProductID(ctx, tx, req.CanonicalProductID, req.Name)
+	if err != nil {
+		return dto.ProductResp{}, err
+	}
+
 	var r productRow
-	err := s.db.QueryRowxContext(ctx, `
+	err = tx.QueryRowxContext(ctx, `
 		INSERT INTO products (store_id, name, description, category_id, price_kobo, stock, sku, images, tags, is_digital, canonical_product_id)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 		RETURNING id, store_id, name, description, category_id, price_kobo, stock, sku,
 		          images, tags, is_digital, is_published, canonical_product_id, created_at, updated_at`,
 		storeID, req.Name, req.Description, req.CategoryID,
 		req.PriceKobo, req.Stock, req.SKU,
-		pq.Array(req.Images), pq.Array(req.Tags), req.IsDigital, req.CanonicalProductID,
+		pq.Array(req.Images), pq.Array(req.Tags), req.IsDigital, canonicalID,
 	).StructScan(&r)
 	if err != nil {
 		return dto.ProductResp{}, fmt.Errorf("create product: %w", err)
 	}
+
+	if err := tx.Commit(); err != nil {
+		return dto.ProductResp{}, fmt.Errorf("commit: %w", err)
+	}
 	return rowToProduct(r), nil
+}
+
+// resolveCanonicalProductID returns the canonical product ID a new listing
+// should link to: the vendor's pick if given (verified to exist), otherwise
+// a newly minted canonical product from the listing's own name.
+func (s *CatalogueService) resolveCanonicalProductID(ctx context.Context, tx *sqlx.Tx, canonicalProductID *string, name string) (*string, error) {
+	if canonicalProductID != nil {
+		var exists bool
+		if err := tx.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM canonical_products WHERE id=$1)`, *canonicalProductID,
+		).Scan(&exists); err != nil {
+			return nil, fmt.Errorf("check canonical product: %w", err)
+		}
+		if !exists {
+			return nil, apperrors.BadRequest("canonical_product_id does not exist")
+		}
+		return canonicalProductID, nil
+	}
+
+	var newID string
+	if err := tx.QueryRowContext(ctx, `
+		INSERT INTO canonical_products (name, normalized_name)
+		VALUES ($1, lower(trim($1)))
+		RETURNING id`, name,
+	).Scan(&newID); err != nil {
+		return nil, fmt.Errorf("create canonical product: %w", err)
+	}
+	return &newID, nil
+}
+
+// ── Canonical products ───────────────────────────────────────────────────────
+
+// SearchCanonicalProducts powers the create-product typeahead: a vendor
+// types a name and gets back existing canonical products they can link to
+// instead of minting a duplicate. Uses the same pg_trgm similarity
+// threshold as SearchProducts' fuzzy-match branch, for consistency.
+func (s *CatalogueService) SearchCanonicalProducts(ctx context.Context, q string) (dto.CanonicalProductSearchResp, error) {
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return dto.CanonicalProductSearchResp{Products: []dto.CanonicalProductResp{}}, nil
+	}
+	normalized := strings.ToLower(q)
+
+	rows, err := s.db.QueryxContext(ctx, `
+		SELECT id, name, representative_image
+		FROM canonical_products
+		WHERE similarity(normalized_name, $1) > 0.25
+		ORDER BY similarity(normalized_name, $1) DESC
+		LIMIT 8`, normalized)
+	if err != nil {
+		return dto.CanonicalProductSearchResp{}, fmt.Errorf("search canonical products: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]dto.CanonicalProductResp, 0)
+	for rows.Next() {
+		var r canonicalProductRow
+		if err := rows.StructScan(&r); err != nil {
+			return dto.CanonicalProductSearchResp{}, err
+		}
+		out = append(out, rowToCanonicalProduct(r))
+	}
+	return dto.CanonicalProductSearchResp{Products: out}, nil
+}
+
+type canonicalProductRow struct {
+	ID                   uuid.UUID      `db:"id"`
+	Name                 string         `db:"name"`
+	RepresentativeImage  sql.NullString `db:"representative_image"`
+}
+
+func rowToCanonicalProduct(r canonicalProductRow) dto.CanonicalProductResp {
+	cp := dto.CanonicalProductResp{ID: r.ID.String(), Name: r.Name}
+	if r.RepresentativeImage.Valid {
+		cp.RepresentativeImage = &r.RepresentativeImage.String
+	}
+	return cp
 }
 
 // GetPublicProductByID returns a product by ID alone — only if it is published.
@@ -132,20 +318,25 @@ func (s *CatalogueService) GetProduct(ctx context.Context, storeID uuid.UUID, pr
 	return rowToProduct(r), nil
 }
 
+// UpdateProduct only touches canonical_product_id when the vendor explicitly
+// sets it via this edit (e.g. linking a pre-existing, never-linked product
+// through the same typeahead used at create time) — unlike CreateProduct,
+// an edit never mints a new canonical product on its own; that would spawn
+// a fresh canonical identity on every unrelated price/stock edit.
 func (s *CatalogueService) UpdateProduct(ctx context.Context, storeID uuid.UUID, productID uuid.UUID, req dto.UpdateProductReq) (dto.ProductResp, error) {
 	var r productRow
 	err := s.db.QueryRowxContext(ctx, `
 		UPDATE products SET
-			name        = COALESCE($1, name),
-			description = COALESCE($2, description),
-			category_id = COALESCE($3::uuid, category_id),
-			price_kobo  = COALESCE($4, price_kobo),
-			stock       = COALESCE($5, stock),
-			sku         = COALESCE($6, sku),
-			images      = CASE WHEN $7::text[] IS NOT NULL THEN $7 ELSE images END,
-			tags        = CASE WHEN $8::text[] IS NOT NULL THEN $8 ELSE tags END,
+			name                 = COALESCE($1, name),
+			description          = COALESCE($2, description),
+			category_id          = COALESCE($3::uuid, category_id),
+			price_kobo           = COALESCE($4, price_kobo),
+			stock                = COALESCE($5, stock),
+			sku                  = COALESCE($6, sku),
+			images               = CASE WHEN $7::text[] IS NOT NULL THEN $7 ELSE images END,
+			tags                 = CASE WHEN $8::text[] IS NOT NULL THEN $8 ELSE tags END,
 			canonical_product_id = COALESCE($9::uuid, canonical_product_id),
-			updated_at  = NOW()
+			updated_at           = NOW()
 		WHERE id=$10 AND store_id=$11
 		RETURNING id, store_id, name, description, category_id, price_kobo, stock, sku,
 		          images, tags, is_digital, is_published, canonical_product_id, created_at, updated_at`,
@@ -156,6 +347,9 @@ func (s *CatalogueService) UpdateProduct(ctx context.Context, storeID uuid.UUID,
 	).StructScan(&r)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.ProductResp{}, apperrors.NotFound("product not found")
+	}
+	if isFKViolation(err) {
+		return dto.ProductResp{}, apperrors.BadRequest("canonical_product_id does not exist")
 	}
 	if err != nil {
 		return dto.ProductResp{}, fmt.Errorf("update product: %w", err)
@@ -268,21 +462,21 @@ func (s *CatalogueService) DeleteCategory(ctx context.Context, storeID uuid.UUID
 // ── Row types ─────────────────────────────────────────────────────────────────
 
 type productRow struct {
-	ID          uuid.UUID      `db:"id"`
-	StoreID     uuid.UUID      `db:"store_id"`
-	Name        string         `db:"name"`
-	Description sql.NullString `db:"description"`
-	CategoryID  sql.NullString `db:"category_id"`
-	PriceKobo   int64          `db:"price_kobo"`
-	Stock       int32          `db:"stock"`
-	SKU         sql.NullString `db:"sku"`
-	Images      pq.StringArray `db:"images"`
-	Tags        pq.StringArray `db:"tags"`
-	IsDigital   bool           `db:"is_digital"`
-	CanonicalID sql.NullString `db:"canonical_product_id"`
-	IsPublished bool           `db:"is_published"`
-	CreatedAt   time.Time      `db:"created_at"`
-	UpdatedAt   time.Time      `db:"updated_at"`
+	ID                 uuid.UUID      `db:"id"`
+	StoreID            uuid.UUID      `db:"store_id"`
+	Name               string         `db:"name"`
+	Description        sql.NullString `db:"description"`
+	CategoryID         sql.NullString `db:"category_id"`
+	PriceKobo          int64          `db:"price_kobo"`
+	Stock              int32          `db:"stock"`
+	SKU                sql.NullString `db:"sku"`
+	Images             pq.StringArray `db:"images"`
+	Tags               pq.StringArray `db:"tags"`
+	IsDigital          bool           `db:"is_digital"`
+	IsPublished        bool           `db:"is_published"`
+	CanonicalProductID sql.NullString `db:"canonical_product_id"`
+	CreatedAt          time.Time      `db:"created_at"`
+	UpdatedAt          time.Time      `db:"updated_at"`
 }
 
 type categoryRow struct {
@@ -314,10 +508,6 @@ func rowToProduct(r productRow) dto.ProductResp {
 		CreatedAt:   r.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt:   r.UpdatedAt.UTC().Format(time.RFC3339),
 	}
-	if r.CanonicalID.Valid {
-		id := r.CanonicalID.String
-		p.CanonicalProductID = &id
-	}
 	if r.Description.Valid {
 		p.Description = &r.Description.String
 	}
@@ -326,6 +516,9 @@ func rowToProduct(r productRow) dto.ProductResp {
 	}
 	if r.SKU.Valid {
 		p.SKU = &r.SKU.String
+	}
+	if r.CanonicalProductID.Valid {
+		p.CanonicalProductID = &r.CanonicalProductID.String
 	}
 	return p
 }
@@ -513,7 +706,21 @@ func rowToCollection(r collectionRow) dto.CollectionResp {
 	return col
 }
 
+// isPGConflict/isFKViolation: this service connects via pgx
+// (sqlx.Open("pgx", ...)), so errors surface as *pgconn.PgError — NOT
+// *pq.Error. isPGConflict previously checked *pq.Error, which meant it
+// could never actually match and was silent dead code (the exact same bug
+// found and fixed in the orders service this same session — verified there
+// against a real Postgres before trusting the fix, same reasoning applies
+// here even though this specific path — CreateCollection's duplicate-name
+// check — hasn't been re-verified against a live DB as part of this change).
 func isPGConflict(err error) bool {
-	var pgErr *pq.Error
+	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+// isFKViolation reports whether err is a foreign-key violation (SQLSTATE 23503).
+func isFKViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23503"
 }

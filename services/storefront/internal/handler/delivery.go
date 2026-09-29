@@ -2,49 +2,12 @@ package handler
 
 import (
 	"net/http"
-	"strconv"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/dto"
-	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/service"
 )
-
-// ── Markets ───────────────────────────────────────────────────────────────────
-
-// ListMarkets godoc
-// GET /v1/storefront/public/markets?state=Lagos&city=Ikeja — no auth required.
-// Populates the market dropdown in store setup and the consumer-app browse tab.
-func (h *Handler) ListMarkets(c *gin.Context) {
-	markets, err := h.svc.ListMarkets(c.Request.Context(), c.Query("state"), c.Query("city"))
-	if err != nil {
-		h.writeError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, markets)
-}
-
-// SearchStores godoc
-// GET /v1/storefront/public/stores/search — no auth required.
-// lat, lng and radius_km are accepted for client compatibility but ignored:
-// distance ranking is not implemented yet.
-func (h *Handler) SearchStores(c *gin.Context) {
-	limit, _ := strconv.Atoi(c.Query("limit"))
-	offset, _ := strconv.Atoi(c.Query("offset"))
-
-	resp, err := h.svc.SearchStores(c.Request.Context(), service.StoreSearchParams{
-		Query:    c.Query("q"),
-		Category: c.Query("category"),
-		MarketID: c.Query("market_id"),
-		Limit:    limit,
-		Offset:   offset,
-	})
-	if err != nil {
-		h.writeError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, resp)
-}
 
 // ── Delivery options ──────────────────────────────────────────────────────────
 
@@ -57,9 +20,15 @@ func (h *Handler) ListDeliveryOptionsPublic(c *gin.Context) {
 		h.writeError(c, err)
 		return
 	}
-	opts := store.DeliveryOptions
-	if opts == nil {
-		opts = []dto.DeliveryOptionResp{}
+	storeID, err := uuid.Parse(store.ID)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	opts, err := h.svc.ListDeliveryOptions(c.Request.Context(), storeID, true)
+	if err != nil {
+		h.writeError(c, err)
+		return
 	}
 	c.JSON(http.StatusOK, opts)
 }

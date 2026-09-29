@@ -180,13 +180,23 @@ type SelectPlanReq struct {
 
 // SubscriptionResp is returned for GET /v1/identity/vendor/subscription.
 type SubscriptionResp struct {
-	ID                  string   `json:"id"`
-	PlanID              string   `json:"plan_id"`
-	Plan                PlanResp `json:"plan"`
-	Status              string   `json:"status"`
-	PaymentReference    *string  `json:"payment_reference,omitempty"`
-	CurrentPeriodStart  string   `json:"current_period_start"`
-	CurrentPeriodEnd    *string  `json:"current_period_end,omitempty"`
+	ID                    string   `json:"id"`
+	PlanID                string   `json:"plan_id"`
+	Plan                  PlanResp `json:"plan"`
+	Status                string   `json:"status"`
+	PaymentReference      *string  `json:"payment_reference,omitempty"`
+	CurrentPeriodStart    string   `json:"current_period_start"`
+	CurrentPeriodEnd      *string  `json:"current_period_end,omitempty"`
+	PaystackAccountNumber *string  `json:"paystack_dva_account_number,omitempty"`
+	PaystackBankName      *string  `json:"paystack_dva_bank_name,omitempty"`
+	PaystackAccountName   *string  `json:"paystack_dva_account_name,omitempty"`
+}
+
+// ProvisionDVAReq is the body for POST /v1/identity/internal/provision-dva.
+// Internal service-to-service only — called by storefront's CreateStore.
+type ProvisionDVAReq struct {
+	UserID    string `json:"user_id"    validate:"required,uuid"`
+	StoreName string `json:"store_name" validate:"required"`
 }
 
 // ── Shared ────────────────────────────────────────────────────────────────────
