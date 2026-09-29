@@ -76,9 +76,37 @@ jobs:
             echo 'services=${{ steps.filter.outputs.changes }}' >> $GITHUB_OUTPUT
           fi
 
+
+  # ── Build and test every module before anything is pushed ─────────────────
+  # A duplicate route or a wildcard conflict only panics when Gin registers
+  # them at startup, so it compiled, shipped, and crashed on the instance.
+  # Running the handler tests here turns that into a failed check instead of
+  # a failed deploy.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: "**/go.sum"
+
+      - name: Build and test all modules
+        run: |
+          # This is a Go workspace, so ./... from the root only covers the
+          # root module — each module is built and tested on its own.
+          failed=0
+          for dir in shared/pkg scripts/migrate services/*/; do
+            [ -f "$dir/go.mod" ] || continue
+            echo "── $dir"
+            (cd "$dir" && go build ./... && go test ./...) || failed=1
+          done
+          exit $failed
+
   # ── Build, push to ECR, deploy via SSM Run Command ─────────────────────────
   deploy:
-    needs: detect-changes
+    needs: [detect-changes, test]
     if: needs.detect-changes.outputs.services != '[]' && needs.detect-changes.outputs.services != ''
     runs-on: ubuntu-latest
     environment: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.environment) || (github.ref_name == 'main' && 'production') || 'staging' }}
