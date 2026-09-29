@@ -40,7 +40,7 @@ services:
   # PostGIS build: shared/migrations/0006 does CREATE EXTENSION postgis.
   # If this image has no arm64 build, swap to imresamu/postgis:16-3.4.
   postgres:
-    image: postgis/postgis:16-3.4
+    image: imresamu/postgis:16-3.4
     restart: unless-stopped
     environment:
       POSTGRES_USER:     ${POSTGRES_USER}
