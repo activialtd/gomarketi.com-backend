@@ -16,6 +16,13 @@ x-service: &service
   networks: [gomarketi-net]
   environment:
     PORT: "8080"
+    # Storefront calls identity directly (not via the gateway) to provision a
+    # vendor's Paystack virtual account right after their store is created.
+    # Without this it falls back to http://localhost:8081 — inside its own
+    # container, where nothing listens — and every new vendor waits for
+    # identity's hourly backfill sweep instead of getting an account number
+    # immediately. Harmless on the other services, which never read it.
+    IDENTITY_INTERNAL_URL: "http://identity:8080"
   volumes:
     # RS256 keypair + Apple .p8, generated once on the host (see deploy notes)
     - ./keys:/keys:ro
