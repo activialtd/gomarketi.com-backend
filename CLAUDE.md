@@ -86,6 +86,20 @@ A sale credit is written to `wallet_transactions` as `pending`, not `completed`,
 
 The delivery fee is never credited to a vendor — the platform delivers, so it keeps it. For a multi-vendor checkout the fee lives on the `checkouts` row and is charged once for the basket; each order carries only its own items, so summing orders never double-counts it.
 
+### Vendor virtual accounts (Paystack DVA)
+
+Every vendor gets a Paystack Dedicated Virtual Account, named after their **store**, not their person — which is why provisioning hangs off storefront's `CreateStore` rather than identity's `SelectPlan` (a plan can be chosen long before a store, and therefore a store name, exists).
+
+The path is storefront → `POST /v1/identity/internal/provision-dva` (guarded by `X-Internal-Key`) → `ProvisionVendorDVA`. It needs three env vars to line up, and each failure is silent from the vendor's side:
+
+- `IDENTITY_INTERNAL_URL` on storefront — the in-code default `http://localhost:8081` is wrong anywhere services are separate containers; prod compose sets `http://identity:8081`.
+- `INTERNAL_API_KEY` on **both** storefront and identity, identical, or the call is a 401 that only reaches the logs.
+- `PAYSTACK_SECRET_KEY` on identity — unset means simulation mode, which writes a plausible fake account number rather than failing.
+
+Because that trigger is asynchronous and best-effort, it is **not** the guarantee. `StartDVABackfillLoop` in identity is: it sweeps for vendors who have a store but no `paystack_dva_account_number` at boot and hourly, so anything the one-shot trigger drops is picked up later. `CreateStore` also re-fires on its idempotent "you already have a store" path, since for an existing vendor that is the only path still reachable. Everything downstream is idempotent — a vendor with an account number is skipped.
+
+To see who is currently missing one, `make dva-audit` (read-only); `make dva-audit ARGS=-provision` forces the sweep now instead of waiting for the tick. Failures are also recorded to the admin error queue as `paystack DVA creation failed` / `dva provisioning request failed`.
+
 ### Real-time (orders)
 
 `services/orders/internal/sse` fans out order and wallet events. With `REDIS_URL` set it uses Redis pub/sub with event replay so multiple instances stay consistent; without it (or if Redis is unreachable) it silently falls back to an in-memory broker that only works single-instance.
@@ -101,5 +115,7 @@ Auth picks a provider by which key is set, in order: Brevo → Resend → Mailgu
 ## Deployment
 
 Railway, one service per Railway app (`services/*/railway.toml`, `deploy-railway.sh`, `.env.railway.template`). `.github/workflows/deploy.yml` deploys only the services whose paths changed — note that any `shared/pkg/**` change redeploys all five Go services. In production, JWT keys are supplied as base64 PEM (`JWT_PRIVATE_KEY_B64` / `JWT_PUBLIC_KEY_B64`) rather than the `*_PATH` files used locally.
+
+There is also an AWS path (`.github/workflows/deploy-aws.yml` → ECR → SSM Run Command → `/opt/gomarketi/deploy-service.sh`). Secrets live in SSM Parameter Store and reach containers only through `fetch-env.sh`, which writes `env/<service>.env` for compose's `env_file:` — so a secret added to SSM is inert until that script runs again. Both `deploy.sh` and `deploy-service.sh` now run it. Note that these scripts are written onto the instance by Terraform `user_data` at **first boot**, so editing them here does not change a running instance; copy them across or re-apply.
 
 `.env.example` has drifted from the code — several live vars (`BREVO_*`, `PAYSTACK_SECRET_KEY`, `SUPABASE_PUBLIC_URL`, `SMILE_ID_*`, `STOREFRONT_ROOT_DOMAIN`, `VENDOR_BASE_URL`, `UPSTREAM_*`) appear only in `.env.railway.template` or in the code. Grep for `viper.GetString(` / `os.Getenv(` when hunting for a config name.

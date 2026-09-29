@@ -100,6 +100,13 @@ func (s *StorefrontService) CreateStore(ctx context.Context, userID uuid.UUID, r
 	// Idempotent: return existing store if vendor already has one.
 	existing, err := s.getStoreByVendor(ctx, userID)
 	if err == nil {
+		// Re-running onboarding is the vendor's own retry, so take it as one:
+		// a vendor whose provisioning failed the first time (or who created
+		// their store before provisioning existed at all) would otherwise be
+		// stuck without an account number forever, since this early return is
+		// the only path they can ever reach again. Cheap — it checks the DB
+		// first and only calls identity when the account really is missing.
+		s.triggerDVAProvisioning(userID, existing.Name)
 		return existing, nil
 	}
 	if !isNotFound(err) {
@@ -202,35 +209,8 @@ func (s *StorefrontService) CreateStore(ctx context.Context, userID uuid.UUID, r
 	// store — and therefore a store name — exists. Deliberately not done at
 	// plan-selection time (identity's SelectPlan): a plan can be picked long
 	// before a store exists, and the DVA's account_name is meant to read as
-	// the store's name, not the vendor's personal name. Best-effort, async,
-	// same shape as the welcome-email/Vercel-registration goroutines above.
-	storeName := resp.Name
-	go func() {
-		ctx4, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		body, _ := json.Marshal(map[string]string{"user_id": userID.String(), "store_name": storeName})
-		req, reqErr := http.NewRequestWithContext(ctx4, http.MethodPost,
-			s.identityInternalURL+"/v1/identity/internal/provision-dva", bytes.NewReader(body))
-		if reqErr != nil {
-			return
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-Internal-Key", s.internalAPIKey)
-		httpResp, doErr := (&http.Client{Timeout: 20 * time.Second}).Do(req)
-		if doErr != nil {
-			s.log.Warn().Err(doErr).Str("store", storeName).Msg("dva provisioning request failed")
-			middleware.RecordBackgroundError(s.db, s.log, "storefront", "dva provisioning request failed: "+doErr.Error(),
-				map[string]any{"store": storeName})
-			return
-		}
-		defer httpResp.Body.Close()
-		if httpResp.StatusCode >= 300 {
-			s.log.Warn().Int("status", httpResp.StatusCode).Str("store", storeName).Msg("dva provisioning failed")
-			middleware.RecordBackgroundError(s.db, s.log, "storefront",
-				fmt.Sprintf("dva provisioning failed: identity returned %d", httpResp.StatusCode),
-				map[string]any{"store": storeName})
-		}
-	}()
+	// the store's name, not the vendor's personal name.
+	s.triggerDVAProvisioning(userID, resp.Name)
 
 	return resp, nil
 }
@@ -897,6 +877,62 @@ func (s *StorefrontService) RemoveStaff(ctx context.Context, userID uuid.UUID, s
 		return apperrors.NotFound("staff member not found")
 	}
 	return nil
+}
+
+// triggerDVAProvisioning asks identity to create the vendor's Dedicated
+// Virtual Account, named after their store. Best-effort and async, same
+// shape as the welcome-email and Vercel-registration goroutines: a vendor
+// must never fail to get a store because Paystack is slow or down.
+//
+// Called from both CreateStore paths — the new-store path and the
+// idempotent "you already have a store" path — because provisioning can
+// fail after the store row is committed, and the second path is the only
+// one an existing vendor can ever reach again. identity's ProvisionVendorDVA
+// is itself idempotent, and the pre-check below means the ordinary case
+// (vendor already has an account) costs one indexed read and no HTTP call.
+//
+// This is a best-effort trigger, not a guarantee: identity sweeps for
+// vendors still missing an account hourly (StartDVABackfillLoop), which is
+// what actually makes provisioning eventual rather than one-shot.
+func (s *StorefrontService) triggerDVAProvisioning(userID uuid.UUID, storeName string) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+
+		// All services share one database, so storefront can check whether
+		// there is anything to do before crossing a service boundary —
+		// the same shortcut planlimits already takes for vendor plans.
+		var hasDVA bool
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT paystack_dva_account_number IS NOT NULL
+			   FROM vendor_profiles WHERE user_id = $1`, userID,
+		).Scan(&hasDVA); err == nil && hasDVA {
+			return
+		}
+
+		body, _ := json.Marshal(map[string]string{"user_id": userID.String(), "store_name": storeName})
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost,
+			s.identityInternalURL+"/v1/identity/internal/provision-dva", bytes.NewReader(body))
+		if reqErr != nil {
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Internal-Key", s.internalAPIKey)
+		httpResp, doErr := (&http.Client{Timeout: 20 * time.Second}).Do(req)
+		if doErr != nil {
+			s.log.Warn().Err(doErr).Str("store", storeName).Msg("dva provisioning request failed")
+			middleware.RecordBackgroundError(s.db, s.log, "storefront", "dva provisioning request failed: "+doErr.Error(),
+				map[string]any{"store": storeName})
+			return
+		}
+		defer httpResp.Body.Close()
+		if httpResp.StatusCode >= 300 {
+			s.log.Warn().Int("status", httpResp.StatusCode).Str("store", storeName).Msg("dva provisioning failed")
+			middleware.RecordBackgroundError(s.db, s.log, "storefront",
+				fmt.Sprintf("dva provisioning failed: identity returned %d", httpResp.StatusCode),
+				map[string]any{"store": storeName})
+		}
+	}()
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
