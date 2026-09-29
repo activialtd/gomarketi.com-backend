@@ -10,48 +10,63 @@
 -- vendor whose market is not listed — it is what the backfill assigns and
 -- what the store-setup form expects to always be there.
 
--- Agege was missing from the original seed.
-INSERT INTO markets (name, slug, city, state) VALUES
-    ('Agege Market', 'agege-market', 'Agege', 'Lagos')
-ON CONFLICT (slug) DO NOTHING;
+-- Guarded on the columns this migration needs, because it collides with
+-- staging's 0009_create_markets.sql: on a database where that landed first,
+-- `markets` has neither `is_active` nor `slug`, and every statement below
+-- would abort,
+-- taking storefront's startup with it. 0012 reconciles the two schemas and
+-- redoes this work, so skipping here loses nothing.
+DO $guard$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_name = 'markets' AND column_name = 'is_active')
+       AND EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_name = 'markets' AND column_name = 'slug') THEN
+        -- Agege was missing from the original seed.
+        INSERT INTO markets (name, slug, city, state) VALUES
+            ('Agege Market', 'agege-market', 'Agege', 'Lagos')
+        ON CONFLICT (slug) DO NOTHING;
 
--- Trade Fair goes by its full name in the dropdown.
-UPDATE markets SET name = 'Lagos International Trade Fair'
-WHERE slug = 'trade-fair-complex';
+        -- Trade Fair goes by its full name in the dropdown.
+        UPDATE markets SET name = 'Lagos International Trade Fair'
+        WHERE slug = 'trade-fair-complex';
 
--- The launch ten, plus the General Market fallback. Everything else is
--- switched off.
-UPDATE markets SET is_active = FALSE
-WHERE slug NOT IN (
-    'general-market',
-    'agege-market',
-    'balogun-market',
-    'trade-fair-complex',
-    'computer-village',
-    'alaba-international-market',
-    'mile-12-market',
-    'ladipo-market',
-    'oyingbo-market',
-    'tejuosho-market',
-    'onitsha-main-market'
-);
+        -- The launch ten, plus the General Market fallback. Everything else is
+        -- switched off.
+        UPDATE markets SET is_active = FALSE
+        WHERE slug NOT IN (
+            'general-market',
+            'agege-market',
+            'balogun-market',
+            'trade-fair-complex',
+            'computer-village',
+            'alaba-international-market',
+            'mile-12-market',
+            'ladipo-market',
+            'oyingbo-market',
+            'tejuosho-market',
+            'onitsha-main-market'
+        );
 
-UPDATE markets SET is_active = TRUE
-WHERE slug IN (
-    'general-market',
-    'agege-market',
-    'balogun-market',
-    'trade-fair-complex',
-    'computer-village',
-    'alaba-international-market',
-    'mile-12-market',
-    'ladipo-market',
-    'oyingbo-market',
-    'tejuosho-market',
-    'onitsha-main-market'
-);
+        UPDATE markets SET is_active = TRUE
+        WHERE slug IN (
+            'general-market',
+            'agege-market',
+            'balogun-market',
+            'trade-fair-complex',
+            'computer-village',
+            'alaba-international-market',
+            'mile-12-market',
+            'ladipo-market',
+            'oyingbo-market',
+            'tejuosho-market',
+            'onitsha-main-market'
+        );
 
--- Any store pointing at a market that just went inactive falls back to
--- General Market, so no store is left in a market buyers cannot browse.
-UPDATE stores SET market_id = (SELECT id FROM markets WHERE slug = 'general-market')
-WHERE market_id IN (SELECT id FROM markets WHERE is_active = FALSE);
+        -- Any store pointing at a market that just went inactive falls back to
+        -- General Market, so no store is left in a market buyers cannot browse.
+        UPDATE stores SET market_id = (SELECT id FROM markets WHERE slug = 'general-market')
+        WHERE market_id IN (SELECT id FROM markets WHERE is_active = FALSE);
+    END IF;
+END
+$guard$;

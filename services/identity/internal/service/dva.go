@@ -2,11 +2,15 @@ package service
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
+	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
 	"github.com/activialtd/gomarketi.com-backend/shared/pkg/middleware"
 )
 
@@ -108,4 +112,61 @@ func (s *IdentityService) backfillMissingDVAs(ctx context.Context) {
 		provisioned++
 	}
 	s.log.Info().Int("provisioned", provisioned).Int("remaining", len(vendors)-provisioned).Msg("dva backfill: done")
+}
+
+// vendorPhone resolves a phone number for Paystack's customer record.
+//
+// Paystack refuses to create a dedicated account for a customer with no
+// phone, and signup does not require one — so the user row is often blank.
+// The store's support phone is the reliable second source: storefront makes
+// vendors supply it, normalises it and verifies it against Termii, so it is
+// both present and real far more often than users.phone.
+//
+// Returns a BadRequest naming the fix when neither exists, rather than
+// letting Paystack reject the call with a message nobody sees.
+func (s *IdentityService) vendorPhone(ctx context.Context, userID uuid.UUID, userPhone string) (string, error) {
+	if p := normalisePhone(userPhone); p != "" {
+		return p, nil
+	}
+
+	var supportPhone sql.NullString
+	err := s.store.DB().QueryRowContext(ctx, `
+		SELECT support_phone FROM stores
+		WHERE vendor_id = $1 AND support_phone IS NOT NULL AND support_phone <> ''
+		ORDER BY created_at
+		LIMIT 1`, userID).Scan(&supportPhone)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("look up store support phone: %w", err)
+	}
+	if p := normalisePhone(supportPhone.String); p != "" {
+		return p, nil
+	}
+
+	return "", apperrors.BadRequest("vendor has no phone number — add a support phone to the store, then provisioning retries automatically")
+}
+
+// normalisePhone puts a Nigerian number into the E.164 form Paystack expects.
+// Storefront stores support phones as "234XXXXXXXXXX" (no plus); users.phone
+// may hold a local "0XXXXXXXXXX" or an already-plussed number. Anything that
+// does not look like a phone number comes back empty, so the caller treats it
+// the same as missing.
+func normalisePhone(raw string) string {
+	var digits strings.Builder
+	for _, r := range strings.TrimSpace(raw) {
+		if r >= '0' && r <= '9' {
+			digits.WriteRune(r)
+		}
+	}
+	d := digits.String()
+
+	switch {
+	case strings.HasPrefix(d, "234") && len(d) == 13:
+		return "+" + d
+	case strings.HasPrefix(d, "0") && len(d) == 11:
+		return "+234" + d[1:]
+	case len(d) == 10: // bare subscriber number, no trunk prefix
+		return "+234" + d
+	default:
+		return ""
+	}
 }

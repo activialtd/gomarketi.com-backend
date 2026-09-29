@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -86,13 +87,22 @@ func run(log zerolog.Logger) error {
 	// Runs in simulation mode when unset, same as smileid above.
 	paystackClient := paystack.New(viper.GetString("PAYSTACK_SECRET_KEY"), log)
 
-	// Account-ready emailer — same Brevo credentials storefront already uses
-	// for its welcome email. Falls back to a noop when unconfigured.
+	// Account-ready emailer — Resend first, matching storefront's welcome
+	// email, which is the provider actually in use. Brevo is kept as a
+	// fallback for any environment still configured that way.
 	var accountMailer identityemail.AccountMailer
-	if apiKey := viper.GetString("BREVO_API_KEY"); apiKey != "" {
-		accountMailer = identityemail.NewBrevo(apiKey, viper.GetString("BREVO_FROM"), viper.GetString("BREVO_FROM_NAME"))
+	switch {
+	case viper.GetString("RESEND_API_KEY") != "":
+		accountMailer = identityemail.NewResend(viper.GetString("RESEND_API_KEY"), resendFrom())
+		log.Info().Str("from", resendFrom()).Msg("account ready emails: Resend")
+	case viper.GetString("BREVO_API_KEY") != "":
+		accountMailer = identityemail.NewBrevo(
+			viper.GetString("BREVO_API_KEY"),
+			viper.GetString("BREVO_FROM"),
+			viper.GetString("BREVO_FROM_NAME"),
+		)
 		log.Info().Msg("account ready emails: Brevo")
-	} else {
+	default:
 		accountMailer = identityemail.NoopMailer{}
 		log.Warn().Msg("account ready emails: no emailer configured, using noop")
 	}
@@ -173,4 +183,17 @@ func connectDB(dsn string, log zerolog.Logger) (*sqlx.DB, error) {
 		time.Sleep(2 * time.Second)
 	}
 	return nil, fmt.Errorf("database unreachable after 5 attempts: %w", err)
+}
+
+// resendFrom resolves the sender address, accepting EMAIL_FROM as an alias
+// for RESEND_FROM and falling back to Resend's shared test sender. Matches
+// storefront's helper so both services read the same env in a deployment
+// that shares one .env.
+func resendFrom() string {
+	for _, key := range []string{"RESEND_FROM", "EMAIL_FROM"} {
+		if v := strings.TrimSpace(viper.GetString(key)); v != "" {
+			return v
+		}
+	}
+	return "GoMarketi <onboarding@resend.dev>"
 }

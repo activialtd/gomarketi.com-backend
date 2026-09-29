@@ -92,7 +92,7 @@ Every vendor gets a Paystack Dedicated Virtual Account, named after their **stor
 
 The path is storefront → `POST /v1/identity/internal/provision-dva` (guarded by `X-Internal-Key`) → `ProvisionVendorDVA`. It needs three env vars to line up, and each failure is silent from the vendor's side:
 
-- `IDENTITY_INTERNAL_URL` on storefront — the in-code default `http://localhost:8081` is wrong anywhere services are separate containers; prod compose sets `http://identity:8081`.
+- `IDENTITY_INTERNAL_URL` on storefront — the in-code default `http://localhost:8081` is wrong anywhere services are separate containers. The deployed stack is the **root** `docker-compose.prod.yml`, where the shared `x-service` anchor gives every service `PORT: 8080`, so the value is `http://identity:8080`. (`infrastructure/docker/docker-compose.prod.yml` is a different, unused file that assigns 8081/8082 — don't take ports from it.)
 - `INTERNAL_API_KEY` on **both** storefront and identity, identical, or the call is a 401 that only reaches the logs.
 - `PAYSTACK_SECRET_KEY` on identity — unset means simulation mode, which writes a plausible fake account number rather than failing.
 
@@ -116,6 +116,8 @@ Auth picks a provider by which key is set, in order: Brevo → Resend → Mailgu
 
 Railway, one service per Railway app (`services/*/railway.toml`, `deploy-railway.sh`, `.env.railway.template`). `.github/workflows/deploy.yml` deploys only the services whose paths changed — note that any `shared/pkg/**` change redeploys all five Go services. In production, JWT keys are supplied as base64 PEM (`JWT_PRIVATE_KEY_B64` / `JWT_PUBLIC_KEY_B64`) rather than the `*_PATH` files used locally.
 
-There is also an AWS path (`.github/workflows/deploy-aws.yml` → ECR → SSM Run Command → `/opt/gomarketi/deploy-service.sh`). Secrets live in SSM Parameter Store and reach containers only through `fetch-env.sh`, which writes `env/<service>.env` for compose's `env_file:` — so a secret added to SSM is inert until that script runs again. Both `deploy.sh` and `deploy-service.sh` now run it. Note that these scripts are written onto the instance by Terraform `user_data` at **first boot**, so editing them here does not change a running instance; copy them across or re-apply.
+The live deployment is an EC2 host with the repo checked out at `/opt/gomarketi/gomarketi.com-backend`, running the **root** `docker-compose.prod.yml` — services are built from source on the box (`build: ./services/*`), every container listens on 8080, and they share one `.env` at the repo root via `env_file: .env`. So a new env var is added once to that file (or to the compose anchor) and every service sees it.
+
+`infrastructure/` (Terraform, `infrastructure/docker/*`, `fetch-env.sh`, SSM Parameter Store, per-service `env/<service>.env`, ECR image tags) describes a **different, unused** deployment. Don't reason about the running system from those files — the ports, the env plumbing and the file locations all differ. `.github/workflows/deploy-aws.yml` targets that unused path too.
 
 `.env.example` has drifted from the code — several live vars (`BREVO_*`, `PAYSTACK_SECRET_KEY`, `SUPABASE_PUBLIC_URL`, `SMILE_ID_*`, `STOREFRONT_ROOT_DOMAIN`, `VENDOR_BASE_URL`, `UPSTREAM_*`) appear only in `.env.railway.template` or in the code. Grep for `viper.GetString(` / `os.Getenv(` when hunting for a config name.
