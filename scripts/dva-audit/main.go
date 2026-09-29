@@ -44,6 +44,7 @@ type vendor struct {
 	Email          string
 	OnboardingStep string
 	CustomerCode   string // set = Paystack customer exists, DVA step is what failed
+	Phone          string // user's, else the store's support phone
 	StoreCreated   time.Time
 }
 
@@ -58,6 +59,7 @@ const query = `
 	       COALESCE(u.email, ''),
 	       vp.onboarding_step::text,
 	       COALESCE(vp.paystack_customer_code, ''),
+	       COALESCE(NULLIF(u.phone, ''), NULLIF(s.support_phone, ''), ''),
 	       s.created_at
 	FROM vendor_profiles vp
 	JOIN stores s ON s.vendor_id = vp.user_id
@@ -115,7 +117,7 @@ func missingDVA(ctx context.Context, db *sql.DB) ([]vendor, error) {
 	for rows.Next() {
 		var v vendor
 		if err := rows.Scan(&v.UserID, &v.StoreName, &v.StoreSlug, &v.Email,
-			&v.OnboardingStep, &v.CustomerCode, &v.StoreCreated); err != nil {
+			&v.OnboardingStep, &v.CustomerCode, &v.Phone, &v.StoreCreated); err != nil {
 			return nil, err
 		}
 		out = append(out, v)
@@ -138,7 +140,7 @@ func report(vendors []vendor, totalVendorsWithStores int) {
 	fmt.Printf("%d of %d vendors with a store have no virtual account:\n\n", len(vendors), totalVendorsWithStores)
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "STORE\tSLUG\tEMAIL\tONBOARDING\tSTAGE REACHED\tSTORE CREATED\tUSER ID")
+	fmt.Fprintln(w, "STORE\tSLUG\tEMAIL\tPHONE\tONBOARDING\tSTAGE REACHED\tSTORE CREATED\tUSER ID")
 	for _, v := range vendors {
 		// A customer code with no account number narrows the failure down:
 		// Paystack accepted the customer and rejected (or never received)
@@ -153,8 +155,14 @@ func report(vendors []vendor, totalVendorsWithStores int) {
 			// a permanent failure until the account has one.
 			email = "(none — blocks provisioning)"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			v.StoreName, v.StoreSlug, email, v.OnboardingStep, stage,
+		// Paystack rejects dedicated_account creation outright without a
+		// phone, so a blank one here is the whole reason a vendor is listed.
+		phone := v.Phone
+		if phone == "" {
+			phone = "(none — blocks provisioning)"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			v.StoreName, v.StoreSlug, email, phone, v.OnboardingStep, stage,
 			v.StoreCreated.Format("2006-01-02"), v.UserID)
 	}
 	w.Flush()

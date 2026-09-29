@@ -159,7 +159,15 @@ func (s *IdentityService) ProvisionVendorDVA(ctx context.Context, userID uuid.UU
 		return apperrors.BadRequest("vendor has no email on file")
 	}
 
-	return s.provisionPaystackAccount(vendor.ID, user.Email.String, user.FullName.String, storeName, user.Phone.String)
+	// Paystack rejects dedicated_account creation outright when the customer
+	// has no phone ("Customer phone number is required"), so resolve one
+	// before calling rather than letting the request fail downstream.
+	phone, err := s.vendorPhone(ctx, userID, user.Phone.String)
+	if err != nil {
+		return err
+	}
+
+	return s.provisionPaystackAccount(vendor.ID, user.Email.String, user.FullName.String, storeName, phone)
 }
 
 // provisionPaystackAccount creates a Paystack Customer + Dedicated Virtual
