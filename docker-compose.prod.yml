@@ -5,9 +5,6 @@
 # Postgres is NOT here: DATABASE_URL points at Neon.
 # Only Caddy publishes ports; everything else talks over gomarketi-net.
 # Every service listens on 8080 inside its container.
-#
-# Build context is the repo ROOT for every service, because the Dockerfiles
-# copy both shared/pkg/ and services/<name>/.
 
 networks:
   gomarketi-net:
@@ -20,7 +17,7 @@ x-service: &service
   environment:
     PORT: "8080"
   volumes:
-    # RS256 keypair + Apple .p8, copied onto the host (never baked into images)
+    # RS256 keypair + Apple .p8, generated once on the host (see deploy notes)
     - ./keys:/keys:ro
   logging:
     driver: json-file
@@ -51,46 +48,32 @@ services:
 
   gateway:
     <<: *service
-    build:
-      context: .
-      dockerfile: services/gateway/Dockerfile
+    build: ./services/gateway
 
   auth:
     <<: *service
-    build:
-      context: .
-      dockerfile: services/auth/Dockerfile
+    build: ./services/auth
 
   identity:
     <<: *service
-    build:
-      context: .
-      dockerfile: services/identity/Dockerfile
+    build: ./services/identity
 
   storefront:
     <<: *service
-    build:
-      context: .
-      dockerfile: services/storefront/Dockerfile
+    build: ./services/storefront
 
   catalogue:
     <<: *service
-    build:
-      context: .
-      dockerfile: services/catalogue/Dockerfile
+    build: ./services/catalogue
 
   orders:
     <<: *service
-    build:
-      context: .
-      dockerfile: services/orders/Dockerfile
+    build: ./services/orders
 
   # admin-api (Node/Fastify) — uncomment once it lives in this repo.
   # admin-api:
   #   <<: *service
-  #   build:
-  #     context: .
-  #     dockerfile: services/admin-api/Dockerfile
+  #   build: ./services/admin-api
 
 volumes:
   caddy_data:

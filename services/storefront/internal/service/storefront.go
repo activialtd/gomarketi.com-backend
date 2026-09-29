@@ -19,6 +19,7 @@ import (
 
 	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/dto"
 	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/email"
+	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/phone"
 	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/vercel"
 	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
 	"github.com/activialtd/gomarketi.com-backend/shared/pkg/middleware"
@@ -52,12 +53,16 @@ type StorefrontService struct {
 	storeDomain         string
 	identityInternalURL string
 	internalAPIKey      string
+	// phones may be nil — number format is still checked, the Termii lookup
+	// is simply skipped.
+	phones *phone.Verifier
 }
 
-func New(db *sqlx.DB, emailer email.WelcomeMailer, domains vercel.Registrar, storeDomain, identityInternalURL, internalAPIKey string, log zerolog.Logger) *StorefrontService {
+func New(db *sqlx.DB, emailer email.WelcomeMailer, domains vercel.Registrar, storeDomain, identityInternalURL, internalAPIKey string, phones *phone.Verifier, log zerolog.Logger) *StorefrontService {
 	return &StorefrontService{
 		db: db, emailer: emailer, domains: domains, storeDomain: storeDomain,
-		identityInternalURL: identityInternalURL, internalAPIKey: internalAPIKey, log: log,
+		identityInternalURL: identityInternalURL, internalAPIKey: internalAPIKey,
+		phones: phones, log: log,
 	}
 }
 
@@ -105,6 +110,16 @@ func (s *StorefrontService) CreateStore(ctx context.Context, userID uuid.UUID, r
 		return dto.StoreResp{}, err
 	}
 
+	// Verify the support phone before creating anything, so a bad number is
+	// a clean validation error rather than a store the vendor must edit.
+	if req.SupportPhone != nil && *req.SupportPhone != "" {
+		normalised, err := s.verifyPhone(ctx, *req.SupportPhone)
+		if err != nil {
+			return dto.StoreResp{}, err
+		}
+		req.SupportPhone = &normalised
+	}
+
 	// Check slug is free.
 	var taken bool
 	_ = s.db.QueryRowContext(ctx, `SELECT TRUE FROM stores WHERE slug=$1`, req.Slug).Scan(&taken)
@@ -125,8 +140,8 @@ func (s *StorefrontService) CreateStore(ctx context.Context, userID uuid.UUID, r
 
 	var row storeRow
 	err = s.db.QueryRowxContext(ctx, `
-		INSERT INTO stores (vendor_id, name, slug, category, currency, team_size, support_phone)
-		VALUES ($1,$2,$3,$4,$5,$6,$7)
+		INSERT INTO stores (vendor_id, name, slug, category, currency, team_size, support_phone, market_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
 		RETURNING id, vendor_id, name, slug, category, currency,
 		          team_size, staff_range, tagline, logo_url, hero_image_url, site_description,
 		          COALESCE(social_links, '{}') AS social_links,
@@ -135,7 +150,7 @@ func (s *StorefrontService) CreateStore(ctx context.Context, userID uuid.UUID, r
 		          custom_domain, custom_domain_status,
 		          COALESCE(theme_config, '{}') AS theme_config, delivery_fee_kobo, free_delivery_threshold_kobo, is_active, created_at`,
 		userID, req.Name, req.Slug, req.Category, req.Currency,
-		req.TeamSize, req.SupportPhone,
+		req.TeamSize, req.SupportPhone, nullUUID(req.MarketID),
 	).StructScan(&row)
 	if err != nil {
 		return dto.StoreResp{}, fmt.Errorf("insert store: %w", err)
@@ -238,6 +253,16 @@ func (s *StorefrontService) UpdateStore(ctx context.Context, userID uuid.UUID, s
 				return dto.StoreResp{}, apperrors.BadRequest("your plan does not support the \"" + tc.Template + "\" template — upgrade to unlock it")
 			}
 		}
+	}
+
+	// A changed support number is re-verified, so an edit cannot slip an
+	// unreachable number past the check that store creation applies.
+	if req.SupportPhone != nil && *req.SupportPhone != "" {
+		normalised, err := s.verifyPhone(ctx, *req.SupportPhone)
+		if err != nil {
+			return dto.StoreResp{}, err
+		}
+		req.SupportPhone = &normalised
 	}
 
 	var row storeRow
@@ -876,6 +901,18 @@ func (s *StorefrontService) RemoveStaff(ctx context.Context, userID uuid.UUID, s
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+// storeCols is the column list every store query returns — kept in one place
+// so the markets join stays consistent across SELECT and RETURNING. The
+// correlated subquery works in RETURNING too, where a JOIN would not.
+const storeCols = `id, vendor_id, name, slug, category, currency,
+          team_size, staff_range, tagline, logo_url, hero_image_url, site_description,
+          COALESCE(social_links, '{}') AS social_links,
+          support_phone, address, city, state,
+          market_id,
+          (SELECT m.name FROM markets m WHERE m.id = stores.market_id) AS market_name,
+          custom_domain, custom_domain_status,
+          COALESCE(theme_config, '{}') AS theme_config, is_active, created_at`
+
 type storeRow struct {
 	ID                        uuid.UUID      `db:"id"`
 	VendorID                  uuid.UUID      `db:"vendor_id"`
@@ -987,6 +1024,15 @@ func nullToPtr(n sql.NullString) *string {
 	return &n.String
 }
 
+// nullUUID converts an optional UUID string from a request into a SQL NULL
+// when absent, so COALESCE leaves the stored value untouched on PATCH.
+func nullUUID(v *string) any {
+	if v == nil || *v == "" {
+		return nil
+	}
+	return *v
+}
+
 func nullStr(s string) sql.NullString {
 	if s == "" {
 		return sql.NullString{}
@@ -1045,4 +1091,26 @@ func (s *StorefrontService) GetStoreViews(ctx context.Context, storeID uuid.UUID
 
 func isNotFound(err error) bool {
 	return apperrors.IsNotFound(err) || errors.Is(err, sql.ErrNoRows)
+}
+
+// verifyPhone normalises a support number to E.164 and checks with Termii
+// that the line actually exists. The stored value is always the normalised
+// form, so every store's number looks the same downstream.
+//
+// A number Termii does not recognise is rejected; a Termii outage is not the
+// vendor's problem, so the lookup fails open (see phone.Verifier.Verify).
+func (s *StorefrontService) verifyPhone(ctx context.Context, raw string) (string, error) {
+	normalised, err := phone.Normalise(raw)
+	if err != nil {
+		return "", apperrors.BadRequest("enter a valid Nigerian phone number, e.g. 08031234567")
+	}
+
+	ok, err := s.phones.Verify(ctx, normalised)
+	if err != nil {
+		return "", fmt.Errorf("verify phone: %w", err)
+	}
+	if !ok {
+		return "", apperrors.BadRequest("that phone number could not be verified — check it and try again")
+	}
+	return normalised, nil
 }

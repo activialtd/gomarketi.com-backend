@@ -10,11 +10,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
-	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
-	"github.com/activialtd/gomarketi.com-backend/shared/pkg/middleware"
 	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/dto"
 	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/service"
 	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/sse"
+	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
+	"github.com/activialtd/gomarketi.com-backend/shared/pkg/middleware"
 )
 
 // Handler holds the service and validator.

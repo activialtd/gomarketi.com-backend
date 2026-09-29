@@ -14,6 +14,7 @@ type CreateStoreReq struct {
 	Currency     string  `json:"currency"      validate:"required,oneof=NGN USD"`
 	TeamSize     *string `json:"team_size"     validate:"omitempty,oneof=solo 2-10 11-50 51-200 200+"`
 	SupportPhone *string `json:"support_phone" validate:"omitempty,min=7,max=20"`
+	MarketID     *string `json:"market_id"     validate:"omitempty,uuid"`
 }
 
 // UpdateStoreReq is the body for PATCH /v1/storefront/stores/:id.
@@ -151,11 +152,17 @@ type PresignUploadReq struct {
 }
 
 // PresignUploadResp is returned by POST /v1/storefront/uploads/presign.
+//
+// Cloudinary takes a multipart POST rather than a presigned PUT: send `file`
+// plus every entry in Fields to UploadURL, then read `secure_url` off the
+// reply. PublicURL is therefore not known in advance and stays empty.
 type PresignUploadResp struct {
-	UploadURL string `json:"upload_url"`
-	PublicURL string `json:"public_url"`
-	Key       string `json:"key"`
-	ExpiresIn int    `json:"expires_in"` // seconds
+	UploadURL string            `json:"upload_url"`
+	PublicURL string            `json:"public_url,omitempty"`
+	Key       string            `json:"key"`
+	ExpiresIn int               `json:"expires_in"` // seconds
+	Provider  string            `json:"provider"`   // "cloudinary"
+	Fields    map[string]string `json:"fields"`
 }
 
 // LogViewReq is the body for POST /v1/storefront/public/log.
@@ -208,4 +215,59 @@ type ValidationErrorResp struct {
 type FieldError struct {
 	Field   string `json:"field"`
 	Message string `json:"message"`
+}
+
+// ── Markets ───────────────────────────────────────────────────────────────────
+
+
+// StoreSearchResult is a single store in a public search response. It is a
+// trimmed StoreResp — enough for a result card, no private fields.
+type StoreSearchResult struct {
+	ID         string  `json:"id"`
+	Name       string  `json:"name"`
+	Slug       string  `json:"slug"`
+	Category   string  `json:"category"`
+	Tagline    *string `json:"tagline,omitempty"`
+	LogoURL    *string `json:"logo_url,omitempty"`
+	HeroImage  *string `json:"hero_image_url,omitempty"`
+	Address    *string `json:"address,omitempty"`
+	City       *string `json:"city,omitempty"`
+	State      *string `json:"state,omitempty"`
+	MarketID   *string `json:"market_id,omitempty"`
+	MarketName *string `json:"market_name,omitempty"`
+}
+
+
+// ── Delivery options ──────────────────────────────────────────────────────────
+
+// DeliveryOptionResp is a single vendor-defined delivery choice.
+type DeliveryOptionResp struct {
+	ID          string `json:"id"`
+	StoreID     string `json:"store_id"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	PriceKobo   int64  `json:"price_kobo"`
+	Position    int    `json:"position"`
+	IsActive    bool   `json:"is_active"`
+	CreatedAt   string `json:"created_at"`
+}
+
+// CreateDeliveryOptionReq is the body for
+// POST /v1/storefront/stores/:id/delivery-options.
+type CreateDeliveryOptionReq struct {
+	Title       string `json:"title"       validate:"required,min=2,max=120"`
+	Description string `json:"description" validate:"omitempty,max=500"`
+	PriceKobo   int64  `json:"price_kobo"  validate:"min=0,max=100000000"`
+	Position    *int   `json:"position"    validate:"omitempty,min=0,max=1000"`
+}
+
+// UpdateDeliveryOptionReq is the body for
+// PATCH /v1/storefront/stores/:id/delivery-options/:option_id.
+// All fields optional — omit to leave unchanged.
+type UpdateDeliveryOptionReq struct {
+	Title       *string `json:"title"       validate:"omitempty,min=2,max=120"`
+	Description *string `json:"description" validate:"omitempty,max=500"`
+	PriceKobo   *int64  `json:"price_kobo"  validate:"omitempty,min=0,max=100000000"`
+	Position    *int    `json:"position"    validate:"omitempty,min=0,max=1000"`
+	IsActive    *bool   `json:"is_active"`
 }

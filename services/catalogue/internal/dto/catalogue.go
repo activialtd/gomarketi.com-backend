@@ -155,3 +155,44 @@ type FieldError struct {
 	Field   string `json:"field"`
 	Message string `json:"message"`
 }
+
+// ── Search ────────────────────────────────────────────────────────────────────
+
+// VendorResult is a store in a search response — enough to render a vendor
+// card and link through to the storefront.
+type VendorResult struct {
+	ID         string  `json:"id"`
+	Name       string  `json:"name"`
+	Slug       string  `json:"slug"`
+	Category   string  `json:"category"`
+	Tagline    *string `json:"tagline,omitempty"`
+	LogoURL    *string `json:"logo_url,omitempty"`
+	City       *string `json:"city,omitempty"`
+	State      *string `json:"state,omitempty"`
+	MarketID   *string `json:"market_id,omitempty"`
+	MarketName *string `json:"market_name,omitempty"`
+	// ProductCount is how many published products the vendor has, so the UI
+	// can say "24 products" on a vendor card.
+	ProductCount int64 `json:"product_count"`
+}
+
+// SearchResp is the unified search payload: products and vendors for one
+// query, plus related products and query suggestions.
+//
+// Both lists are always present (empty rather than null) so the client can
+// render a "Products" and a "Vendors" section without null checks.
+type SearchResp struct {
+	Query           string         `json:"query"`
+	Products        []ProductResp  `json:"products"`
+	ProductsHasMore bool           `json:"products_has_more"`
+	Vendors         []VendorResult `json:"vendors"`
+	VendorsHasMore  bool           `json:"vendors_has_more"`
+	// RelatedProducts share a category or tag with the top matches but did
+	// not match the query themselves — the "you might also like" rail.
+	RelatedProducts []ProductResp `json:"related_products"`
+	// Suggestions are query completions drawn from product names and tags,
+	// for the "did you mean" / autocomplete row.
+	Suggestions []string `json:"suggestions"`
+}
+
+

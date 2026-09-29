@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	sfdb "github.com/activialtd/gomarketi.com-backend/services/storefront/db"
 	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/email"
 	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/handler"
+	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/phone"
 	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/service"
 	"github.com/activialtd/gomarketi.com-backend/services/storefront/internal/vercel"
 )
@@ -55,9 +57,15 @@ func run(log zerolog.Logger) error {
 	}
 	log.Info().Msg("migrations applied")
 
-	// Welcome emailer — priority: Brevo HTTP API → SMTP → noop.
+	// Welcome emailer — priority: Resend → Brevo → SMTP → noop.
 	var welcomeMailer email.WelcomeMailer
 	switch {
+	case viper.GetString("RESEND_API_KEY") != "":
+		welcomeMailer = email.NewResend(
+			viper.GetString("RESEND_API_KEY"),
+			resendFrom(),
+		)
+		log.Info().Str("from", resendFrom()).Msg("welcome emails: Resend")
 	case viper.GetString("BREVO_API_KEY") != "":
 		welcomeMailer = email.NewBrevo(
 			viper.GetString("BREVO_API_KEY"),
@@ -84,6 +92,14 @@ func run(log zerolog.Logger) error {
 		welcomeMailer = email.NoopMailer{}
 		log.Warn().Msg("welcome emails: no emailer configured, using noop")
 	}
+	// Phone verification — no key means format checking only.
+	phones := phone.New(viper.GetString("TERMII_API_KEY"), log)
+	if phones == nil {
+		log.Warn().Msg("phone checks: no TERMII_API_KEY — format validation only")
+	} else {
+		log.Info().Msg("phone checks: Termii number lookup")
+	}
+
 	storeDomain := viper.GetString("STORE_DOMAIN")
 	if storeDomain == "" {
 		storeDomain = "gomarketi.com"
@@ -114,7 +130,7 @@ func run(log zerolog.Logger) error {
 	}
 	internalAPIKey := viper.GetString("INTERNAL_API_KEY")
 
-	svc := service.New(db, welcomeMailer, domainRegistrar, storeDomain, identityInternalURL, internalAPIKey, log)
+	svc := service.New(db, welcomeMailer, domainRegistrar, storeDomain, identityInternalURL, internalAPIKey, phones, log)
 	h := handler.New(svc)
 	r := gin.New()
 
@@ -177,4 +193,15 @@ func connectDB(dsn string, log zerolog.Logger) (*sqlx.DB, error) {
 		time.Sleep(2 * time.Second)
 	}
 	return nil, fmt.Errorf("database unreachable: %w", err)
+}
+
+// resendFrom resolves the sender address, accepting EMAIL_FROM as an alias
+// for RESEND_FROM and falling back to Resend's shared test sender.
+func resendFrom() string {
+	for _, key := range []string{"RESEND_FROM", "EMAIL_FROM"} {
+		if v := strings.TrimSpace(viper.GetString(key)); v != "" {
+			return v
+		}
+	}
+	return "GoMarketi <onboarding@resend.dev>"
 }

@@ -507,7 +507,16 @@ func (s *OrdersService) GetOrder(ctx context.Context, storeID uuid.UUID, orderID
 func (s *OrdersService) UpdateOrderStatus(ctx context.Context, storeID uuid.UUID, orderID uuid.UUID, req dto.UpdateOrderStatusReq) (dto.OrderResp, error) {
 	var r orderRow
 	err := s.db.QueryRowxContext(ctx, `
-		UPDATE orders SET status=$1, note=COALESCE($2,note), updated_at=NOW()
+		UPDATE orders SET
+			status     = $1,
+			note       = COALESCE($2, note),
+			-- Dispatch starts the auto-release clock; delivery is recorded
+			-- but does not release on its own — only the buyer confirming
+			-- (or the clock running out) does that.
+			hub_received_at = CASE WHEN $1 = 'at_hub'  THEN COALESCE(hub_received_at, NOW()) ELSE hub_received_at END,
+			dispatched_at = CASE WHEN $1 = 'shipped'   THEN COALESCE(dispatched_at, NOW()) ELSE dispatched_at END,
+			delivered_at  = CASE WHEN $1 = 'delivered' THEN COALESCE(delivered_at, NOW())  ELSE delivered_at  END,
+			updated_at = NOW()
 		WHERE id=$3 AND store_id=$4
 		RETURNING `+orderColumns,
 		req.Status, req.Note, orderID, storeID).StructScan(&r)
@@ -599,43 +608,90 @@ func claimPaymentReference(ctx context.Context, tx *sqlx.Tx, ref string, amountK
 // takes effect and can't be spoofed by a tampered frontend — reading
 // storefront/catalogue-owned tables directly is this codebase's established
 // cross-service pattern (no cross-service FKs, direct reads are fine).
-func (s *OrdersService) computeDeliveryFeeKobo(ctx context.Context, storeID uuid.UUID, itemsKobo int64, items []dto.CreateOrderItem) (int64, error) {
+//
+// Pricing comes from the vendor's own store_delivery_options row when the
+// buyer picked one (deliveryOptionID). A store that has published options
+// requires the buyer to choose one, so a tampered client cannot fall back to
+// a cheaper number. Stores with no options configured keep using the flat
+// stores.delivery_fee_kobo / free_delivery_threshold_kobo settings, which is
+// what every existing storefront still relies on.
+func (s *OrdersService) computeDeliveryFeeKobo(ctx context.Context, storeID uuid.UUID, itemsKobo int64, items []dto.CreateOrderItem, deliveryOptionID string) (int64, string, error) {
+	allDigital := s.allItemsDigital(ctx, items)
+
+	if deliveryOptionID != "" {
+		optionID, parseErr := uuid.Parse(deliveryOptionID)
+		if parseErr != nil {
+			return 0, "", apperrors.BadRequest("invalid delivery_option_id")
+		}
+		var (
+			priceKobo int64
+			title     string
+		)
+		lookupErr := s.db.QueryRowContext(ctx, `
+			SELECT price_kobo, title FROM store_delivery_options
+			WHERE id = $1 AND store_id = $2 AND is_active = TRUE`,
+			optionID, storeID,
+		).Scan(&priceKobo, &title)
+		if errors.Is(lookupErr, sql.ErrNoRows) {
+			return 0, "", apperrors.BadRequest("delivery option not found for this store")
+		}
+		if lookupErr != nil {
+			return 0, "", fmt.Errorf("lookup delivery option: %w", lookupErr)
+		}
+		if allDigital {
+			return 0, "", nil
+		}
+		return priceKobo, title, nil
+	}
+
+	// No option named — reject only if this store actually publishes options.
+	var configured int
+	if countErr := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM store_delivery_options WHERE store_id=$1 AND is_active=TRUE`, storeID,
+	).Scan(&configured); countErr != nil {
+		return 0, "", fmt.Errorf("count delivery options: %w", countErr)
+	}
+	if configured > 0 && !allDigital {
+		return 0, "", apperrors.BadRequest("delivery_option_id is required for this store")
+	}
+
 	var feeKobo, thresholdKobo int64
 	err := s.db.QueryRowContext(ctx,
 		`SELECT delivery_fee_kobo, free_delivery_threshold_kobo FROM stores WHERE id=$1`, storeID,
 	).Scan(&feeKobo, &thresholdKobo)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, apperrors.BadRequest("store not found")
+		return 0, "", apperrors.BadRequest("store not found")
 	}
 	if err != nil {
-		return 0, fmt.Errorf("get store delivery settings: %w", err)
+		return 0, "", fmt.Errorf("get store delivery settings: %w", err)
 	}
 
-	allDigital := true
+	if allDigital || (thresholdKobo > 0 && itemsKobo > thresholdKobo) {
+		return 0, "", nil
+	}
+	return feeKobo, "", nil
+}
+
+// allItemsDigital reports whether every line is a digital product, which is
+// always delivered free. A product row that cannot be read defaults to
+// physical — the safer side, since it charges rather than silently waives.
+func (s *OrdersService) allItemsDigital(ctx context.Context, items []dto.CreateOrderItem) bool {
 	for _, it := range items {
 		productID, parseErr := uuid.Parse(it.ProductID)
 		if parseErr != nil {
-			return 0, apperrors.BadRequest("invalid product_id in items")
+			return false
 		}
 		var isDigital bool
 		if scanErr := s.db.QueryRowContext(ctx,
 			`SELECT is_digital FROM products WHERE id=$1`, productID,
 		).Scan(&isDigital); scanErr != nil {
-			// A missing product row shouldn't block checkout over a
-			// delivery-fee nuance — default to physical, the safer side
-			// (charges the fee rather than silently waiving it).
-			allDigital = false
-			continue
+			return false
 		}
 		if !isDigital {
-			allDigital = false
+			return false
 		}
 	}
-
-	if allDigital || (thresholdKobo > 0 && itemsKobo > thresholdKobo) {
-		return 0, nil
-	}
-	return feeKobo, nil
+	return len(items) > 0
 }
 
 // insertOrderTx inserts one order, its line items, and the vendor's wallet
@@ -699,7 +755,7 @@ func insertOrderTx(ctx context.Context, tx *sqlx.Tx, storeID uuid.UUID, customer
 // created order: the SSE broadcast to the vendor's dashboard, the customer
 // invoice email, and the vendor alert email. All three fire asynchronously
 // and never block the caller, matching CreateOrder's original behavior.
-func (s *OrdersService) notifyOrderCreated(storeID, orderID uuid.UUID, totalKobo int64, customerName, customerEmail, customerPhone, deliveryAddress, storeSlug, storeName string, items []dto.CreateOrderItem) {
+func (s *OrdersService) notifyOrderCreated(storeID, orderID uuid.UUID, totalKobo, deliveryFeeKobo int64, deliveryTitle string, customerName, customerEmail, customerPhone, deliveryAddress, storeSlug, storeName string, items []dto.CreateOrderItem) {
 	// Notify any open SSE/WebSocket dashboard connections.
 	go s.broker.Publish(storeID.String(), sse.Event{
 		Type: "order_created",
@@ -731,6 +787,8 @@ func (s *OrdersService) notifyOrderCreated(storeID, orderID uuid.UUID, totalKobo
 				storeSlug,
 				storeName,
 				totalKobo,
+				deliveryFeeKobo,
+				deliveryTitle,
 				invoiceItems,
 			); err != nil {
 				s.log.Warn().Err(err).Str("order_id", orderIDStr).Msg("invoice email failed")
@@ -763,6 +821,8 @@ func (s *OrdersService) notifyOrderCreated(storeID, orderID uuid.UUID, totalKobo
 			customerPhone,
 			deliveryAddress,
 			totalKobo,
+			deliveryFeeKobo,
+			deliveryTitle,
 			invoiceItems,
 		); err != nil {
 			s.log.Warn().Err(err).Str("order_id", orderIDStr).Msg("vendor alert email failed")
@@ -824,7 +884,7 @@ func (s *OrdersService) CreateOrder(ctx context.Context, req dto.CreateOrderReq)
 	// tampered frontend. The storefront still needs to know this number
 	// before CreateOrder is ever called (it's charged through Paystack up
 	// front), but what actually gets recorded/verified is recomputed here.
-	deliveryFeeKobo, err := s.computeDeliveryFeeKobo(ctx, storeID, itemsKobo, req.Items)
+	deliveryFeeKobo, deliveryTitle, err := s.computeDeliveryFeeKobo(ctx, storeID, itemsKobo, req.Items, req.DeliveryOptionID)
 	if err != nil {
 		return dto.OrderResp{}, err
 	}
@@ -862,7 +922,7 @@ func (s *OrdersService) CreateOrder(ctx context.Context, req dto.CreateOrderReq)
 		return dto.OrderResp{}, fmt.Errorf("commit: %w", err)
 	}
 
-	s.notifyOrderCreated(storeID, orderID, insertedTotal, req.CustomerName, req.CustomerEmail, req.CustomerPhone, req.DeliveryAddress, req.StoreSlug, req.StoreName, req.Items)
+	s.notifyOrderCreated(storeID, orderID, insertedTotal, deliveryFeeKobo, deliveryTitle, req.CustomerName, req.CustomerEmail, req.CustomerPhone, req.DeliveryAddress, req.StoreSlug, req.StoreName, req.Items)
 
 	return s.GetOrder(ctx, storeID, orderID)
 }
@@ -948,7 +1008,7 @@ func (s *OrdersService) CreateCheckout(ctx context.Context, req dto.CreateChecko
 
 	resp := make([]dto.OrderResp, 0, len(created))
 	for _, c := range created {
-		s.notifyOrderCreated(c.storeID, c.orderID, c.totalKobo, req.CustomerName, req.CustomerEmail, req.CustomerPhone, req.DeliveryAddress, c.storeSlug, c.storeName, c.items)
+		s.notifyOrderCreated(c.storeID, c.orderID, c.totalKobo, 0, "", req.CustomerName, req.CustomerEmail, req.CustomerPhone, req.DeliveryAddress, c.storeSlug, c.storeName, c.items)
 		o, err := s.GetOrder(ctx, c.storeID, c.orderID)
 		if err != nil {
 			return nil, err
@@ -1493,4 +1553,21 @@ func (s *OrdersService) loadItems(ctx context.Context, orderID uuid.UUID) []dto.
 		})
 	}
 	return items
+}
+
+// nullTimeStr renders a nullable timestamp as RFC3339, or omits it.
+func nullTimeStr(t sql.NullTime) *string {
+	if !t.Valid {
+		return nil
+	}
+	s := t.Time.UTC().Format(time.RFC3339)
+	return &s
+}
+
+// nullStrPtr renders a nullable string as a pointer, or omits it.
+func nullStrPtr(n sql.NullString) *string {
+	if !n.Valid {
+		return nil
+	}
+	return &n.String
 }

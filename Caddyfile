@@ -1,0 +1,8 @@
+api.gomarketi.com {
+	encode zstd gzip
+
+	# SSE needs streaming, not buffering
+	reverse_proxy gateway:8080 {
+		flush_interval -1
+	}
+}

@@ -108,6 +108,11 @@ type CreateOrderReq struct {
 	DeliveryAddress string            `json:"delivery_address"`
 	Items           []CreateOrderItem `json:"items"             validate:"required,min=1,dive"`
 	PaymentRef      string            `json:"payment_reference" validate:"required"`
+	// DeliveryOptionID names one of the store's delivery options. When set,
+	// the price is read from that option — DeliveryFeeKobo is only trusted as
+	// a fallback for stores that have not configured any options.
+	DeliveryOptionID string `json:"delivery_option_id" validate:"omitempty,uuid"`
+	DeliveryFeeKobo  int64  `json:"delivery_fee_kobo"  validate:"min=0"`
 }
 
 // CreateCheckoutStoreOrder is one vendor's slice of a multi-store checkout —
@@ -372,3 +377,27 @@ type FieldError struct {
 	Field   string `json:"field"`
 	Message string `json:"message"`
 }
+
+// ── Multi-vendor checkout ─────────────────────────────────────────────────────
+
+// CheckoutStoreOrder is one vendor's share of a multi-vendor cart.
+type CheckoutStoreOrder struct {
+	StoreID   string            `json:"store_id"   validate:"required,uuid"`
+	StoreSlug string            `json:"store_slug"`
+	StoreName string            `json:"store_name"`
+	Items     []CreateOrderItem `json:"items"      validate:"required,min=1,dive"`
+}
+
+
+// CheckoutResp is what the consumer app receives back: the per-vendor orders
+// plus the checkout-level totals.
+type CheckoutResp struct {
+	CheckoutID          string      `json:"checkout_id"`
+	Orders              []OrderResp `json:"orders"`
+	ItemsKobo           int64       `json:"items_kobo"`
+	DeliveryFeeKobo     int64       `json:"delivery_fee_kobo"`
+	DeliveryOptionTitle string      `json:"delivery_option_title,omitempty"`
+	TotalKobo           int64       `json:"total_kobo"`
+}
+
+

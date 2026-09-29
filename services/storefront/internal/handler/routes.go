@@ -33,6 +33,7 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 		pub.GET("/stores/by-domain", h.GetStoreByDomain)
 		pub.GET("/stores/search", h.SearchStores)
 		pub.GET("/stores/:slug", h.GetStorePublic)
+		pub.GET("/stores/:slug/delivery-options", h.ListDeliveryOptionsPublic)
 		pub.GET("/markets", h.ListMarkets)
 		pub.POST("/log", h.LogView)
 	}
@@ -55,6 +56,13 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 		store := stores.Group("/:id")
 		store.PATCH("", h.UpdateStore)
 		store.GET("/views", h.GetStoreViews)
+
+		// Delivery options — the vendor's own delivery titles, notes and prices
+		delivery := store.Group("/delivery-options")
+		delivery.GET("", h.ListDeliveryOptions)
+		delivery.POST("", h.CreateDeliveryOption)
+		delivery.PATCH("/:option_id", h.UpdateDeliveryOption)
+		delivery.DELETE("/:option_id", h.DeleteDeliveryOption)
 
 		// Staff management (MERCHANT.STAFF dashboard section)
 		staff := store.Group("/staff")

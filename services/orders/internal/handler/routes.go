@@ -88,6 +88,10 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 		orders := v1.Group("/orders")
 		orders.GET("", h.ListOrders)
 		orders.GET("/abandoned", h.ListAbandonedCarts)
+
+		// Buyer-facing: the signed-in shopper's own orders across every
+		// vendor, as opposed to the vendor routes above which are scoped to
+		// a store.
 		orders.GET("/:id", h.GetOrder)
 		orders.PATCH("/:id/status", h.UpdateOrderStatus)
 

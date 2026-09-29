@@ -7,8 +7,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
-	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
 	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/dto"
+	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
 )
 
 // GetAnalyticsOverview godoc

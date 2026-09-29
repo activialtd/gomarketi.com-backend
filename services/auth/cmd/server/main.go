@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -17,12 +18,12 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/spf13/viper"
 
-	sharedjwt "github.com/activialtd/gomarketi.com-backend/shared/pkg/jwt"
 	"github.com/activialtd/gomarketi.com-backend/services/auth/internal/email"
 	"github.com/activialtd/gomarketi.com-backend/services/auth/internal/handler"
 	"github.com/activialtd/gomarketi.com-backend/services/auth/internal/oauth"
 	"github.com/activialtd/gomarketi.com-backend/services/auth/internal/repository"
 	"github.com/activialtd/gomarketi.com-backend/services/auth/internal/service"
+	sharedjwt "github.com/activialtd/gomarketi.com-backend/shared/pkg/jwt"
 )
 
 func main() {
@@ -98,7 +99,7 @@ func run(log zerolog.Logger) error {
 	case viper.GetString("RESEND_API_KEY") != "":
 		emailer, err = email.NewResendClient(email.ResendConfig{
 			APIKey: viper.GetString("RESEND_API_KEY"),
-			From:   viper.GetString("RESEND_FROM"),
+			From:   resendFrom(),
 		})
 		if err != nil {
 			return fmt.Errorf("resend client: %w", err)
@@ -255,4 +256,17 @@ func connectDB(dsn string, log zerolog.Logger) (*sqlx.DB, error) {
 		time.Sleep(2 * time.Second)
 	}
 	return nil, fmt.Errorf("database unreachable after 5 attempts: %w", err)
+}
+
+// resendFrom resolves the sender address. RESEND_FROM is the documented name;
+// EMAIL_FROM is accepted as an alias because it is the more obvious one to
+// reach for. Falls back to Resend's shared test sender, which works without a
+// verified domain but only delivers to the Resend account owner.
+func resendFrom() string {
+	for _, key := range []string{"RESEND_FROM", "EMAIL_FROM"} {
+		if v := strings.TrimSpace(viper.GetString(key)); v != "" {
+			return v
+		}
+	}
+	return "GoMarketi <onboarding@resend.dev>"
 }
