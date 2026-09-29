@@ -31,7 +31,6 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 	pub := r.Group("/v1/catalogue/public")
 	// Query-param routes used by the storefront API client
 	pub.GET("/search", h.Search)
-	pub.GET("/products/search", h.SearchProducts)
 	pub.GET("/products", h.ListPublicProductsByQuery)
 	pub.GET("/products/search", h.SearchPublicProducts) // cross-vendor — registered before the :product_id wildcard
 	pub.GET("/products/:product_id", h.GetPublicProductByID)
