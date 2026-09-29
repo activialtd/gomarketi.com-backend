@@ -339,6 +339,14 @@ func (s *OrdersService) DisputeRefund(ctx context.Context, orderID uuid.UUID) (d
 // everything else admin-api does as a direct DB write). Idempotent: calling
 // it twice on an already-cancelled order is a no-op, not a double refund.
 func (s *OrdersService) NoShowRefund(ctx context.Context, orderID uuid.UUID) (dto.OrderResp, error) {
+	return s.cancelAndRefund(ctx, orderID, "vendor_no_show_at_dispatch")
+}
+
+// cancelAndRefund refunds the buyer, marks the order cancelled with the given
+// reason, and voids the vendor's pending wallet credit — the shared path
+// behind both a dispatch no-show and a vendor cancelling an order outright.
+// Idempotent: an already-cancelled order is returned untouched.
+func (s *OrdersService) cancelAndRefund(ctx context.Context, orderID uuid.UUID, reason string) (dto.OrderResp, error) {
 	var status, paymentRef sql.NullString
 	var totalKobo int64
 	err := s.db.QueryRowContext(ctx,
@@ -355,7 +363,7 @@ func (s *OrdersService) NoShowRefund(ctx context.Context, orderID uuid.UUID) (dt
 		return s.getOrderByID(ctx, orderID)
 	}
 	if status.String == string(dto.OrderStatusShipped) || status.String == string(dto.OrderStatusDelivered) {
-		return dto.OrderResp{}, apperrors.BadRequest("order has already been dispatched — cannot no-show it now")
+		return dto.OrderResp{}, apperrors.BadRequest("order has already been dispatched — cancel it through a dispute instead")
 	}
 	if !paymentRef.Valid || paymentRef.String == "" {
 		return dto.OrderResp{}, apperrors.Internal(fmt.Errorf("order %s has no payment_reference to refund", orderID))
@@ -375,7 +383,7 @@ func (s *OrdersService) NoShowRefund(ctx context.Context, orderID uuid.UUID) (dt
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE orders SET status=$1, cancelled_reason=$2, refund_reference=$3, refunded_at=NOW(), updated_at=NOW()
 		WHERE id=$4`,
-		dto.OrderStatusCancelled, "vendor_no_show_at_dispatch", refundRef, orderID,
+		dto.OrderStatusCancelled, reason, refundRef, orderID,
 	); err != nil {
 		return dto.OrderResp{}, fmt.Errorf("mark cancelled: %w", err)
 	}
@@ -526,6 +534,22 @@ func (s *OrdersService) UpdateOrderStatus(ctx context.Context, storeID uuid.UUID
 	if err != nil {
 		return dto.OrderResp{}, fmt.Errorf("update status: %w", err)
 	}
+
+	// A vendor cancelling a paid order must not leave the buyer's money with
+	// us and the vendor's credit sitting claimable. Refund the buyer and void
+	// the pending credit, the same way a no-show at dispatch is handled.
+	// Reported separately from the status change: the cancellation itself has
+	// already been recorded, so a refund failure must not undo it.
+	if req.Status == dto.OrderStatusCancelled {
+		if _, refundErr := s.cancelAndRefund(ctx, orderID, "vendor_cancelled"); refundErr != nil {
+			s.log.Error().Err(refundErr).Str("order_id", orderID.String()).
+				Msg("cancelled order: refund and escrow reversal failed — needs manual settlement")
+			middleware.RecordBackgroundError(s.db, s.log, "orders",
+				"cancelled order refund failed: "+refundErr.Error(),
+				map[string]any{"order_id": orderID.String()})
+		}
+	}
+
 	go s.broker.Publish(storeID.String(), sse.Event{
 		Type: "order_updated",
 		Data: fmt.Sprintf(`{"order_id":%q,"status":%q}`, orderID.String(), req.Status),
@@ -609,13 +633,12 @@ func claimPaymentReference(ctx context.Context, tx *sqlx.Tx, ref string, amountK
 // storefront/catalogue-owned tables directly is this codebase's established
 // cross-service pattern (no cross-service FKs, direct reads are fine).
 //
-// Pricing comes from the vendor's own store_delivery_options row when the
-// buyer picked one (deliveryOptionID). A store that has published options
-// requires the buyer to choose one, so a tampered client cannot fall back to
-// a cheaper number. Stores with no options configured keep using the flat
-// stores.delivery_fee_kobo / free_delivery_threshold_kobo settings, which is
-// what every existing storefront still relies on.
-func (s *OrdersService) computeDeliveryFeeKobo(ctx context.Context, storeID uuid.UUID, itemsKobo int64, items []dto.CreateOrderItem, deliveryOptionID string) (int64, string, error) {
+// Pricing comes from the vendor's own store_delivery_options row, which the
+// buyer picks at checkout. There is no fallback: a store that has published
+// no options cannot take a physical order, and the buyer is told so plainly
+// rather than being charged a number nobody set. Digital-only orders are
+// free and skip the check entirely.
+func (s *OrdersService) computeDeliveryFeeKobo(ctx context.Context, storeID uuid.UUID, items []dto.CreateOrderItem, deliveryOptionID string) (int64, string, error) {
 	allDigital := s.allItemsDigital(ctx, items)
 
 	if deliveryOptionID != "" {
@@ -644,32 +667,19 @@ func (s *OrdersService) computeDeliveryFeeKobo(ctx context.Context, storeID uuid
 		return priceKobo, title, nil
 	}
 
-	// No option named — reject only if this store actually publishes options.
+	// No option named. A physical order cannot be priced without one, so the
+	// checkout stops here rather than guessing a fee.
 	var configured int
 	if countErr := s.db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM store_delivery_options WHERE store_id=$1 AND is_active=TRUE`, storeID,
 	).Scan(&configured); countErr != nil {
 		return 0, "", fmt.Errorf("count delivery options: %w", countErr)
 	}
-	if configured > 0 && !allDigital {
-		return 0, "", apperrors.BadRequest("delivery_option_id is required for this store")
+	if configured > 0 {
+		return 0, "", apperrors.BadRequest("choose a delivery option before paying")
 	}
-
-	var feeKobo, thresholdKobo int64
-	err := s.db.QueryRowContext(ctx,
-		`SELECT delivery_fee_kobo, free_delivery_threshold_kobo FROM stores WHERE id=$1`, storeID,
-	).Scan(&feeKobo, &thresholdKobo)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, "", apperrors.BadRequest("store not found")
-	}
-	if err != nil {
-		return 0, "", fmt.Errorf("get store delivery settings: %w", err)
-	}
-
-	if allDigital || (thresholdKobo > 0 && itemsKobo > thresholdKobo) {
-		return 0, "", nil
-	}
-	return feeKobo, "", nil
+	return 0, "", apperrors.BadRequest(
+		"this vendor has not set a delivery fee yet — please contact the store")
 }
 
 // allItemsDigital reports whether every line is a digital product, which is
@@ -884,7 +894,7 @@ func (s *OrdersService) CreateOrder(ctx context.Context, req dto.CreateOrderReq)
 	// tampered frontend. The storefront still needs to know this number
 	// before CreateOrder is ever called (it's charged through Paystack up
 	// front), but what actually gets recorded/verified is recomputed here.
-	deliveryFeeKobo, deliveryTitle, err := s.computeDeliveryFeeKobo(ctx, storeID, itemsKobo, req.Items, req.DeliveryOptionID)
+	deliveryFeeKobo, deliveryTitle, err := s.computeDeliveryFeeKobo(ctx, storeID, req.Items, req.DeliveryOptionID)
 	if err != nil {
 		return dto.OrderResp{}, err
 	}
