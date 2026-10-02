@@ -36,7 +36,16 @@ const orderColumns = `id, store_id, customer_id, customer_name, customer_email, 
 	hub_received_at, dispatched_at, delivered_at, delivery_confirmed_at, cancelled_reason,
 	dispute_status, dispute_reason, disputed_at,
 	created_at, updated_at,
-	(SELECT wt.status FROM wallet_transactions wt WHERE wt.order_id = orders.id LIMIT 1) AS wallet_status`
+	(SELECT wt.status FROM wallet_transactions wt WHERE wt.order_id = orders.id LIMIT 1) AS wallet_status,
+	-- Who delivers: a basket spanning vendors becomes several orders sharing
+	-- one payment_reference and goes through GoMarketi's hub; an order alone
+	-- on its reference is the vendor's own delivery. Cheap because
+	-- idx_orders_payment_reference covers the lookup.
+	CASE WHEN orders.payment_reference IS NOT NULL AND EXISTS (
+	         SELECT 1 FROM orders o2
+	         WHERE o2.payment_reference = orders.payment_reference
+	           AND o2.store_id <> orders.store_id)
+	     THEN 'gomarketi' ELSE 'vendor' END AS fulfilment`
 
 func New(db *sqlx.DB, log zerolog.Logger, broker *sse.Broker) *OrdersService {
 	return &OrdersService{db: db, log: log, broker: broker}
@@ -512,9 +521,52 @@ func (s *OrdersService) GetOrder(ctx context.Context, storeID uuid.UUID, orderID
 	return o, nil
 }
 
+// vendorMaySet reports whether a vendor can move one of their own orders to
+// the requested status, which depends on who is delivering it.
+//
+//	vendor-delivered  → confirmed, shipped, cancelled. There is no hub in
+//	                    this flow, so at_hub would be a step that never
+//	                    physically happens.
+//	GoMarketi-delivered → confirmed, at_hub, cancelled. The vendor hands the
+//	                    parcel to the hub; GoMarketi consolidates the basket
+//	                    and dispatches, so marking it shipped would claim a
+//	                    dispatch the vendor does not perform — and would
+//	                    start the escrow auto-release clock early.
+//
+// delivered is settable in neither: it releases escrow on the spot, so it
+// stays with the buyer's confirm-delivery call or the auto-release sweep.
+func vendorMaySet(f dto.Fulfilment, status dto.OrderStatus) error {
+	switch status {
+	case dto.OrderStatusConfirmed, dto.OrderStatusCancelled:
+		return nil
+	case dto.OrderStatusShipped:
+		if f == dto.FulfilmentGoMarketi {
+			return apperrors.BadRequest("this order is part of a multi-vendor basket that GoMarketi delivers — mark it received at the hub and we dispatch it")
+		}
+		return nil
+	case dto.OrderStatusAtHub:
+		if f == dto.FulfilmentVendor {
+			return apperrors.BadRequest("this order is yours to deliver, so it does not pass through the hub — mark it dispatched once it is on its way")
+		}
+		return nil
+	default:
+		return apperrors.BadRequest("you cannot set this order to " + string(status))
+	}
+}
+
 func (s *OrdersService) UpdateOrderStatus(ctx context.Context, storeID uuid.UUID, orderID uuid.UUID, req dto.UpdateOrderStatusReq) (dto.OrderResp, error) {
+	// Who delivers decides what the vendor may set, so it has to be read
+	// before the write rather than validated from the request alone.
+	current, err := s.GetOrder(ctx, storeID, orderID)
+	if err != nil {
+		return dto.OrderResp{}, err
+	}
+	if err := vendorMaySet(current.Fulfilment, req.Status); err != nil {
+		return dto.OrderResp{}, err
+	}
+
 	var r orderRow
-	err := s.db.QueryRowxContext(ctx, `
+	err = s.db.QueryRowxContext(ctx, `
 		UPDATE orders SET
 			status     = $1,
 			note       = COALESCE($2, note),
@@ -1439,6 +1491,7 @@ type orderRow struct {
 	CustomerName        string         `db:"customer_name"`
 	CustomerEmail       string         `db:"customer_email"`
 	Status              string         `db:"status"`
+	Fulfilment          string         `db:"fulfilment"`
 	TotalKobo           int64          `db:"total_kobo"`
 	DeliveryFeeKobo     int64          `db:"delivery_fee_kobo"`
 	DeliveryAddress     string         `db:"delivery_address"`
@@ -1474,6 +1527,7 @@ func rowToOrder(r orderRow) dto.OrderResp {
 		CustomerName:    r.CustomerName,
 		CustomerEmail:   r.CustomerEmail,
 		Status:          dto.OrderStatus(r.Status),
+		Fulfilment:      dto.Fulfilment(r.Fulfilment),
 		Items:           []dto.OrderItem{},
 		TotalKobo:       r.TotalKobo,
 		DeliveryFeeKobo: r.DeliveryFeeKobo,

@@ -54,6 +54,22 @@ const (
 )
 
 // OrderResp is returned for any order read operation.
+// Fulfilment says who physically delivers an order, which decides what the
+// vendor is allowed to do with it.
+//
+// A basket spanning several vendors becomes several order rows sharing one
+// payment_reference. Those go through GoMarketi's hub: each vendor brings
+// their part in, and GoMarketi consolidates and dispatches one delivery, so
+// the vendor's last step is at_hub. An order that is the only one on its
+// reference is that vendor's own delivery end to end, so they mark it
+// shipped themselves and never see a hub step.
+type Fulfilment string
+
+const (
+	FulfilmentVendor    Fulfilment = "vendor"
+	FulfilmentGoMarketi Fulfilment = "gomarketi"
+)
+
 type OrderResp struct {
 	ID                  string         `json:"id"`
 	StoreID             string         `json:"store_id"`
@@ -61,6 +77,7 @@ type OrderResp struct {
 	CustomerName        string         `json:"customer_name"`
 	CustomerEmail       string         `json:"customer_email"`
 	Status              OrderStatus    `json:"status"`
+	Fulfilment          Fulfilment     `json:"fulfilment"`
 	Items               []OrderItem    `json:"items"`
 	TotalKobo           int64          `json:"total_kobo"`
 	DeliveryFeeKobo     int64          `json:"delivery_fee_kobo"`
