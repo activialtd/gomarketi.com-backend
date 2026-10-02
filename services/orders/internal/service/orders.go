@@ -524,14 +524,15 @@ func (s *OrdersService) GetOrder(ctx context.Context, storeID uuid.UUID, orderID
 // vendorMaySet reports whether a vendor can move one of their own orders to
 // the requested status, which depends on who is delivering it.
 //
-//	vendor-delivered  → confirmed, shipped, cancelled. There is no hub in
-//	                    this flow, so at_hub would be a step that never
-//	                    physically happens.
-//	GoMarketi-delivered → confirmed, at_hub, cancelled. The vendor hands the
-//	                    parcel to the hub; GoMarketi consolidates the basket
-//	                    and dispatches, so marking it shipped would claim a
-//	                    dispatch the vendor does not perform — and would
-//	                    start the escrow auto-release clock early.
+//	vendor-delivered  → confirmed, shipped, cancelled. The vendor runs this
+//	                    order end to end, so they mark dispatch themselves.
+//	                    There is no hub in this flow, so at_hub would be a
+//	                    step that never physically happens.
+//	GoMarketi-delivered → confirmed, cancelled, and nothing else. Once the
+//	                    vendor accepts the order the platform takes over
+//	                    movement entirely, so neither at_hub nor shipped is
+//	                    theirs to claim — and shipped would start the escrow
+//	                    auto-release clock on a dispatch they did not make.
 //
 // delivered is settable in neither: it releases escrow on the spot, so it
 // stays with the buyer's confirm-delivery call or the auto-release sweep.
@@ -539,13 +540,11 @@ func vendorMaySet(f dto.Fulfilment, status dto.OrderStatus) error {
 	switch status {
 	case dto.OrderStatusConfirmed, dto.OrderStatusCancelled:
 		return nil
-	case dto.OrderStatusShipped:
+	case dto.OrderStatusShipped, dto.OrderStatusAtHub:
 		if f == dto.FulfilmentGoMarketi {
-			return apperrors.BadRequest("this order is part of a multi-vendor basket that GoMarketi delivers — mark it received at the hub and we dispatch it")
+			return apperrors.BadRequest("this order is part of a multi-vendor basket that GoMarketi delivers — confirm it and we take it from there")
 		}
-		return nil
-	case dto.OrderStatusAtHub:
-		if f == dto.FulfilmentVendor {
+		if status == dto.OrderStatusAtHub {
 			return apperrors.BadRequest("this order is yours to deliver, so it does not pass through the hub — mark it dispatched once it is on its way")
 		}
 		return nil
@@ -759,7 +758,11 @@ func (s *OrdersService) allItemsDigital(ctx context.Context, items []dto.CreateO
 // insertOrderTx inserts one order, its line items, and the vendor's wallet
 // credit, all within the given transaction. Shared by CreateOrder (one
 // store) and CreateCheckout (N stores, one per vendor, sharing one payment).
-func insertOrderTx(ctx context.Context, tx *sqlx.Tx, storeID uuid.UUID, customerName, customerEmail, deliveryAddress string, items []dto.CreateOrderItem, deliveryFeeKobo int64, paymentRef string) (uuid.UUID, int64, error) {
+// vendorDelivers says whether this order's vendor does the delivery, which
+// decides who earns the delivery fee. It mirrors the `fulfilment` column
+// derived in orderColumns: true for an order that is alone on its payment
+// reference, false for one share of a multi-vendor basket.
+func insertOrderTx(ctx context.Context, tx *sqlx.Tx, storeID uuid.UUID, customerName, customerEmail, deliveryAddress string, items []dto.CreateOrderItem, deliveryFeeKobo int64, vendorDelivers bool, paymentRef string) (uuid.UUID, int64, error) {
 	var itemsKobo int64
 	for _, it := range items {
 		itemsKobo += it.PriceKobo * int64(it.Quantity)
@@ -796,16 +799,26 @@ func insertOrderTx(ctx context.Context, tx *sqlx.Tx, storeID uuid.UUID, customer
 		}
 	}
 
-	// Credit the vendor's wallet for the items total only — GoMarketi's hub
-	// handles delivery, not the vendor, so the delivery fee (if any) is
-	// platform revenue and isn't credited here. Held in escrow
-	// (status='pending', excluded from GetWallet's available-balance query)
-	// until the buyer confirms receipt — see ConfirmDelivery below and the
-	// auto-release goroutine in cmd/server/main.go.
+	// The delivery fee follows whoever does the delivering. A vendor running
+	// their own order end to end earns it on top of the items; on a
+	// multi-vendor basket GoMarketi consolidates and delivers, so the fee is
+	// platform revenue and the vendor is credited items only.
+	//
+	// Held in escrow either way (status='pending', excluded from GetWallet's
+	// available-balance query) until the buyer confirms receipt — see
+	// ConfirmDelivery below and the auto-release goroutine in
+	// cmd/server/main.go. So this is what the vendor receives when the order
+	// completes, not when it is placed.
+	creditKobo := itemsKobo
+	description := fmt.Sprintf("Sale — order #%s", orderID.String()[:8])
+	if vendorDelivers && deliveryFeeKobo > 0 {
+		creditKobo += deliveryFeeKobo
+		description = fmt.Sprintf("Sale + delivery — order #%s", orderID.String()[:8])
+	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO wallet_transactions (store_id, type, amount_kobo, description, reference, order_id, status)
 		VALUES ($1,'credit',$2,$3,$4,$5,'pending')`,
-		storeID, itemsKobo, fmt.Sprintf("Sale — order #%s", orderID.String()[:8]), paymentRef, orderID,
+		storeID, creditKobo, description, paymentRef, orderID,
 	); err != nil {
 		return uuid.Nil, 0, fmt.Errorf("credit wallet: %w", err)
 	}
@@ -975,7 +988,7 @@ func (s *OrdersService) CreateOrder(ctx context.Context, req dto.CreateOrderReq)
 		return dto.OrderResp{}, fmt.Errorf("claim payment reference: %w", err)
 	}
 
-	orderID, insertedTotal, err := insertOrderTx(ctx, tx, storeID, req.CustomerName, req.CustomerEmail, req.DeliveryAddress, req.Items, deliveryFeeKobo, req.PaymentRef)
+	orderID, insertedTotal, err := insertOrderTx(ctx, tx, storeID, req.CustomerName, req.CustomerEmail, req.DeliveryAddress, req.Items, deliveryFeeKobo, true, req.PaymentRef)
 	if err != nil {
 		return dto.OrderResp{}, err
 	}
@@ -1052,12 +1065,17 @@ func (s *OrdersService) CreateCheckout(ctx context.Context, req dto.CreateChecko
 	}
 	created := make([]createdOrder, 0, len(req.Stores))
 
+	// A basket that happens to hold one vendor is that vendor's own delivery,
+	// matching how `fulfilment` is derived from the order rows afterwards:
+	// only a sibling order under a different store makes it a hub job.
+	vendorDelivers := len(req.Stores) == 1
+
 	for _, so := range req.Stores {
 		storeID, err := uuid.Parse(so.StoreID)
 		if err != nil {
 			return nil, apperrors.BadRequest("invalid store_id")
 		}
-		orderID, subTotal, err := insertOrderTx(ctx, tx, storeID, req.CustomerName, req.CustomerEmail, req.DeliveryAddress, so.Items, 0, req.PaymentRef)
+		orderID, subTotal, err := insertOrderTx(ctx, tx, storeID, req.CustomerName, req.CustomerEmail, req.DeliveryAddress, so.Items, 0, vendorDelivers, req.PaymentRef)
 		if err != nil {
 			return nil, err
 		}
