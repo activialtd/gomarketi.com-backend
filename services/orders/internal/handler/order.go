@@ -352,3 +352,23 @@ func (h *Handler) DisputeRefund(c *gin.Context) {
 
 	c.JSON(http.StatusOK, resp)
 }
+
+// RecordCheckoutIntent godoc
+// POST /v1/orders/public/checkout-intent — the browser tells us what it is
+// about to pay for, before it pays.
+//
+// Public, like the rest of checkout. The row it writes is a plan, not money:
+// it only becomes an order once a Paystack charge for the same reference is
+// verified, so a forged intent achieves nothing.
+func (h *Handler) RecordCheckoutIntent(c *gin.Context) {
+	var req dto.RecordCheckoutIntentReq
+	if !h.bind(c, &req) {
+		return
+	}
+
+	if err := h.svc.RecordCheckoutIntent(c.Request.Context(), req.Kind, req.PaymentRef, req.Payload); err != nil {
+		h.writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"recorded": true})
+}

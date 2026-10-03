@@ -1,6 +1,8 @@
 // Package dto defines request and response shapes for the orders service.
 package dto
 
+import "encoding/json"
+
 // ── Orders ────────────────────────────────────────────────────────────────────
 
 // OrderStatus represents the lifecycle of an order.
@@ -179,6 +181,15 @@ type CreateCheckoutResp struct {
 type UpdateOrderStatusReq struct {
 	Status OrderStatus `json:"status" validate:"required,oneof=confirmed at_hub shipped cancelled"`
 	Note   *string     `json:"note"`
+}
+
+// RecordCheckoutIntentReq is the body for POST /v1/orders/public/checkout-intent.
+// Payload is the CreateOrderReq or CreateCheckoutReq the browser is about to
+// send after paying, kept opaque here so the two shapes share one endpoint.
+type RecordCheckoutIntentReq struct {
+	Kind       string          `json:"kind"              validate:"required,oneof=order checkout"`
+	PaymentRef string          `json:"payment_reference" validate:"required"`
+	Payload    json.RawMessage `json:"payload"           validate:"required"`
 }
 
 // ConfirmDeliveryReq is the body for POST /v1/orders/public/:id/confirm-delivery.
@@ -414,7 +425,6 @@ type CheckoutStoreOrder struct {
 	Items     []CreateOrderItem `json:"items"      validate:"required,min=1,dive"`
 }
 
-
 // CheckoutResp is what the consumer app receives back: the per-vendor orders
 // plus the checkout-level totals.
 type CheckoutResp struct {
@@ -425,5 +435,3 @@ type CheckoutResp struct {
 	DeliveryOptionTitle string      `json:"delivery_option_title,omitempty"`
 	TotalKobo           int64       `json:"total_kobo"`
 }
-
-

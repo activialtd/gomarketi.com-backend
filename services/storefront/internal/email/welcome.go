@@ -102,12 +102,11 @@ func welcomeHTML(vendorName, storeName, storeURL, storeSlug string) string {
         <!-- Logo header -->
         <tr>
           <td align="center" style="padding:0 0 24px 0;">
-            <div style="display:inline-flex;align-items:center;gap:10px;">
-              <div style="width:40px;height:40px;background:#1A7A42;border-radius:10px;display:flex;align-items:center;justify-content:center;">
-                <span style="color:#fff;font-size:20px;font-weight:900;line-height:1;">G</span>
-              </div>
-              <span style="font-size:22px;font-weight:800;color:#0A2E1A;letter-spacing:-0.5px;">GoMarketi</span>
-            </div>
+            <!-- The real lockup. Email cannot use inline SVG and a CID
+                 attachment breaks in webmail, so this is a hosted PNG,
+                 flattened onto white because some Outlook builds composite
+                 alpha against black. -->
+            <img src="` + brandMark() + `" width="150" alt="GoMarket" style="display:block;border:0;width:150px;height:auto;">
           </td>
         </tr>
 
@@ -115,7 +114,6 @@ func welcomeHTML(vendorName, storeName, storeURL, storeSlug string) string {
         <tr>
           <td>
             <div style="background:#0A2E1A;border-radius:20px 20px 0 0;padding:40px 40px 32px;text-align:center;">
-              <div style="font-size:48px;margin-bottom:16px;">🎉</div>
               <h1 style="margin:0 0 10px;color:#ffffff;font-size:28px;font-weight:800;letter-spacing:-0.5px;line-height:1.2;">
                 Your store is live!
               </h1>
@@ -161,7 +159,6 @@ func welcomeHTML(vendorName, storeName, storeURL, storeSlug string) string {
             <p style="margin:0;color:#94a3b8;font-size:13px;line-height:1.6;text-align:center;">
               Questions? Reply to this email or chat with us at
               <a href="https://gomarketi.com" style="color:#1A7A42;text-decoration:none;">gomarketi.com</a>.
-              <br/>We're here to help you succeed. 🚀
             </p>
           </td>
         </tr>
