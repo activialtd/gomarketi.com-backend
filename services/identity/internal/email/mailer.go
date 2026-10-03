@@ -99,24 +99,22 @@ func accountReadyHTML(vendorName, bankName, accountNumber, accountName string) s
 
         <tr>
           <td align="center" style="padding:0 0 24px 0;">
-            <div style="display:inline-flex;align-items:center;gap:10px;">
-              <div style="width:40px;height:40px;background:#1A7A42;border-radius:10px;display:flex;align-items:center;justify-content:center;">
-                <span style="color:#fff;font-size:20px;font-weight:900;line-height:1;">G</span>
-              </div>
-              <span style="font-size:22px;font-weight:800;color:#0A2E1A;letter-spacing:-0.5px;">GoMarketi</span>
-            </div>
+            <!-- The real lockup. Email cannot use inline SVG and a CID
+                 attachment breaks in webmail, so this is a hosted PNG,
+                 flattened onto white because some Outlook builds composite
+                 alpha against black. -->
+            <img src="` + brandMark() + `" width="150" alt="GoMarket" style="display:block;border:0;width:150px;height:auto;">
           </td>
         </tr>
 
         <tr>
           <td>
             <div style="background:#0A2E1A;border-radius:20px 20px 0 0;padding:40px 40px 32px;text-align:center;">
-              <div style="font-size:48px;margin-bottom:16px;">🎉</div>
-              <h1 style="margin:0 0 10px;color:#ffffff;font-size:26px;font-weight:800;letter-spacing:-0.5px;line-height:1.2;">
-                Welcome to GoMarketi, %s!
+              <h1 style="margin:0 0 10px;color:#ffffff;font-size:22px;font-weight:700;letter-spacing:-0.3px;line-height:1.3;">
+                Your payment account is ready
               </h1>
-              <p style="margin:0;color:rgba(255,255,255,0.65);font-size:15px;line-height:1.5;">
-                Your dedicated payment account is ready to receive funds.
+              <p style="margin:0;color:rgba(255,255,255,0.62);font-size:14.5px;line-height:1.6;">
+                Hello %s — money customers pay you lands in the account below.
               </p>
             </div>
           </td>
@@ -154,7 +152,6 @@ func accountReadyHTML(vendorName, bankName, accountNumber, accountName string) s
             <p style="margin:0;color:#94a3b8;font-size:13px;line-height:1.6;text-align:center;">
               Questions? Reply to this email or chat with us at
               <a href="https://gomarketi.com" style="color:#1A7A42;text-decoration:none;">gomarketi.com</a>.
-              <br/>We're here to help you succeed. 🚀
             </p>
           </td>
         </tr>

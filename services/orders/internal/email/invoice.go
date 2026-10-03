@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	htmlpkg "html"
 	"io"
 	"net"
 	"net/http"
@@ -61,106 +62,24 @@ func buildTrackURL(storeSlug, customerEmail string) string {
 }
 
 func cartSummaryHTML(customerName, storeName, trackURL string, totalKobo int64, items []InvoiceItem) string {
-	var rows strings.Builder
-	for _, item := range items {
-		lineTotal := fmtNaira(item.PriceKobo * int64(item.Quantity))
-		unitPrice := fmtNaira(item.PriceKobo)
-		imgCell := `<div style="width:44px;height:44px;border-radius:6px;background:#f1f5f9;display:inline-flex;align-items:center;justify-content:center;font-size:18px;">📦</div>`
-		if item.ImageURL != "" {
-			imgCell = fmt.Sprintf(`<img src="%s" width="44" height="44" style="border-radius:6px;object-fit:cover;display:block;" alt="">`, item.ImageURL)
-		}
-		rows.WriteString(fmt.Sprintf(`
+	body := heading("You left something behind") +
+		paragraph(fmt.Sprintf("Hi %s, your basket at %s is still saved. Nothing has been charged.",
+			htmlpkg.EscapeString(customerName), htmlpkg.EscapeString(storeName))) +
+		labelRow("In your basket") +
+		itemTable(items) +
+		fmt.Sprintf(`
+<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" border="0" style="margin-top:16px;">
 <tr>
-  <td style="padding:12px 0;border-bottom:1px solid #f1f5f9;vertical-align:middle;">
-    <table cellpadding="0" cellspacing="0"><tr>
-      <td style="padding-right:12px;">%s</td>
-      <td>
-        <p style="margin:0;font-size:14px;font-weight:600;color:#1C1C1C;line-height:1.3;">%s</p>
-        <p style="margin:4px 0 0;font-size:12px;color:#94a3b8;">Qty %d · %s each</p>
-      </td>
-    </tr></table>
-  </td>
-  <td style="padding:12px 0;border-bottom:1px solid #f1f5f9;font-size:14px;font-weight:700;color:#1C1C1C;text-align:right;vertical-align:middle;">%s</td>
-</tr>`, imgCell, item.Name, item.Quantity, unitPrice, lineTotal))
-	}
+  <td style="font-size:15px;font-weight:700;color:%s;">Basket total</td>
+  <td style="font-size:19px;font-weight:700;color:%s;text-align:right;letter-spacing:-0.3px;">%s</td>
+</tr>
+</table>`, inkColor, inkColor, fmtNaira(totalKobo)) +
+		divider() +
+		button("Finish your order", trackURL)
 
-	return fmt.Sprintf(`<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Order Processing</title></head>
-<body style="margin:0;padding:0;background:#f0f4f8;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
-<table width="100%%" cellpadding="0" cellspacing="0" style="background:#f0f4f8;padding:32px 16px 48px;">
-<tr><td align="center">
-<table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%%;">
-
-  <tr><td style="background:#0E1F13;border-radius:16px 16px 0 0;padding:36px 40px;text-align:center;">
-    <p style="margin:0 0 6px;font-size:11px;font-weight:700;letter-spacing:0.18em;text-transform:uppercase;color:rgba(255,255,255,0.45);">Payment in progress</p>
-    <h1 style="margin:0;font-size:24px;font-weight:800;color:#fff;letter-spacing:-0.4px;">🛒 &nbsp;%s</h1>
-    <p style="margin:8px 0 0;font-size:14px;color:rgba(255,255,255,0.5);">Hi %s — here's a summary of your order.</p>
-  </td></tr>
-
-  <tr><td style="background:#1A7A42;padding:12px 40px;text-align:center;">
-    <p style="margin:0;font-size:12px;font-weight:700;color:rgba(255,255,255,0.8);">
-      Complete your payment to confirm this order &nbsp;·&nbsp; Total: <span style="color:#fff;">%s</span>
-    </p>
-  </td></tr>
-
-  <tr><td style="background:#fff;border-radius:0 0 16px 16px;padding:36px 40px;">
-    <p style="margin:0 0 20px;font-size:15px;color:#374151;line-height:1.6;">
-      You're in the process of placing an order with <strong>%s</strong>. Once your payment goes through, we'll send a full receipt with your order ID and tracking link.
-    </p>
-
-    <p style="margin:0 0 12px;font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:#94a3b8;">Items in your cart</p>
-    <table width="100%%" cellpadding="0" cellspacing="0">
-      <tr>
-        <th style="text-align:left;font-size:11px;color:#94a3b8;font-weight:600;padding-bottom:8px;border-bottom:2px solid #f1f5f9;">Product</th>
-        <th style="text-align:right;font-size:11px;color:#94a3b8;font-weight:600;padding-bottom:8px;border-bottom:2px solid #f1f5f9;">Total</th>
-      </tr>
-      %s
-      <tr>
-        <td style="padding:16px 0 0;font-size:13px;font-weight:700;color:#6b7280;">Order total</td>
-        <td style="padding:16px 0 0;font-size:22px;font-weight:900;color:#1A7A42;text-align:right;">%s</td>
-      </tr>
-    </table>
-
-    <div style="height:1px;background:#f1f5f9;margin:28px 0;"></div>
-
-    <p style="margin:0 0 16px;font-size:14px;color:#374151;line-height:1.5;">
-      Already paid? You can track your order using the button below.
-    </p>
-    <div style="text-align:center;margin:20px 0 8px;">
-      <a href="%s" style="display:inline-block;background:#1A7A42;color:#fff;text-decoration:none;font-size:15px;font-weight:700;padding:16px 40px;border-radius:12px;">
-        Track my order &rarr;
-      </a>
-    </div>
-
-    <div style="height:1px;background:#f1f5f9;margin:28px 0;"></div>
-    <p style="margin:0;font-size:12px;color:#94a3b8;text-align:center;line-height:1.7;">
-      Questions? Contact %s directly.<br>
-      Powered by <a href="https://gomarketi.com" style="color:#1A7A42;text-decoration:none;">GoMarketi</a>
-    </p>
-  </td></tr>
-
-  <tr><td style="padding:24px 0;text-align:center;">
-    <p style="margin:0;font-size:11px;color:#94a3b8;">&copy; 2026 GoMarketi &middot; Made in Nigeria 🇳🇬</p>
-  </td></tr>
-</table>
-</td></tr>
-</table>
-</body>
-</html>`,
-		storeName, customerName,
-		fmtNaira(totalKobo),
-		storeName,
-		rows.String(), fmtNaira(totalKobo),
-		trackURL,
-		storeName,
-	)
+	return shell("Your basket", fmt.Sprintf("Your basket at %s — %s", storeName, fmtNaira(totalKobo)), body)
 }
 
-// ── Campaign / newsletter mail ────────────────────────────────────────────────
-
-// SendCampaignMail delivers a merchant-composed newsletter to one subscriber.
-// The body_html is merchant-authored; we wrap it in a minimal branded shell.
 func SendCampaignMail(ctx context.Context, to, recipientName, storeName, subject, bodyHTML, plainText string) error {
 	wrapped := campaignWrapHTML(recipientName, storeName, bodyHTML)
 	return sendMail(ctx, to, subject, wrapped, plainText)
@@ -191,7 +110,7 @@ func campaignWrapHTML(recipientName, storeName, body string) string {
     </p>
   </td></tr>
   <tr><td style="padding:20px 0;text-align:center;">
-    <p style="margin:0;font-size:11px;color:#94a3b8;">&copy; 2026 GoMarketi &middot; Made in Nigeria 🇳🇬</p>
+    <p style="margin:0;font-size:11px;color:#94a3b8;">&copy; 2026 GoMarket</p>
   </td></tr>
 </table>
 </td></tr>
@@ -212,6 +131,7 @@ func SendStatusUpdate(ctx context.Context, to, customerName, orderID, storeSlug,
 	return sendMail(ctx, to, subject, html, plain)
 }
 
+// humanStatus reads inside a sentence — a subject line, the plain-text part.
 func humanStatus(s string) string {
 	switch s {
 	case "confirmed":
@@ -219,7 +139,7 @@ func humanStatus(s string) string {
 	case "at_hub":
 		return "received at our hub"
 	case "shipped":
-		return "shipped"
+		return "sent out for delivery"
 	case "delivered":
 		return "delivered"
 	case "cancelled":
@@ -229,121 +149,88 @@ func humanStatus(s string) string {
 	}
 }
 
-func statusIcon(s string) string {
+// statusBadgeLabel reads as a badge beside the status dot, so it is title case
+// and short enough not to wrap next to the order number.
+func statusBadgeLabel(s string) string {
 	switch s {
 	case "confirmed":
-		return "✅"
+		return "Confirmed"
 	case "at_hub":
-		return "🏬"
+		return "At our hub"
 	case "shipped":
-		return "🚚"
+		return "On its way"
 	case "delivered":
-		return "🎉"
+		return "Delivered"
 	case "cancelled":
-		return "❌"
+		return "Cancelled"
 	default:
-		return "📦"
+		return s
 	}
 }
 
-func statusColor(s string) string {
+// statusAccent is the one spot of colour in a status email: a dot beside the
+// label. The old template coloured a full-width banner and led with a 32px
+// emoji, which made "your order moved a step" read like an announcement.
+func statusAccent(s string) string {
 	switch s {
-	case "confirmed":
-		return "#1A7A42"
+	case "confirmed", "delivered":
+		return brandGreen
 	case "at_hub":
-		return "#8b5cf6"
+		return "#7c5cd6"
 	case "shipped":
-		return "#3b82f6"
-	case "delivered":
-		return "#1A7A42"
+		return "#2f6fb5"
 	case "cancelled":
-		return "#ef4444"
+		return "#c0392b"
 	default:
-		return "#6b7280"
+		return mutedColor
 	}
 }
 
 func statusUpdateHTML(customerName, storeName, orderID, orderURL, status string) string {
 	sid := shortID(orderID)
-	icon := statusIcon(status)
-	color := statusColor(status)
-	label := humanStatus(status)
+	accent := statusAccent(status)
+	label := statusBadgeLabel(status)
 
-	var message string
+	// Statements of fact. Someone opening this wants to know where their order
+	// is and whether they have to do anything — not to be told it is great
+	// news. Each one says what happens next, because that is the question.
+	var headline, message string
 	switch status {
 	case "confirmed":
-		message = "Your order has been confirmed and is being prepared. We'll let you know as soon as it's on the way."
+		headline = "Your order is confirmed"
+		message = fmt.Sprintf("%s has your order and is preparing it. We will email you again when it is on its way.", htmlpkg.EscapeString(storeName))
 	case "at_hub":
-		message = "Your order has arrived at our hub. We're packing it together with anything else you ordered, then it goes out for delivery."
+		headline = "Your order is at our hub"
+		message = "It is being packed with anything else you ordered, then it goes out for delivery."
 	case "shipped":
-		message = "Great news — your order is on its way! The seller will share delivery details with you directly."
+		headline = "Your order is on its way"
+		message = "Once it reaches you, confirm receipt on the tracking page — that is what releases payment to the seller."
 	case "delivered":
-		message = "Your order has been delivered. We hope you love what you received! Leave the seller a review."
+		headline = "Your order has been delivered"
+		message = fmt.Sprintf("Thanks for shopping with %s. If anything is wrong with it, reply to this email and we will sort it out.", htmlpkg.EscapeString(storeName))
 	case "cancelled":
-		message = "Your order has been cancelled. If you have any questions, please contact the store directly."
+		headline = "Your order was cancelled"
+		message = "Any payment you made is being refunded. That usually lands within a few working days, depending on your bank."
 	default:
-		message = fmt.Sprintf("Your order status has been updated to <strong>%s</strong>.", label)
+		headline = "Your order was updated"
+		message = fmt.Sprintf("The status is now <strong>%s</strong>.", htmlpkg.EscapeString(label))
 	}
 
-	return fmt.Sprintf(`<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Order Update</title></head>
-<body style="margin:0;padding:0;background:#f0f4f8;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+	body := heading(headline) +
+		paragraph(fmt.Sprintf("Hi %s,", htmlpkg.EscapeString(customerName))) +
+		paragraph(message) +
+		fmt.Sprintf(`<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:22px 0 26px;">
+<tr>
+  <td style="padding-right:9px;"><span style="display:inline-block;width:8px;height:8px;border-radius:50%%;background:%s;"></span></td>
+  <td style="font-size:13px;font-weight:700;color:%s;">%s</td>
+  <td style="padding-left:14px;font-size:13px;color:%s;">Order #%s</td>
+</tr>
+</table>`, accent, inkColor, htmlpkg.EscapeString(label), mutedColor, sid) +
+		button("View your order", orderURL)
 
-<table width="100%%" cellpadding="0" cellspacing="0" style="background:#f0f4f8;padding:32px 16px 48px;">
-<tr><td align="center">
-<table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%%;">
-
-  <tr><td style="background:#0E1F13;border-radius:16px 16px 0 0;padding:36px 40px;text-align:center;">
-    <p style="margin:0 0 6px;font-size:32px;">%s</p>
-    <h1 style="margin:0;font-size:22px;font-weight:800;color:#fff;letter-spacing:-0.4px;">Order update</h1>
-    <p style="margin:6px 0 0;font-size:14px;color:rgba(255,255,255,0.5);">Hi %s — here's your latest update.</p>
-  </td></tr>
-
-  <tr><td style="background:%s;padding:14px 40px;text-align:center;">
-    <p style="margin:0;font-size:13px;font-weight:800;color:#fff;text-transform:uppercase;letter-spacing:0.1em;">
-      Status: %s &nbsp;·&nbsp; Order #%s
-    </p>
-  </td></tr>
-
-  <tr><td style="background:#fff;border-radius:0 0 16px 16px;padding:36px 40px;">
-    <p style="margin:0 0 24px;font-size:15px;color:#374151;line-height:1.7;">%s</p>
-
-    <div style="text-align:center;margin:28px 0;">
-      <a href="%s" style="display:inline-block;background:%s;color:#fff;text-decoration:none;font-size:15px;font-weight:700;padding:16px 40px;border-radius:12px;">
-        Track your order &rarr;
-      </a>
-    </div>
-
-    <div style="height:1px;background:#f1f5f9;margin:28px 0;"></div>
-    <p style="margin:0;font-size:12px;color:#94a3b8;text-align:center;line-height:1.7;">
-      Questions? Contact %s directly.<br>
-      Powered by <a href="https://gomarketi.com" style="color:#1A7A42;text-decoration:none;">GoMarketi</a>
-    </p>
-  </td></tr>
-
-  <tr><td style="padding:24px 0;text-align:center;">
-    <p style="margin:0;font-size:11px;color:#94a3b8;">&copy; 2026 GoMarketi &middot; Made in Nigeria 🇳🇬</p>
-  </td></tr>
-
-</table>
-</td></tr>
-</table>
-
-</body>
-</html>`,
-		icon, customerName,
-		color, label, sid,
-		message,
-		orderURL, color,
-		storeName,
-	)
+	return shell("Order update", fmt.Sprintf("%s — order #%s", headline, sid), body)
 }
 
-// ── Vendor new-order notification ─────────────────────────────────────────────
-
-// SendVendorAlert emails the store owner when a new order arrives.
-// Call asynchronously — errors should be logged, not returned to the caller.
 func SendVendorAlert(ctx context.Context, vendorEmail, storeName, orderID, customerName, customerEmail, customerPhone, deliveryAddress string, totalKobo, deliveryFeeKobo int64, deliveryTitle string, items []InvoiceItem) error {
 	dashboardBase := getenv("VENDOR_BASE_URL", "http://localhost:3000")
 	orderURL := fmt.Sprintf("%s/merchant/orders", dashboardBase)
@@ -612,125 +499,102 @@ func formatNumber(n int64) string {
 
 // ── Customer invoice HTML ──────────────────────────────────────────────────────
 
-func customerInvoiceHTML(customerName, storeName, orderID, orderURL string, totalKobo, deliveryFeeKobo int64, deliveryTitle string, items []InvoiceItem) string {
-	sid := shortID(orderID)
-
-	// Build item rows
+// itemRows renders the line items shared by the invoice, the vendor alert and
+// the cart summary. A product with no picture gets a quiet initial rather than
+// a parcel emoji, which at 18px looked like a broken image.
+func itemRows(items []InvoiceItem) string {
 	var rows strings.Builder
 	for _, item := range items {
-		lineTotal := fmtNaira(item.PriceKobo * int64(item.Quantity))
-		unitPrice := fmtNaira(item.PriceKobo)
-		imgCell := ""
+		cell := fmt.Sprintf(
+			`<div style="width:42px;height:42px;border-radius:7px;background:#f1f4f3;text-align:center;line-height:42px;font-size:15px;font-weight:700;color:#9aa5a0;">%s</div>`,
+			htmlpkg.EscapeString(initial(item.Name)))
 		if item.ImageURL != "" {
-			imgCell = fmt.Sprintf(`<img src="%s" width="44" height="44" style="border-radius:6px;object-fit:cover;display:block;" alt="">`, item.ImageURL)
-		} else {
-			imgCell = `<div style="width:44px;height:44px;border-radius:6px;background:#f1f5f9;display:flex;align-items:center;justify-content:center;font-size:18px;">📦</div>`
+			cell = fmt.Sprintf(
+				`<img src="%s" width="42" height="42" style="border-radius:7px;object-fit:cover;display:block;" alt="">`,
+				item.ImageURL)
 		}
 		rows.WriteString(fmt.Sprintf(`
 <tr>
-  <td style="padding:12px 0;border-bottom:1px solid #f1f5f9;vertical-align:middle;">
-    <table cellpadding="0" cellspacing="0"><tr>
+  <td style="padding:13px 0;border-bottom:1px solid %s;vertical-align:top;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
       <td style="padding-right:12px;">%s</td>
-      <td>
-        <p style="margin:0;font-size:14px;font-weight:600;color:#1C1C1C;line-height:1.3;">%s</p>
-        <p style="margin:4px 0 0;font-size:12px;color:#94a3b8;">Qty %d · %s each</p>
+      <td style="vertical-align:top;">
+        <p style="margin:0;font-size:14px;font-weight:600;color:%s;line-height:1.35;">%s</p>
+        <p style="margin:3px 0 0;font-size:12.5px;color:%s;">%d &times; %s</p>
       </td>
     </tr></table>
   </td>
-  <td style="padding:12px 0;border-bottom:1px solid #f1f5f9;font-size:14px;font-weight:700;color:#1C1C1C;text-align:right;vertical-align:middle;">%s</td>
-</tr>`, imgCell, item.Name, item.Quantity, unitPrice, lineTotal))
+  <td style="padding:13px 0;border-bottom:1px solid %s;font-size:14px;font-weight:600;color:%s;text-align:right;vertical-align:top;white-space:nowrap;">%s</td>
+</tr>`,
+			hairlineGrey, cell, inkColor, htmlpkg.EscapeString(item.Name),
+			mutedColor, item.Quantity, fmtNaira(item.PriceKobo),
+			hairlineGrey, inkColor, fmtNaira(item.PriceKobo*int64(item.Quantity))))
 	}
-
-	// Delivery estimate (simple static for now)
-	return fmt.Sprintf(`<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Order Confirmed</title></head>
-<body style="margin:0;padding:0;background:#f0f4f8;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
-
-<table width="100%%" cellpadding="0" cellspacing="0" style="background:#f0f4f8;padding:32px 16px 48px;">
-<tr><td align="center">
-<table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%%;">
-
-  <!-- Header -->
-  <tr><td style="background:#0E1F13;border-radius:16px 16px 0 0;padding:36px 40px;text-align:center;">
-    <p style="margin:0 0 6px;font-size:11px;font-weight:700;letter-spacing:0.18em;text-transform:uppercase;color:rgba(255,255,255,0.45);">Order confirmed</p>
-    <h1 style="margin:0;font-size:26px;font-weight:800;color:#fff;letter-spacing:-0.5px;">%s</h1>
-    <p style="margin:8px 0 0;font-size:14px;color:rgba(255,255,255,0.5);">Thank you for your order, %s!</p>
-  </td></tr>
-
-  <!-- Order badge -->
-  <tr><td style="background:#1A7A42;padding:14px 40px;text-align:center;">
-    <p style="margin:0;font-size:12px;font-weight:700;color:rgba(255,255,255,0.7);">Order ID &nbsp;·&nbsp; <span style="color:#fff;letter-spacing:0.08em;">#%s</span></p>
-  </td></tr>
-
-  <!-- Body -->
-  <tr><td style="background:#fff;border-radius:0 0 16px 16px;padding:36px 40px;">
-
-    <!-- Greeting -->
-    <p style="margin:0 0 24px;font-size:15px;color:#374151;line-height:1.6;">
-      Your payment was received and your order is now confirmed. We'll notify the seller and they'll reach out with delivery details shortly.
-    </p>
-
-    <!-- Items -->
-    <p style="margin:0 0 12px;font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:#94a3b8;">Items ordered</p>
-    <table width="100%%" cellpadding="0" cellspacing="0">
-      <tr>
-        <th style="text-align:left;font-size:11px;color:#94a3b8;font-weight:600;padding-bottom:8px;border-bottom:2px solid #f1f5f9;">Product</th>
-        <th style="text-align:right;font-size:11px;color:#94a3b8;font-weight:600;padding-bottom:8px;border-bottom:2px solid #f1f5f9;">Total</th>
-      </tr>
-      %s
-      %s
-      <!-- Total row -->
-      <tr>
-        <td style="padding:16px 0 0;font-size:13px;font-weight:700;color:#6b7280;">Order total</td>
-        <td style="padding:16px 0 0;font-size:22px;font-weight:900;color:#1A7A42;text-align:right;">%s</td>
-      </tr>
-    </table>
-
-    <!-- Divider -->
-    <div style="height:1px;background:#f1f5f9;margin:28px 0;"></div>
-
-    <!-- Track CTA -->
-    <div style="text-align:center;margin:28px 0 8px;">
-      <a href="%s" style="display:inline-block;background:#1A7A42;color:#fff;text-decoration:none;font-size:15px;font-weight:700;padding:16px 40px;border-radius:12px;letter-spacing:-0.2px;">
-        Track your order &rarr;
-      </a>
-      <p style="margin:14px 0 0;font-size:12px;color:#94a3b8;">Or copy this link: <a href="%s" style="color:#1A7A42;word-break:break-all;">%s</a></p>
-    </div>
-
-    <!-- Divider -->
-    <div style="height:1px;background:#f1f5f9;margin:28px 0;"></div>
-
-    <!-- Footer note -->
-    <p style="margin:0;font-size:12px;color:#94a3b8;text-align:center;line-height:1.7;">
-      Questions about your order? Reply to this email or contact %s directly.<br>
-      Powered by <a href="https://gomarketi.com" style="color:#1A7A42;text-decoration:none;">GoMarketi</a>
-    </p>
-
-  </td></tr>
-
-  <!-- Bottom space -->
-  <tr><td style="padding:24px 0;text-align:center;">
-    <p style="margin:0;font-size:11px;color:#94a3b8;">&copy; 2026 GoMarketi &middot; Made in Nigeria 🇳🇬</p>
-  </td></tr>
-
-</table>
-</td></tr>
-</table>
-
-</body>
-</html>`,
-		storeName, customerName,
-		sid,
-		rows.String(), deliveryRowHTML(deliveryFeeKobo, deliveryTitle, 1), fmtNaira(totalKobo),
-		orderURL, orderURL, orderURL,
-		storeName,
-	)
+	return rows.String()
 }
 
-// deliveryRowHTML renders the delivery line above the order total. It returns
-// an empty string when no delivery fee was charged, so the totals block looks
-// exactly as it did before for pickup-only orders.
+func initial(name string) string {
+	for _, r := range strings.TrimSpace(name) {
+		return strings.ToUpper(string(r))
+	}
+	return "?"
+}
+
+// totalsBlock closes an itemised table: subtotal, delivery, then the total on
+// its own weight. Delivery is always shown, including when it is free, because
+// "where did the extra 4,500 come from" is the question these answer.
+func totalsBlock(totalKobo, deliveryFeeKobo int64, deliveryTitle string) string {
+	deliveryLabel := "Delivery"
+	if deliveryTitle != "" {
+		deliveryLabel = "Delivery &middot; " + htmlpkg.EscapeString(deliveryTitle)
+	}
+	deliveryValue := "Free"
+	if deliveryFeeKobo > 0 {
+		deliveryValue = fmtNaira(deliveryFeeKobo)
+	}
+	return fmt.Sprintf(`
+<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" border="0" style="margin-top:16px;">
+<tr>
+  <td style="font-size:13.5px;color:%s;padding:3px 0;">Items</td>
+  <td style="font-size:13.5px;color:%s;text-align:right;padding:3px 0;">%s</td>
+</tr>
+<tr>
+  <td style="font-size:13.5px;color:%s;padding:3px 0;">%s</td>
+  <td style="font-size:13.5px;color:%s;text-align:right;padding:3px 0;">%s</td>
+</tr>
+<tr><td colspan="2" style="padding:12px 0 0;"><div style="height:1px;background:%s;"></div></td></tr>
+<tr>
+  <td style="font-size:15px;font-weight:700;color:%s;padding:12px 0 0;">Total</td>
+  <td style="font-size:19px;font-weight:700;color:%s;text-align:right;padding:12px 0 0;letter-spacing:-0.3px;">%s</td>
+</tr>
+</table>`,
+		mutedColor, inkColor, fmtNaira(totalKobo-deliveryFeeKobo),
+		mutedColor, deliveryLabel, inkColor, deliveryValue,
+		hairlineGrey, inkColor, inkColor, fmtNaira(totalKobo))
+}
+
+func itemTable(items []InvoiceItem) string {
+	return fmt.Sprintf(
+		`<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" border="0">%s</table>`,
+		itemRows(items))
+}
+
+func customerInvoiceHTML(customerName, storeName, orderID, orderURL string, totalKobo, deliveryFeeKobo int64, deliveryTitle string, items []InvoiceItem) string {
+	sid := shortID(orderID)
+
+	body := heading("Thanks for your order") +
+		paragraph(fmt.Sprintf("Hi %s, %s has your order and will start preparing it. Here is what you bought.",
+			htmlpkg.EscapeString(customerName), htmlpkg.EscapeString(storeName))) +
+		labelRow("Order #"+sid) +
+		itemTable(items) +
+		totalsBlock(totalKobo, deliveryFeeKobo, deliveryTitle) +
+		divider() +
+		paragraph("You can follow this order at any time, and confirm receipt once it reaches you.") +
+		button("Track this order", orderURL)
+
+	return shell("Your order", fmt.Sprintf("Order #%s from %s — %s", sid, storeName, fmtNaira(totalKobo)), body)
+}
+
 func deliveryRowHTML(deliveryFeeKobo int64, title string, colspan int) string {
 	if deliveryFeeKobo <= 0 {
 		return ""
@@ -755,120 +619,35 @@ func deliveryRowHTML(deliveryFeeKobo int64, title string, colspan int) string {
 func vendorAlertHTML(storeName, orderID, dashboardURL, customerName, customerEmail, customerPhone, deliveryAddress string, totalKobo, deliveryFeeKobo int64, deliveryTitle string, items []InvoiceItem) string {
 	sid := shortID(orderID)
 
-	var rows strings.Builder
-	for _, item := range items {
-		rows.WriteString(fmt.Sprintf(`
+	detail := func(label, value string) string {
+		if strings.TrimSpace(value) == "" {
+			return ""
+		}
+		return fmt.Sprintf(`
 <tr>
-  <td style="padding:10px 0;border-bottom:1px solid #f1f5f9;font-size:14px;color:#1C1C1C;font-weight:600;">%s</td>
-  <td style="padding:10px 0;border-bottom:1px solid #f1f5f9;font-size:14px;color:#6b7280;text-align:center;">×%d</td>
-  <td style="padding:10px 0;border-bottom:1px solid #f1f5f9;font-size:14px;font-weight:700;color:#1C1C1C;text-align:right;">%s</td>
-</tr>`, item.Name, item.Quantity, fmtNaira(item.PriceKobo*int64(item.Quantity))))
+  <td style="padding:5px 0;font-size:13px;color:%s;width:112px;vertical-align:top;">%s</td>
+  <td style="padding:5px 0;font-size:13.5px;color:%s;vertical-align:top;">%s</td>
+</tr>`, mutedColor, label, inkColor, htmlpkg.EscapeString(value))
 	}
 
-	phoneRow := ""
-	if customerPhone != "" {
-		phoneRow = fmt.Sprintf(`<tr><td style="padding:6px 0;font-size:13px;color:#6b7280;width:100px;">Phone</td><td style="padding:6px 0;font-size:13px;color:#1C1C1C;font-weight:600;">%s</td></tr>`, customerPhone)
-	}
-	addressRow := ""
-	if deliveryAddress != "" {
-		addressRow = fmt.Sprintf(`<tr><td style="padding:6px 0;font-size:13px;color:#6b7280;vertical-align:top;width:100px;">Deliver to</td><td style="padding:6px 0;font-size:13px;color:#1C1C1C;font-weight:600;line-height:1.5;">%s</td></tr>`, deliveryAddress)
-	}
+	body := heading("You have a new order") +
+		paragraph(fmt.Sprintf("Order #%s came in for %s. Confirm it in your dashboard so the customer knows you have it.",
+			sid, htmlpkg.EscapeString(storeName))) +
+		labelRow("Customer") +
+		fmt.Sprintf(`<table role="presentation" width="100%%" cellpadding="0" cellspacing="0" border="0">%s%s%s%s</table>`,
+			detail("Name", customerName),
+			detail("Email", customerEmail),
+			detail("Phone", customerPhone),
+			detail("Deliver to", deliveryAddress)) +
+		labelRow("Items") +
+		itemTable(items) +
+		totalsBlock(totalKobo, deliveryFeeKobo, deliveryTitle) +
+		divider() +
+		button("Open your dashboard", dashboardURL)
 
-	return fmt.Sprintf(`<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>New Order</title></head>
-<body style="margin:0;padding:0;background:#f0f4f8;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
-
-<table width="100%%" cellpadding="0" cellspacing="0" style="background:#f0f4f8;padding:32px 16px 48px;">
-<tr><td align="center">
-<table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%%;">
-
-  <!-- Header -->
-  <tr><td style="background:#0E1F13;border-radius:16px 16px 0 0;padding:32px 40px;">
-    <p style="margin:0 0 4px;font-size:11px;font-weight:700;letter-spacing:0.18em;text-transform:uppercase;color:rgba(255,255,255,0.45);">%s</p>
-    <h1 style="margin:0 0 6px;font-size:24px;font-weight:800;color:#fff;letter-spacing:-0.4px;">🛍&nbsp; New order received!</h1>
-    <p style="margin:0;font-size:14px;color:rgba(255,255,255,0.5);">Order <strong style="color:#4ade80;">#%s</strong> &nbsp;·&nbsp; %s</p>
-  </td></tr>
-
-  <!-- Alert banner -->
-  <tr><td style="background:#1A7A42;padding:12px 40px;">
-    <p style="margin:0;font-size:13px;font-weight:700;color:rgba(255,255,255,0.8);">
-      Action needed: Confirm and arrange delivery for this order.
-    </p>
-  </td></tr>
-
-  <!-- Body -->
-  <tr><td style="background:#fff;border-radius:0 0 16px 16px;padding:36px 40px;">
-
-    <!-- Customer info -->
-    <p style="margin:0 0 12px;font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:#94a3b8;">Customer</p>
-    <div style="background:#f8fafc;border-radius:10px;padding:16px 20px;margin-bottom:28px;">
-      <table cellpadding="0" cellspacing="0" width="100%%">
-        <tr><td style="padding:6px 0;font-size:13px;color:#6b7280;width:100px;">Name</td><td style="padding:6px 0;font-size:13px;color:#1C1C1C;font-weight:600;">%s</td></tr>
-        <tr><td style="padding:6px 0;font-size:13px;color:#6b7280;">Email</td><td style="padding:6px 0;font-size:13px;color:#1C1C1C;font-weight:600;"><a href="mailto:%s" style="color:#1A7A42;">%s</a></td></tr>
-        %s
-        %s
-      </table>
-    </div>
-
-    <!-- Items -->
-    <p style="margin:0 0 12px;font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:#94a3b8;">Items ordered</p>
-    <table width="100%%" cellpadding="0" cellspacing="0">
-      <tr>
-        <th style="text-align:left;font-size:11px;color:#94a3b8;font-weight:600;padding-bottom:8px;border-bottom:2px solid #f1f5f9;">Product</th>
-        <th style="text-align:center;font-size:11px;color:#94a3b8;font-weight:600;padding-bottom:8px;border-bottom:2px solid #f1f5f9;">Qty</th>
-        <th style="text-align:right;font-size:11px;color:#94a3b8;font-weight:600;padding-bottom:8px;border-bottom:2px solid #f1f5f9;">Total</th>
-      </tr>
-      %s
-      %s
-      <tr>
-        <td colspan="2" style="padding:16px 0 0;font-size:13px;font-weight:700;color:#6b7280;">Order total</td>
-        <td style="padding:16px 0 0;font-size:22px;font-weight:900;color:#1A7A42;text-align:right;">%s</td>
-      </tr>
-    </table>
-
-    <!-- Divider -->
-    <div style="height:1px;background:#f1f5f9;margin:28px 0;"></div>
-
-    <!-- Dashboard CTA -->
-    <div style="text-align:center;">
-      <a href="%s" style="display:inline-block;background:#1A7A42;color:#fff;text-decoration:none;font-size:15px;font-weight:700;padding:16px 40px;border-radius:12px;letter-spacing:-0.2px;">
-        View in dashboard &rarr;
-      </a>
-    </div>
-
-    <!-- Divider -->
-    <div style="height:1px;background:#f1f5f9;margin:28px 0;"></div>
-
-    <p style="margin:0;font-size:12px;color:#94a3b8;text-align:center;line-height:1.7;">
-      This is an automated notification from GoMarketi.<br>
-      You're receiving this because you own <strong>%s</strong>.
-    </p>
-
-  </td></tr>
-
-  <tr><td style="padding:24px 0;text-align:center;">
-    <p style="margin:0;font-size:11px;color:#94a3b8;">&copy; 2026 GoMarketi &middot; Made in Nigeria 🇳🇬</p>
-  </td></tr>
-
-</table>
-</td></tr>
-</table>
-
-</body>
-</html>`,
-		storeName, sid, fmtNaira(totalKobo),
-		customerName,
-		customerEmail, customerEmail,
-		phoneRow, addressRow,
-		rows.String(), deliveryRowHTML(deliveryFeeKobo, deliveryTitle, 2), fmtNaira(totalKobo),
-		dashboardURL,
-		storeName,
-	)
+	return shell("New order", fmt.Sprintf("Order #%s — %s", sid, fmtNaira(totalKobo)), body)
 }
 
-// sendMailResend posts one email to the Resend HTTP API. RESEND_FROM must be
-// a verified sender on the account, e.g. "GoMarketi <noreply@gomarketi.com>".
 func sendMailResend(ctx context.Context, apiKey, to, subject, html, plainText string) error {
 	// EMAIL_FROM is accepted as an alias for RESEND_FROM.
 	from := getenv("RESEND_FROM", getenv("EMAIL_FROM", "GoMarketi <onboarding@resend.dev>"))
