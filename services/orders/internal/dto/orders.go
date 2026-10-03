@@ -54,6 +54,22 @@ const (
 )
 
 // OrderResp is returned for any order read operation.
+// Fulfilment says who physically delivers an order, which decides what the
+// vendor is allowed to do with it.
+//
+// A basket spanning several vendors becomes several order rows sharing one
+// payment_reference. Those go through GoMarketi's hub: each vendor brings
+// their part in, and GoMarketi consolidates and dispatches one delivery, so
+// the vendor's last step is at_hub. An order that is the only one on its
+// reference is that vendor's own delivery end to end, so they mark it
+// shipped themselves and never see a hub step.
+type Fulfilment string
+
+const (
+	FulfilmentVendor    Fulfilment = "vendor"
+	FulfilmentGoMarketi Fulfilment = "gomarketi"
+)
+
 type OrderResp struct {
 	ID                  string         `json:"id"`
 	StoreID             string         `json:"store_id"`
@@ -61,6 +77,7 @@ type OrderResp struct {
 	CustomerName        string         `json:"customer_name"`
 	CustomerEmail       string         `json:"customer_email"`
 	Status              OrderStatus    `json:"status"`
+	Fulfilment          Fulfilment     `json:"fulfilment"`
 	Items               []OrderItem    `json:"items"`
 	TotalKobo           int64          `json:"total_kobo"`
 	DeliveryFeeKobo     int64          `json:"delivery_fee_kobo"`
@@ -145,13 +162,22 @@ type CreateCheckoutResp struct {
 }
 
 // UpdateOrderStatusReq is the body for PATCH /v1/orders/:id/status.
-// Deliberately restricted to confirmed/cancelled — under the hub
-// fulfillment model, at_hub/shipped/delivered are only ever set by admin
-// hub intake, admin batch dispatch, and buyer delivery confirmation
-// respectively, never by the vendor directly. This is a trust-boundary
-// safeguard: a vendor cannot self-report their way to an escrow release.
+//
+// Vendors may set confirmed, at_hub, shipped and cancelled. at_hub and
+// shipped were previously admin-only, on the reasoning that a vendor should
+// not be able to self-report progress — shipped sets dispatched_at, which
+// starts the seven-day escrow auto-release clock, so a vendor marking their
+// own order shipped starts their own payout timer. That restriction left
+// buyers with no visible progress at all, because the admin surface that was
+// meant to set these (admin-api's hub intake and batch dispatch) is not
+// deployed. Opened up deliberately, with the trade-off accepted by the
+// product owner.
+//
+// delivered is still NOT settable here. It is the one status that releases
+// escrow immediately rather than after a window, so it stays with the buyer
+// (POST /v1/orders/public/:id/confirm-delivery) or the auto-release sweep.
 type UpdateOrderStatusReq struct {
-	Status OrderStatus `json:"status" validate:"required,oneof=confirmed cancelled"`
+	Status OrderStatus `json:"status" validate:"required,oneof=confirmed at_hub shipped cancelled"`
 	Note   *string     `json:"note"`
 }
 

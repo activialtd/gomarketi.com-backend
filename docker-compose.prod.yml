@@ -25,6 +25,11 @@ x-service: &service
     # identity's hourly backfill sweep instead of getting an account number
     # immediately. Harmless on the other services, which never read it.
     IDENTITY_INTERNAL_URL: "http://identity:8080"
+    # Every customer-facing link in an email is built from these. Unset, orders
+    # falls back to http://<slug>.localhost:3001 and https://localhost:3000 —
+    # which is what shipped in real order emails until this was pinned here.
+    STOREFRONT_ROOT_DOMAIN: "gomarketi.com"
+    VENDOR_BASE_URL: "https://vendor.gomarketi.com"
   depends_on:
     postgres:
       condition: service_healthy
