@@ -12,6 +12,7 @@ import (
 	"os"
 
 	"github.com/activialtd/gomarketi.com-backend/services/orders/internal/sse"
+	"github.com/activialtd/gomarketi.com-backend/shared/pkg/middleware"
 )
 
 // paystackWebhookEvent is the subset of Paystack's webhook payload this
@@ -60,8 +61,31 @@ func (s *OrdersService) HandlePaystackWebhook(ctx context.Context, body []byte) 
 		return fmt.Errorf("decode webhook payload: %w", err)
 	}
 
-	if evt.Event != "charge.success" || evt.Data.Channel != "dedicated_nuban" {
-		return nil // not a DVA deposit — nothing to do
+	if evt.Event != "charge.success" {
+		return nil
+	}
+
+	// A successful card charge that is not a DVA deposit is a buyer paying for
+	// a checkout. Paystack has been telling us about every one of these all
+	// along and we discarded them — which is exactly the signal needed when
+	// the buyer's own browser never came back to save the order. Replaying the
+	// stored intent here is a no-op in the normal case, where the browser
+	// already saved it.
+	if evt.Data.Channel != "dedicated_nuban" {
+		if evt.Data.Reference == "" {
+			return nil
+		}
+		if err := s.FulfilIntent(ctx, evt.Data.Reference); err != nil {
+			s.log.Warn().Err(err).Str("reference", evt.Data.Reference).
+				Msg("charge.success webhook: could not save the paid order")
+			// Swallowed deliberately: returning an error makes Paystack retry
+			// the webhook, and the sweep already owns retrying this. Recorded
+			// so it surfaces in the admin error queue either way.
+			middleware.RecordBackgroundError(s.db, s.log, "orders",
+				"charge.success webhook: could not save the paid order: "+err.Error(),
+				map[string]any{"reference": evt.Data.Reference})
+		}
+		return nil
 	}
 	if evt.Data.Customer.CustomerCode == "" || evt.Data.Reference == "" || evt.Data.Amount <= 0 {
 		s.log.Warn().Interface("event", evt).Msg("dva deposit webhook: missing required fields")

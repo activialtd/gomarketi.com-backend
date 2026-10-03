@@ -87,6 +87,11 @@ func run(log zerolog.Logger) error {
 	// Paystack DVA provisioning background work.
 	go svc.StartAutoReleaseLoop(context.Background())
 
+	// Finish checkouts that were paid for but never saved — see
+	// StartIntentSweepLoop. Paystack's charge.success webhook normally gets
+	// there first; this is what covers a webhook that never arrives.
+	go svc.StartIntentSweepLoop(context.Background())
+
 	h := handler.New(svc, log, broker)
 	r := gin.New()
 
