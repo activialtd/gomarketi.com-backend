@@ -67,22 +67,22 @@ func (s *OrdersService) HandlePaystackWebhook(ctx context.Context, body []byte) 
 
 	// A successful card charge that is not a DVA deposit is a buyer paying for
 	// a checkout. Paystack has been telling us about every one of these all
-	// along and we discarded them — which is exactly the signal needed when
-	// the buyer's own browser never came back to save the order. Replaying the
-	// stored intent here is a no-op in the normal case, where the browser
-	// already saved it.
+	// along and we discarded them — and this is the signal that matters when
+	// the buyer's own browser never came back. The order already exists, so
+	// this only has to flip it to paid; in the normal case the browser got
+	// there first and this is a no-op.
 	if evt.Data.Channel != "dedicated_nuban" {
 		if evt.Data.Reference == "" {
 			return nil
 		}
-		if err := s.FulfilIntent(ctx, evt.Data.Reference); err != nil {
+		if _, err := s.ConfirmPayment(ctx, evt.Data.Reference); err != nil {
 			s.log.Warn().Err(err).Str("reference", evt.Data.Reference).
-				Msg("charge.success webhook: could not save the paid order")
+				Msg("charge.success webhook: could not confirm the paid order")
 			// Swallowed deliberately: returning an error makes Paystack retry
-			// the webhook, and the sweep already owns retrying this. Recorded
-			// so it surfaces in the admin error queue either way.
+			// the webhook, which rarely helps, and the failure is recorded for
+			// the admin error queue either way.
 			middleware.RecordBackgroundError(s.db, s.log, "orders",
-				"charge.success webhook: could not save the paid order: "+err.Error(),
+				"charge.success webhook: could not confirm the paid order: "+err.Error(),
 				map[string]any{"reference": evt.Data.Reference})
 		}
 		return nil

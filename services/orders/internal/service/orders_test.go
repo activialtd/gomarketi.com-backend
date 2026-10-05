@@ -8,8 +8,8 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/jmoiron/sqlx"
 
-	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
 	orddb "github.com/activialtd/gomarketi.com-backend/services/orders/db"
+	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
 )
 
 // testDB connects to a local Postgres and applies migrations, or skips the

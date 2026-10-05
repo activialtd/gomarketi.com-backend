@@ -207,22 +207,44 @@ func (h *Handler) ReportMissing(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
-// CreateOrder godoc
-// POST /v1/orders/public — no auth, called by the storefront checkout after
-// a successful (simulated) Paystack charge.
-func (h *Handler) CreateOrder(c *gin.Context) {
+// PlaceOrder godoc
+// POST /v1/orders/public — no auth. The first half of checkout: the
+// storefront calls this BEFORE taking payment, and charges Paystack against
+// the payment_reference that comes back.
+func (h *Handler) PlaceOrder(c *gin.Context) {
 	var req dto.CreateOrderReq
 	if !h.bind(c, &req) {
 		return
 	}
 
-	resp, err := h.svc.CreateOrder(c.Request.Context(), req)
+	resp, err := h.svc.PlaceOrder(c.Request.Context(), req)
 	if err != nil {
 		h.writeError(c, err)
 		return
 	}
 
 	c.JSON(http.StatusCreated, resp)
+}
+
+// ConfirmPayment godoc
+// POST /v1/orders/public/confirm-payment — no auth. The second half: verify
+// the charge and turn the awaiting orders on that reference into real ones.
+//
+// Called by the storefront on Paystack success, and by Paystack's webhook
+// moments later. Idempotent, so whichever arrives second is a no-op.
+func (h *Handler) ConfirmPayment(c *gin.Context) {
+	var req dto.ConfirmPaymentReq
+	if !h.bind(c, &req) {
+		return
+	}
+
+	orders, err := h.svc.ConfirmPayment(c.Request.Context(), req.PaymentRef)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.CreateCheckoutResp{Orders: orders})
 }
 
 // SendCartInvoice godoc
@@ -351,24 +373,4 @@ func (h *Handler) DisputeRefund(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, resp)
-}
-
-// RecordCheckoutIntent godoc
-// POST /v1/orders/public/checkout-intent — the browser tells us what it is
-// about to pay for, before it pays.
-//
-// Public, like the rest of checkout. The row it writes is a plan, not money:
-// it only becomes an order once a Paystack charge for the same reference is
-// verified, so a forged intent achieves nothing.
-func (h *Handler) RecordCheckoutIntent(c *gin.Context) {
-	var req dto.RecordCheckoutIntentReq
-	if !h.bind(c, &req) {
-		return
-	}
-
-	if err := h.svc.RecordCheckoutIntent(c.Request.Context(), req.Kind, req.PaymentRef, req.Payload); err != nil {
-		h.writeError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"recorded": true})
 }

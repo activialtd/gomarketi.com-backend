@@ -9,8 +9,9 @@
 //   - Falls back to in-memory-only when Redis is unavailable (local dev).
 //
 // Resource cost at 10k concurrent vendors:
-//   ~10KB per SSE connection × 10,000 = ~100MB per instance — trivially fine.
-//   Cross-instance delivery via Redis adds ~1ms latency per event publish.
+//
+//	~10KB per SSE connection × 10,000 = ~100MB per instance — trivially fine.
+//	Cross-instance delivery via Redis adds ~1ms latency per event publish.
 package sse
 
 import (
@@ -30,7 +31,7 @@ const (
 	chanPrefix = "gm:orders:events:"  // Redis pub/sub channel prefix
 	histPrefix = "gm:orders:history:" // Redis list key prefix for event replay
 	histLen    = 50                   // max events to keep per store
-	histTTL    = 10 * time.Minute    // how long to keep event history
+	histTTL    = 10 * time.Minute     // how long to keep event history
 )
 
 // Event is the payload pushed to SSE clients.

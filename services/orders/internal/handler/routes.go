@@ -54,8 +54,9 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 
 	// Public — no auth.
 	pub := r.Group("/v1/orders/public")
-	pub.POST("", h.CreateOrder)
-	pub.POST("/checkout", h.CreateCheckout)              // multi-store cart: one payment, one order per vendor
+	pub.POST("", h.PlaceOrder)
+	pub.POST("/checkout", h.PlaceCheckout)               // multi-store cart: one payment, one order per vendor
+	pub.POST("/confirm-payment", h.ConfirmPayment)       // second half of checkout — verify the charge
 	pub.GET("/:id", h.GetPublicOrder)                    // customer order tracking — gated by email param
 	pub.POST("/:id/confirm-delivery", h.ConfirmDelivery) // buyer confirms receipt — releases vendor escrow
 	pub.POST("/:id/report-missing", h.ReportMissing)     // buyer flags a dispatched order as never received
@@ -63,7 +64,6 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 	pub.POST("/subscribe", h.Subscribe)                  // storefront newsletter opt-in
 	pub.GET("/gateways/:store_id", h.GetPublicGateways)  // active payment gateways for checkout
 	pub.POST("/cart-email", h.SendCartInvoice)           // pre-payment cart summary email
-	pub.POST("/checkout-intent", h.RecordCheckoutIntent) // what the buyer is about to pay for, saved before they pay
 	pub.POST("/webhooks/paystack", h.PaystackWebhook)    // Paystack calls this directly — signature-verified, not JWT
 
 	// Internal — service-to-service only, reached by direct networking (not

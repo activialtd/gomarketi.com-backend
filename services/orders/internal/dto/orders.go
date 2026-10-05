@@ -1,14 +1,21 @@
 // Package dto defines request and response shapes for the orders service.
 package dto
 
-import "encoding/json"
-
 // ── Orders ────────────────────────────────────────────────────────────────────
 
 // OrderStatus represents the lifecycle of an order.
 type OrderStatus string
 
 const (
+	// OrderStatusAwaitingPayment is an order that exists but has not been paid
+	// for. Created at checkout, before the charge, so a payment can never
+	// arrive with nothing attached to it.
+	OrderStatusAwaitingPayment OrderStatus = "awaiting_payment"
+	// OrderStatusAbandoned is an awaiting_payment order the buyer never came
+	// back to. Not cancelled: they chose items, entered their details and
+	// picked a delivery option, which is exactly what the vendor's abandoned
+	// page is for.
+	OrderStatusAbandoned OrderStatus = "abandoned"
 	OrderStatusPending   OrderStatus = "pending"
 	OrderStatusConfirmed OrderStatus = "confirmed"
 	// OrderStatusAtHub means the vendor has delivered this order's items to
@@ -183,13 +190,9 @@ type UpdateOrderStatusReq struct {
 	Note   *string     `json:"note"`
 }
 
-// RecordCheckoutIntentReq is the body for POST /v1/orders/public/checkout-intent.
-// Payload is the CreateOrderReq or CreateCheckoutReq the browser is about to
-// send after paying, kept opaque here so the two shapes share one endpoint.
-type RecordCheckoutIntentReq struct {
-	Kind       string          `json:"kind"              validate:"required,oneof=order checkout"`
-	PaymentRef string          `json:"payment_reference" validate:"required"`
-	Payload    json.RawMessage `json:"payload"           validate:"required"`
+// ConfirmPaymentReq is the body for POST /v1/orders/public/confirm-payment.
+type ConfirmPaymentReq struct {
+	PaymentRef string `json:"payment_reference" validate:"required"`
 }
 
 // ConfirmDeliveryReq is the body for POST /v1/orders/public/:id/confirm-delivery.
