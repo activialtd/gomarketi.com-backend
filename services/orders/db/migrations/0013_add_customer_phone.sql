@@ -1,0 +1,11 @@
+-- Keep the phone number the buyer gave at checkout.
+--
+-- Both checkout requests have always carried customer_phone and the order
+-- never stored it — it was passed straight to the vendor alert email and
+-- dropped. So the one moment a vendor most wants it, chasing an abandoned
+-- cart, is the one moment they cannot get at it.
+--
+-- Empty string rather than NULL: checkout does not insist on a phone, and
+-- every read of this is "is there a number to reach them on", which reads
+-- the same either way without a null check at each site.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_phone TEXT NOT NULL DEFAULT '';

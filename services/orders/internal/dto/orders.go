@@ -85,6 +85,7 @@ type OrderResp struct {
 	CustomerID          string         `json:"customer_id"`
 	CustomerName        string         `json:"customer_name"`
 	CustomerEmail       string         `json:"customer_email"`
+	CustomerPhone       string         `json:"customer_phone,omitempty"`
 	Status              OrderStatus    `json:"status"`
 	Fulfilment          Fulfilment     `json:"fulfilment"`
 	Items               []OrderItem    `json:"items"`
@@ -218,10 +219,14 @@ type ReportMissingReq struct {
 
 // AbandonedCartResp is a single abandoned cart entry.
 type AbandonedCartResp struct {
-	ID            string      `json:"id"`
-	StoreID       string      `json:"store_id"`
-	CustomerID    *string     `json:"customer_id,omitempty"`
-	CustomerEmail *string     `json:"customer_email,omitempty"`
+	ID            string  `json:"id"`
+	StoreID       string  `json:"store_id"`
+	CustomerID    *string `json:"customer_id,omitempty"`
+	CustomerEmail *string `json:"customer_email,omitempty"`
+	// The number the buyer gave at checkout, so a vendor can reach them on
+	// WhatsApp rather than email — which is how these conversations actually
+	// happen here.
+	CustomerPhone *string     `json:"customer_phone,omitempty"`
 	Items         []OrderItem `json:"items"`
 	TotalKobo     int64       `json:"total_kobo"`
 	AbandonedAt   string      `json:"abandoned_at"`

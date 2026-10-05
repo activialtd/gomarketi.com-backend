@@ -41,7 +41,7 @@ type OrdersService struct {
 // care about money in hand exclude cancelled separately, as they already did.
 const paidOnly = ` AND paid_at IS NOT NULL`
 
-const orderColumns = `id, store_id, customer_id, customer_name, customer_email, status,
+const orderColumns = `id, store_id, customer_id, customer_name, customer_email, customer_phone, status,
 	total_kobo, delivery_fee_kobo, delivery_address, payment_reference,
 	hub_received_at, dispatched_at, delivered_at, delivery_confirmed_at, cancelled_reason,
 	dispute_status, dispute_reason, disputed_at,
@@ -846,7 +846,7 @@ func (s *OrdersService) allItemsDigital(ctx context.Context, items []dto.CreateO
 // commits to a basket, and payment turns it into a real one. Nothing is
 // credited here — see creditVendorTx, which runs at confirmation — because an
 // order that is never paid for must leave no trace in anyone's wallet.
-func insertOrderTx(ctx context.Context, tx *sqlx.Tx, storeID uuid.UUID, customerName, customerEmail, deliveryAddress string, items []dto.CreateOrderItem, deliveryFeeKobo int64, paymentRef string) (uuid.UUID, int64, error) {
+func insertOrderTx(ctx context.Context, tx *sqlx.Tx, storeID uuid.UUID, customerName, customerEmail, customerPhone, deliveryAddress string, items []dto.CreateOrderItem, deliveryFeeKobo int64, paymentRef string) (uuid.UUID, int64, error) {
 	var itemsKobo int64
 	for _, it := range items {
 		itemsKobo += it.PriceKobo * int64(it.Quantity)
@@ -860,10 +860,10 @@ func insertOrderTx(ctx context.Context, tx *sqlx.Tx, storeID uuid.UUID, customer
 
 	var orderID uuid.UUID
 	err := tx.QueryRowContext(ctx, `
-		INSERT INTO orders (store_id, customer_id, customer_name, customer_email, status, total_kobo, delivery_fee_kobo, delivery_address, payment_reference)
-		VALUES ($1,$2,$3,$4,'awaiting_payment',$5,$6,$7,$8)
+		INSERT INTO orders (store_id, customer_id, customer_name, customer_email, customer_phone, status, total_kobo, delivery_fee_kobo, delivery_address, payment_reference)
+		VALUES ($1,$2,$3,$4,$5,'awaiting_payment',$6,$7,$8,$9)
 		RETURNING id`,
-		storeID, custID, customerName, customerEmail, totalKobo, deliveryFeeKobo, deliveryAddress, paymentRef,
+		storeID, custID, customerName, customerEmail, customerPhone, totalKobo, deliveryFeeKobo, deliveryAddress, paymentRef,
 	).Scan(&orderID)
 	if err != nil {
 		return uuid.Nil, 0, fmt.Errorf("insert order: %w", err)
@@ -1074,7 +1074,7 @@ func (s *OrdersService) PlaceOrder(ctx context.Context, req dto.CreateOrderReq) 
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	orderID, _, err := insertOrderTx(ctx, tx, storeID, req.CustomerName, req.CustomerEmail, req.DeliveryAddress, req.Items, deliveryFeeKobo, paymentRef)
+	orderID, _, err := insertOrderTx(ctx, tx, storeID, req.CustomerName, req.CustomerEmail, req.CustomerPhone, req.DeliveryAddress, req.Items, deliveryFeeKobo, paymentRef)
 	if err != nil {
 		return dto.OrderResp{}, err
 	}
@@ -1176,7 +1176,7 @@ func (s *OrdersService) PlaceCheckout(ctx context.Context, req dto.CreateCheckou
 		if i == 0 {
 			fee = deliveryFeeKobo
 		}
-		orderID, _, err := insertOrderTx(ctx, tx, storeID, req.CustomerName, req.CustomerEmail, req.DeliveryAddress, so.Items, fee, paymentRef)
+		orderID, _, err := insertOrderTx(ctx, tx, storeID, req.CustomerName, req.CustomerEmail, req.CustomerPhone, req.DeliveryAddress, so.Items, fee, paymentRef)
 		if err != nil {
 			return nil, err
 		}
@@ -1435,7 +1435,7 @@ func (s *OrdersService) ListAbandonedCarts(ctx context.Context, storeID uuid.UUI
 	offset := (page - 1) * perPage
 
 	rows, err := s.db.QueryxContext(ctx, `
-		SELECT id, store_id, customer_id, customer_email, total_kobo, created_at
+		SELECT id, store_id, customer_id, customer_email, customer_phone, total_kobo, created_at
 		FROM orders
 		WHERE store_id = $1 AND status = 'abandoned'
 		ORDER BY created_at DESC
@@ -1451,10 +1451,11 @@ func (s *OrdersService) ListAbandonedCarts(ctx context.Context, storeID uuid.UUI
 			id, store     uuid.UUID
 			customerID    uuid.UUID
 			customerEmail string
+			customerPhone string
 			totalKobo     int64
 			createdAt     time.Time
 		)
-		if err := rows.Scan(&id, &store, &customerID, &customerEmail, &totalKobo, &createdAt); err != nil {
+		if err := rows.Scan(&id, &store, &customerID, &customerEmail, &customerPhone, &totalKobo, &createdAt); err != nil {
 			return nil, err
 		}
 		resp := dto.AbandonedCartResp{
@@ -1469,6 +1470,9 @@ func (s *OrdersService) ListAbandonedCarts(ctx context.Context, storeID uuid.UUI
 		}
 		if customerEmail != "" {
 			resp.CustomerEmail = &customerEmail
+		}
+		if customerPhone != "" {
+			resp.CustomerPhone = &customerPhone
 		}
 		out = append(out, resp)
 	}
@@ -1716,6 +1720,7 @@ type orderRow struct {
 	CustomerID          uuid.UUID      `db:"customer_id"`
 	CustomerName        string         `db:"customer_name"`
 	CustomerEmail       string         `db:"customer_email"`
+	CustomerPhone       string         `db:"customer_phone"`
 	Status              string         `db:"status"`
 	Fulfilment          string         `db:"fulfilment"`
 	TotalKobo           int64          `db:"total_kobo"`
@@ -1752,6 +1757,7 @@ func rowToOrder(r orderRow) dto.OrderResp {
 		CustomerID:      r.CustomerID.String(),
 		CustomerName:    r.CustomerName,
 		CustomerEmail:   r.CustomerEmail,
+		CustomerPhone:   r.CustomerPhone,
 		Status:          dto.OrderStatus(r.Status),
 		Fulfilment:      dto.Fulfilment(r.Fulfilment),
 		Items:           []dto.OrderItem{},
