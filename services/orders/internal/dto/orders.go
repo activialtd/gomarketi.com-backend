@@ -133,7 +133,8 @@ type CreateOrderReq struct {
 	CustomerPhone   string            `json:"customer_phone"`
 	DeliveryAddress string            `json:"delivery_address"`
 	Items           []CreateOrderItem `json:"items"             validate:"required,min=1,dive"`
-	PaymentRef      string            `json:"payment_reference" validate:"required"`
+	// Optional: the server mints one when the order is placed.
+	PaymentRef string `json:"payment_reference"`
 	// DeliveryOptionID names one of the store's delivery options. When set,
 	// the price is read from that option — DeliveryFeeKobo is only trusted as
 	// a fallback for stores that have not configured any options.
@@ -156,12 +157,18 @@ type CreateCheckoutStoreOrder struct {
 // charge (payment_reference) is verified once against the sum of every
 // store's items, then one order per store is created atomically.
 type CreateCheckoutReq struct {
-	CustomerName    string                     `json:"customer_name"     validate:"required"`
-	CustomerEmail   string                     `json:"customer_email"    validate:"required,email"`
-	CustomerPhone   string                     `json:"customer_phone"`
-	DeliveryAddress string                     `json:"delivery_address"`
-	PaymentRef      string                     `json:"payment_reference" validate:"required"`
-	Stores          []CreateCheckoutStoreOrder `json:"stores"            validate:"required,min=1,dive"`
+	CustomerName    string `json:"customer_name"     validate:"required"`
+	CustomerEmail   string `json:"customer_email"    validate:"required,email"`
+	CustomerPhone   string `json:"customer_phone"`
+	DeliveryAddress string `json:"delivery_address"`
+	// Optional: the server mints one when the order is placed. Accepted only
+	// so a client replaying a known reference can be made idempotent.
+	PaymentRef string                     `json:"payment_reference"`
+	Stores     []CreateCheckoutStoreOrder `json:"stores"            validate:"required,min=1,dive"`
+	// Delivery is charged once for the whole basket, however many vendors it
+	// spans, because the hub sends one consolidated trip. The option may
+	// belong to any store in the basket; the price is read from that row.
+	DeliveryOptionID string `json:"delivery_option_id" validate:"omitempty,uuid"`
 }
 
 // CreateCheckoutResp returns one order per store in the same order the

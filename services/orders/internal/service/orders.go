@@ -1085,6 +1085,47 @@ func (s *OrdersService) PlaceOrder(ctx context.Context, req dto.CreateOrderReq) 
 	return s.GetOrder(ctx, storeID, orderID)
 }
 
+// basketDeliveryFee prices one delivery for a whole basket.
+//
+// computeDeliveryFeeKobo scopes an option to a single store, which is right
+// for a single-store order and wrong here: the buyer picks from every vendor's
+// options merged together, so the chosen one may belong to any store in the
+// basket. It still has to belong to one of them, or a buyer could name the
+// cheapest option on the platform.
+func (s *OrdersService) basketDeliveryFee(ctx context.Context, optionID string, storeIDs []uuid.UUID) (int64, error) {
+	if optionID == "" {
+		return 0, apperrors.BadRequest("choose a delivery option before paying")
+	}
+	id, err := uuid.Parse(optionID)
+	if err != nil {
+		return 0, apperrors.BadRequest("invalid delivery_option_id")
+	}
+
+	var (
+		priceKobo int64
+		ownerID   uuid.UUID
+	)
+	err = s.db.QueryRowContext(ctx, `
+		SELECT price_kobo, store_id FROM store_delivery_options
+		WHERE id = $1 AND is_active = TRUE`, id).Scan(&priceKobo, &ownerID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, apperrors.BadRequest("delivery option not found")
+	}
+	if err != nil {
+		return 0, fmt.Errorf("lookup basket delivery option: %w", err)
+	}
+
+	// Checked here rather than in SQL: a basket holds a handful of stores, and
+	// this keeps the ownership rule legible instead of buried in an array
+	// predicate.
+	for _, id := range storeIDs {
+		if id == ownerID {
+			return priceKobo, nil
+		}
+	}
+	return 0, apperrors.BadRequest("that delivery option does not belong to any store in this basket")
+}
+
 // PlaceCheckout is PlaceOrder for a basket spanning several stores: one order
 // per store, all sharing a reference, all created or none.
 func (s *OrdersService) PlaceCheckout(ctx context.Context, req dto.CreateCheckoutReq) ([]dto.OrderResp, error) {
@@ -1095,6 +1136,20 @@ func (s *OrdersService) PlaceCheckout(ctx context.Context, req dto.CreateCheckou
 	paymentRef := strings.TrimSpace(req.PaymentRef)
 	if paymentRef == "" {
 		paymentRef = newPaymentReference()
+	}
+
+	storeIDs := make([]uuid.UUID, 0, len(req.Stores))
+	for _, so := range req.Stores {
+		id, err := uuid.Parse(so.StoreID)
+		if err != nil {
+			return nil, apperrors.BadRequest("invalid store_id")
+		}
+		storeIDs = append(storeIDs, id)
+	}
+
+	deliveryFeeKobo, err := s.basketDeliveryFee(ctx, req.DeliveryOptionID, storeIDs)
+	if err != nil {
+		return nil, err
 	}
 
 	tx, err := s.db.BeginTxx(ctx, nil)
@@ -1109,12 +1164,19 @@ func (s *OrdersService) PlaceCheckout(ctx context.Context, req dto.CreateCheckou
 	}
 	out := make([]created, 0, len(req.Stores))
 
-	for _, so := range req.Stores {
+	for i, so := range req.Stores {
 		storeID, err := uuid.Parse(so.StoreID)
 		if err != nil {
 			return nil, apperrors.BadRequest("invalid store_id")
 		}
-		orderID, _, err := insertOrderTx(ctx, tx, storeID, req.CustomerName, req.CustomerEmail, req.DeliveryAddress, so.Items, 0, paymentRef)
+		// One delivery for the basket, recorded against the first order. Every
+		// order's total has to add up to the charge, or ConfirmPayment's
+		// exact-match verification refuses the payment after it is taken.
+		fee := int64(0)
+		if i == 0 {
+			fee = deliveryFeeKobo
+		}
+		orderID, _, err := insertOrderTx(ctx, tx, storeID, req.CustomerName, req.CustomerEmail, req.DeliveryAddress, so.Items, fee, paymentRef)
 		if err != nil {
 			return nil, err
 		}

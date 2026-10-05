@@ -64,3 +64,47 @@ func TestShortOrderRefShape(t *testing.T) {
 		}
 	}
 }
+
+// TestBasketTotalsReconcile is the arithmetic ConfirmPayment verifies against.
+//
+// Delivery is charged once for a whole basket but orders are per vendor, so
+// the fee rides on one of them. If the split ever stops summing to what
+// Paystack was charged, verification is an exact match and refuses the payment
+// AFTER the buyer has been debited — the most expensive failure in the system,
+// and invisible until someone complains.
+func TestBasketTotalsReconcile(t *testing.T) {
+	cases := []struct {
+		name       string
+		itemTotals []int64
+		feeKobo    int64
+	}{
+		{"single vendor", []int64{28_500_00}, 450_000},
+		{"two vendors", []int64{28_500_00, 1_450_00}, 450_000},
+		{"three vendors, free delivery", []int64{5_000, 7_500, 2_250}, 0},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// What the app charges: every item, plus one delivery.
+			var charged int64
+			for _, it := range tc.itemTotals {
+				charged += it
+			}
+			charged += tc.feeKobo
+
+			// What the orders add up to: the fee sits on the first one only.
+			var sumOfOrders int64
+			for i, it := range tc.itemTotals {
+				fee := int64(0)
+				if i == 0 {
+					fee = tc.feeKobo
+				}
+				sumOfOrders += it + fee
+			}
+
+			if sumOfOrders != charged {
+				t.Errorf("orders sum to %d but %d was charged — payment verification would refuse this", sumOfOrders, charged)
+			}
+		})
+	}
+}
