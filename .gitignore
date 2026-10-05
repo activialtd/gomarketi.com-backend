@@ -95,4 +95,5 @@ logs/
 # `go build` inside a scripts/ module drops its binary beside main.go
 scripts/*/dva-audit
 scripts/*/migrate
+scripts/*/payment-audit
 scripts/*/seed-marketplace

@@ -99,10 +99,7 @@ func (h *Handler) UpdateOrderStatus(c *gin.Context) {
 // Returns an order for a customer to track their purchase.
 // Gated by the customer's email address — no vendor auth required.
 func (h *Handler) GetPublicOrder(c *gin.Context) {
-	orderID, ok := h.pathUUID(c, "id")
-	if !ok {
-		return
-	}
+	ref := c.Param("id")
 
 	email := c.Query("email")
 	if email == "" {
@@ -110,7 +107,7 @@ func (h *Handler) GetPublicOrder(c *gin.Context) {
 		return
 	}
 
-	resp, err := h.svc.GetPublicOrder(c.Request.Context(), orderID, email)
+	resp, err := h.svc.LookupPublicOrder(c.Request.Context(), ref, email)
 	if err != nil {
 		h.writeError(c, err)
 		return
