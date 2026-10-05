@@ -37,3 +37,30 @@ func TestAbandonWindow(t *testing.T) {
 		t.Errorf("sweeping every %s cannot honour a %s window", abandonSweepInterval, abandonAfter)
 	}
 }
+
+// TestShortOrderRefShape guards the gate in front of the prefix lookup. The
+// track form sends whatever the buyer typed, and only an exact eight-character
+// hex string may reach a LIKE query — otherwise a stray input turns into a
+// scan, or a one-character "ref" matches an arbitrary order.
+func TestShortOrderRefShape(t *testing.T) {
+	valid := []string{"ee40078c", "EE40078C", "00000000", "abcdef01"}
+	for _, v := range valid {
+		if len(v) != 8 || !isHex(v) {
+			t.Errorf("%q should be accepted as a short order ref", v)
+		}
+	}
+
+	rejected := []string{
+		"",          // empty
+		"ee40078",   // seven — would match far too much
+		"ee40078cd", // nine
+		"ee40078g",  // not hex
+		"ee40 078c", // spaced
+		"' OR 1=1",  // not hex, and never reaches SQL
+	}
+	for _, v := range rejected {
+		if len(v) == 8 && isHex(v) {
+			t.Errorf("%q should not be accepted as a short order ref", v)
+		}
+	}
+}

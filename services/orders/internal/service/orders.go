@@ -125,6 +125,65 @@ func (s *OrdersService) ListOrders(ctx context.Context, storeID uuid.UUID, page,
 }
 
 // GetPublicOrder returns an order for a customer to track — gated by email match, no vendor auth needed.
+// LookupPublicOrder finds a buyer's order from whatever they have to hand:
+// the full id from their tracking link, or the eight characters the
+// confirmation email and the track form both call "your order ID".
+//
+// The track page has always asked for those eight characters and then sent
+// them to an endpoint that only accepted a full UUID, so every lookup through
+// the form returned "order not found".
+//
+// Matching a prefix is safe here only because the email is matched too: a
+// buyer can see their own order, not someone else's that happens to start
+// with the same eight characters.
+func (s *OrdersService) LookupPublicOrder(ctx context.Context, ref, email string) (dto.OrderResp, error) {
+	ref = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(ref), "#"))
+	if ref == "" {
+		return dto.OrderResp{}, apperrors.BadRequest("order id is required")
+	}
+	if email = strings.TrimSpace(email); email == "" {
+		return dto.OrderResp{}, apperrors.BadRequest("email is required")
+	}
+
+	if id, err := uuid.Parse(ref); err == nil {
+		return s.GetPublicOrder(ctx, id, email)
+	}
+
+	// Anything else has to look like the short form before it touches SQL,
+	// so a stray string cannot turn into a LIKE scan of the table.
+	if len(ref) != 8 || !isHex(ref) {
+		return dto.OrderResp{}, apperrors.NotFound("order not found")
+	}
+
+	var r orderRow
+	err := s.db.QueryRowxContext(ctx, `
+		SELECT `+orderColumns+`
+		FROM orders
+		WHERE id::text LIKE LOWER($1) || '%' AND LOWER(customer_email) = LOWER($2)
+		ORDER BY created_at DESC
+		LIMIT 1`, ref, email).StructScan(&r)
+	if errors.Is(err, sql.ErrNoRows) {
+		return dto.OrderResp{}, apperrors.NotFound("order not found")
+	}
+	if err != nil {
+		return dto.OrderResp{}, fmt.Errorf("look up public order: %w", err)
+	}
+	o := rowToOrder(r)
+	o.Items = s.loadItems(ctx, r.ID)
+	return o, nil
+}
+
+func isHex(s string) bool {
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'f', r >= 'A' && r <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func (s *OrdersService) GetPublicOrder(ctx context.Context, orderID uuid.UUID, email string) (dto.OrderResp, error) {
 	var r orderRow
 	err := s.db.QueryRowxContext(ctx, `
