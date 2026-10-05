@@ -1,10 +1,12 @@
-// Package main finds money we took and never turned into an order.
+// Package main finds money we took that never finished becoming an order.
 //
-// Checkout charges Paystack first and saves the order second. Anything that
-// interrupts the gap leaves a successful charge with nothing attached to it,
-// and until checkout_intents existed there was no server-side record of what
-// the payment was even for. This walks Paystack's own transaction list and
-// reports every successful charge with no matching order.
+// Orders are created before payment now, so a charge can no longer arrive with
+// nothing attached to it. What can still happen is an order left unconfirmed:
+// the buyer paid, but neither their browser nor Paystack's webhook told us, so
+// it sits awaiting payment or aged into abandoned while the money is ours.
+//
+// This walks Paystack's own transaction list and reports every successful
+// charge whose order is not confirmed.
 //
 // Usage (from repo root):
 //
@@ -18,14 +20,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -53,8 +58,8 @@ type paystackPage struct {
 }
 
 type orphan struct {
-	txn       paystackTxn
-	hasIntent bool
+	txn    paystackTxn
+	status string // the order's current status, "" when no order exists at all
 }
 
 func main() {
@@ -97,19 +102,24 @@ func main() {
 		if t.Channel == "dedicated_nuban" {
 			continue
 		}
-		var exists bool
-		if err := db.QueryRowContext(ctx,
-			`SELECT EXISTS(SELECT 1 FROM orders WHERE payment_reference = $1)`, t.Reference).Scan(&exists); err != nil {
-			log.Fatalf("look up order: %v", err)
-		}
-		if exists {
+		// An order on this reference that is still awaiting payment or has
+		// aged into abandoned means the charge never got confirmed.
+		var status string
+		err := db.QueryRowContext(ctx, `
+			SELECT status FROM orders
+			WHERE payment_reference = $1
+			ORDER BY CASE status WHEN 'awaiting_payment' THEN 0 WHEN 'abandoned' THEN 1 ELSE 2 END
+			LIMIT 1`, t.Reference).Scan(&status)
+		if err == sql.ErrNoRows {
+			orphans = append(orphans, orphan{txn: t})
 			continue
 		}
-		var hasIntent bool
-		_ = db.QueryRowContext(ctx,
-			`SELECT EXISTS(SELECT 1 FROM checkout_intents WHERE payment_reference = $1 AND fulfilled_at IS NULL)`,
-			t.Reference).Scan(&hasIntent)
-		orphans = append(orphans, orphan{txn: t, hasIntent: hasIntent})
+		if err != nil {
+			log.Fatalf("look up order: %v", err)
+		}
+		if status == "awaiting_payment" || status == "abandoned" {
+			orphans = append(orphans, orphan{txn: t, status: status})
+		}
 	}
 
 	if len(orphans) == 0 {
@@ -120,10 +130,10 @@ func main() {
 	report(orphans)
 
 	if !*retry {
-		fmt.Println("\nRe-run with -retry to replay the ones marked 'intent stored'.")
+		fmt.Println("\nRe-run with -retry to confirm the ones that have an order.")
 		return
 	}
-	replay(ctx, db, orphans)
+	replay(ctx, orphans)
 }
 
 func fetchSuccessful(ctx context.Context, secret string, from time.Time) ([]paystackTxn, error) {
@@ -164,9 +174,9 @@ func report(orphans []orphan) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "PAID AT\tAMOUNT\tCUSTOMER\tREFERENCE\tRECOVERABLE")
 	for _, o := range orphans {
-		state := "no intent — rebuild by hand"
-		if o.hasIntent {
-			state = "intent stored — can replay"
+		state := "no order at all — predates order-first checkout"
+		if o.status != "" {
+			state = "order " + o.status + " — can confirm"
 		}
 		paid := o.txn.PaidAt
 		if len(paid) >= 16 {
@@ -178,32 +188,52 @@ func report(orphans []orphan) {
 	w.Flush()
 }
 
-// replay asks the orders service to finish each recoverable checkout, by
-// touching the intent so the service's own sweep picks it up on its next
-// pass. Done through the database rather than an HTTP call so this works
-// without the service being reachable from wherever it is run.
-func replay(ctx context.Context, db *sql.DB, orphans []orphan) {
-	var queued, manual int
+// replay asks the orders service to confirm each paid-but-unconfirmed order,
+// through the same public endpoint the browser and the webhook use — so the
+// charge is verified against our own total exactly as it would be normally,
+// rather than this script writing statuses behind the service's back.
+func replay(ctx context.Context, orphans []orphan) {
+	base := strings.TrimRight(os.Getenv("ORDERS_API_URL"), "/")
+	if base == "" {
+		base = "https://api.gomarketi.com"
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	var ok, manual, failed int
 	for _, o := range orphans {
-		if !o.hasIntent {
+		if o.status == "" {
 			manual++
 			continue
 		}
-		// Clearing attempts puts an intent that had exhausted its retries
-		// back in the sweep's working set.
-		if _, err := db.ExecContext(ctx,
-			`UPDATE checkout_intents SET attempts = 0, last_error = NULL, updated_at = NOW()
-			 WHERE payment_reference = $1 AND fulfilled_at IS NULL`, o.txn.Reference); err != nil {
-			fmt.Printf("  FAILED  %s: %v\n", o.txn.Reference, err)
+		body := fmt.Sprintf(`{"payment_reference":%q}`, o.txn.Reference)
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+			base+"/v1/orders/public/confirm-payment", strings.NewReader(body))
+		if err != nil {
+			failed++
 			continue
 		}
-		fmt.Printf("  queued  %s (%s, %s)\n", o.txn.Reference, naira(o.txn.Amount), o.txn.Customer.Email)
-		queued++
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err != nil {
+			fmt.Printf("  FAILED  %s: %v\n", o.txn.Reference, err)
+			failed++
+			continue
+		}
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
+		resp.Body.Close()
+		if resp.StatusCode >= 300 {
+			fmt.Printf("  FAILED  %s: %d %s\n", o.txn.Reference, resp.StatusCode, bytes.TrimSpace(msg))
+			failed++
+			continue
+		}
+		fmt.Printf("  confirmed  %s (%s, %s)\n", o.txn.Reference, naira(o.txn.Amount), o.txn.Customer.Email)
+		ok++
 	}
-	fmt.Printf("\nQueued %d for the orders service to retry within 10 minutes.\n", queued)
+
+	fmt.Printf("\nConfirmed %d, failed %d.\n", ok, failed)
 	if manual > 0 {
-		fmt.Printf("%d cannot be replayed: the payment predates checkout intents, so nothing\n"+
-			"records what was bought. Contact the customer, or refund the charge in Paystack.\n", manual)
+		fmt.Printf("%d charge(s) have no order at all. Those predate order-first checkout,\n"+
+			"so nothing records what was bought — contact the customer or refund in Paystack.\n", manual)
 	}
 }
 
