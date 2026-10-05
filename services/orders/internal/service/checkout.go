@@ -11,12 +11,18 @@ import (
 )
 
 // abandonAfter is how long an unpaid order waits before it is treated as
-// abandoned. Long enough to cover a buyer who steps away mid-payment and
-// comes back, short enough that a vendor's abandoned list is about today.
-const abandonAfter = 45 * time.Minute
+// abandoned.
+//
+// Short on purpose: the value of an abandoned checkout is that the buyer was
+// still in the mood to buy, and a vendor reaching out within the hour lands
+// very differently from one reaching out the next morning. Marking it early
+// costs nothing either — a buyer who finishes paying flips their own order
+// straight back to confirmed, whatever it was marked in the meantime.
+const abandonAfter = 10 * time.Minute
 
 // abandonSweepInterval is how often that check runs.
-const abandonSweepInterval = 10 * time.Minute
+// Checked often enough that the window means roughly what it says.
+const abandonSweepInterval = 3 * time.Minute
 
 // notifyPaidOrders fires the post-payment side effects: the vendor's dashboard
 // event, the customer's receipt, the vendor's alert.

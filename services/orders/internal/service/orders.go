@@ -31,6 +31,16 @@ type OrdersService struct {
 // orderRow — keeps the hub/escrow columns and the wallet_status subquery
 // (escrow state — see EscrowStatus in rowToOrder) in exactly one place
 // instead of duplicated across five near-identical queries.
+// paidOnly is what separates an order that happened from one that merely
+// started. Orders now exist before payment, so every count, sum and customer
+// figure has to say so explicitly — without it a buyer who opened checkout and
+// walked away would show up as revenue, and as a customer who spent it.
+//
+// paid_at is set the moment a charge is verified and never cleared, so a
+// refunded or cancelled order still counts as having happened; callers that
+// care about money in hand exclude cancelled separately, as they already did.
+const paidOnly = ` AND paid_at IS NOT NULL`
+
 const orderColumns = `id, store_id, customer_id, customer_name, customer_email, status,
 	total_kobo, delivery_fee_kobo, delivery_address, payment_reference,
 	hub_received_at, dispatched_at, delivered_at, delivery_confirmed_at, cancelled_reason,
@@ -1362,7 +1372,7 @@ func (s *OrdersService) ListCustomers(ctx context.Context, storeID uuid.UUID, pa
 
 	var total int64
 	_ = s.db.QueryRowContext(ctx,
-		`SELECT COUNT(DISTINCT customer_id) FROM orders WHERE store_id=$1`+filter, args...).Scan(&total)
+		`SELECT COUNT(DISTINCT customer_id) FROM orders WHERE store_id=$1`+paidOnly+filter, args...).Scan(&total)
 
 	listArgs := append(args, perPage, offset)
 	ph := fmt.Sprintf(`$%d`, len(args)+1)
@@ -1376,7 +1386,7 @@ func (s *OrdersService) ListCustomers(ctx context.Context, storeID uuid.UUID, pa
 			COUNT(*)::int      AS total_orders,
 			SUM(total_kobo)    AS total_spent_kobo,
 			MAX(created_at)    AS last_order_at
-		FROM orders WHERE store_id=$1`+filter+`
+		FROM orders WHERE store_id=$1`+paidOnly+filter+`
 		GROUP BY customer_id, customer_email
 		ORDER BY MAX(created_at) DESC
 		LIMIT `+ph+` OFFSET `+ph2, listArgs...)
@@ -1424,7 +1434,7 @@ func (s *OrdersService) GetCustomer(ctx context.Context, storeID uuid.UUID, cust
 		SELECT customer_id::text AS id, MAX(customer_name) AS full_name,
 		       customer_email AS email, COUNT(*)::int AS total_orders,
 		       SUM(total_kobo) AS total_spent_kobo, MAX(created_at) AS last_order_at
-		FROM orders WHERE store_id=$1 AND customer_id=$2
+		FROM orders WHERE store_id=$1 AND customer_id=$2`+paidOnly+`
 		GROUP BY customer_id, customer_email`, storeID, customerID).StructScan(&r)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.CustomerResp{}, apperrors.NotFound("customer not found")
@@ -1454,7 +1464,7 @@ func (s *OrdersService) GetAnalyticsOverview(ctx context.Context, storeID uuid.U
 			COUNT(DISTINCT customer_id)::int,
 			COUNT(CASE WHEN status='confirmed' THEN 1 END)::int,
 			COALESCE(SUM(discount_kobo), 0)
-		FROM orders WHERE store_id=$1`, storeID).
+		FROM orders WHERE store_id=$1`+paidOnly, storeID).
 		Scan(&resp.TotalRevenueKobo, &resp.TotalOrders, &resp.TotalCustomers, &resp.PendingOrders, &resp.TotalDiscountsKobo)
 
 	// Total expenses = sum of all wallet debit transactions
@@ -1500,6 +1510,7 @@ func (s *OrdersService) GetRevenueTrend(ctx context.Context, storeID uuid.UUID, 
 			COUNT(*)::int AS orders
 		FROM orders
 		WHERE store_id = $1
+		  AND paid_at IS NOT NULL
 		  AND created_at >= NOW() - (INTERVAL '1 day' * $2::int)
 		GROUP BY DATE(created_at AT TIME ZONE 'UTC')
 		ORDER BY date ASC`, storeID, days)

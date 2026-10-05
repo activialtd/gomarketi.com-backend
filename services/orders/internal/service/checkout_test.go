@@ -20,18 +20,20 @@ func TestCheckoutStatusValues(t *testing.T) {
 	}
 }
 
-// TestAbandonWindow guards the gap between a buyer stepping away mid-payment
-// and the order leaving the live pipeline. Too short and someone who takes a
-// phone call finds their order abandoned; too long and the vendor's abandoned
-// page is about last week.
+// TestAbandonWindow guards the two ends of the abandoned window. Too short and
+// a vendor is chasing someone who is still on the Paystack screen; too long
+// and the lead has gone cold by the time they see it. Being marked abandoned
+// is not destructive — paying flips the order back — so the window leans short.
 func TestAbandonWindow(t *testing.T) {
-	if abandonAfter < 15*time.Minute {
-		t.Errorf("abandonAfter %s is short enough to catch buyers mid-payment", abandonAfter)
+	if abandonAfter < 5*time.Minute {
+		t.Errorf("abandonAfter %s would chase buyers who are still paying", abandonAfter)
 	}
-	if abandonAfter > 4*time.Hour {
-		t.Errorf("abandonAfter %s leaves unpaid orders in the pipeline too long", abandonAfter)
+	if abandonAfter > time.Hour {
+		t.Errorf("abandonAfter %s lets the lead go cold", abandonAfter)
 	}
-	if abandonSweepInterval > abandonAfter {
-		t.Errorf("sweep every %s cannot keep up with a %s window", abandonSweepInterval, abandonAfter)
+	// The sweep is what makes the window real; checking less often than the
+	// window itself would make a 10-minute rule behave like a 20-minute one.
+	if abandonSweepInterval > abandonAfter/2 {
+		t.Errorf("sweeping every %s cannot honour a %s window", abandonSweepInterval, abandonAfter)
 	}
 }
