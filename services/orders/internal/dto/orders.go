@@ -80,12 +80,16 @@ const (
 )
 
 type OrderResp struct {
-	ID                  string         `json:"id"`
-	StoreID             string         `json:"store_id"`
-	CustomerID          string         `json:"customer_id"`
-	CustomerName        string         `json:"customer_name"`
-	CustomerEmail       string         `json:"customer_email"`
-	CustomerPhone       string         `json:"customer_phone,omitempty"`
+	ID            string `json:"id"`
+	StoreID       string `json:"store_id"`
+	CustomerID    string `json:"customer_id"`
+	CustomerName  string `json:"customer_name"`
+	CustomerEmail string `json:"customer_email"`
+	CustomerPhone string `json:"customer_phone,omitempty"`
+	// True when the buyer is collecting it themselves rather than having it
+	// delivered. Frozen onto the order, because the option behind it can be
+	// renamed or removed later.
+	IsPickup            bool           `json:"is_pickup"`
 	Status              OrderStatus    `json:"status"`
 	Fulfilment          Fulfilment     `json:"fulfilment"`
 	Items               []OrderItem    `json:"items"`

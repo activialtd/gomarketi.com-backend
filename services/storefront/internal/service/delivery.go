@@ -18,7 +18,7 @@ import (
 // balance up for bulky items / ₦4,500". Checkout renders the active ones and
 // the orders service validates the chosen fee against this table.
 
-const deliveryOptionCols = `id, store_id, title, description, price_kobo, position, is_active, created_at`
+const deliveryOptionCols = `id, store_id, title, description, price_kobo, position, is_active, is_pickup, created_at`
 
 type deliveryOptionRow struct {
 	ID          uuid.UUID `db:"id"`
@@ -26,6 +26,7 @@ type deliveryOptionRow struct {
 	Title       string    `db:"title"`
 	Description string    `db:"description"`
 	PriceKobo   int64     `db:"price_kobo"`
+	IsPickup    bool      `db:"is_pickup"`
 	Position    int       `db:"position"`
 	IsActive    bool      `db:"is_active"`
 	CreatedAt   time.Time `db:"created_at"`
@@ -40,6 +41,7 @@ func deliveryRowToResp(r deliveryOptionRow) dto.DeliveryOptionResp {
 		PriceKobo:   r.PriceKobo,
 		Position:    r.Position,
 		IsActive:    r.IsActive,
+		IsPickup:    r.IsPickup,
 		CreatedAt:   r.CreatedAt.UTC().Format(time.RFC3339),
 	}
 }
@@ -94,12 +96,20 @@ func (s *StorefrontService) CreateDeliveryOption(ctx context.Context, userID, st
 		).Scan(&position)
 	}
 
+	// Collection is free by definition — nobody is being paid to carry it —
+	// so a price sent alongside it is ignored rather than rejected, and the
+	// database constraint backs this up.
+	priceKobo := req.PriceKobo
+	if req.IsPickup {
+		priceKobo = 0
+	}
+
 	var row deliveryOptionRow
 	err := s.db.QueryRowxContext(ctx, `
-		INSERT INTO store_delivery_options (store_id, title, description, price_kobo, position)
-		VALUES ($1,$2,$3,$4,$5)
+		INSERT INTO store_delivery_options (store_id, title, description, price_kobo, position, is_pickup)
+		VALUES ($1,$2,$3,$4,$5,$6)
 		RETURNING `+deliveryOptionCols,
-		storeID, req.Title, req.Description, req.PriceKobo, position,
+		storeID, req.Title, req.Description, priceKobo, position, req.IsPickup,
 	).StructScan(&row)
 	if err != nil {
 		return dto.DeliveryOptionResp{}, fmt.Errorf("insert delivery option: %w", err)
