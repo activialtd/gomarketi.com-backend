@@ -140,6 +140,8 @@ func humanStatus(s string) string {
 		return "received at our hub"
 	case "shipped":
 		return "sent out for delivery"
+	case "ready_for_collection":
+		return "ready for you to collect"
 	case "delivered":
 		return "delivered"
 	case "cancelled":
@@ -159,6 +161,8 @@ func statusBadgeLabel(s string) string {
 		return "At our hub"
 	case "shipped":
 		return "On its way"
+	case "ready_for_collection":
+		return "Ready to collect"
 	case "delivered":
 		return "Delivered"
 	case "cancelled":
@@ -177,7 +181,7 @@ func statusAccent(s string) string {
 		return brandGreen
 	case "at_hub":
 		return "#7c5cd6"
-	case "shipped":
+	case "shipped", "ready_for_collection":
 		return "#2f6fb5"
 	case "cancelled":
 		return "#c0392b"
@@ -205,6 +209,9 @@ func statusUpdateHTML(customerName, storeName, orderID, orderURL, status string)
 	case "shipped":
 		headline = "Your order is on its way"
 		message = "Once it reaches you, confirm receipt on the tracking page — that is what releases payment to the seller."
+	case "ready_for_collection":
+		headline = "Your order is ready to collect"
+		message = fmt.Sprintf("%s has it packed and waiting for you. Once you have picked it up, confirm receipt on the tracking page — that is what releases payment to them.", htmlpkg.EscapeString(storeName))
 	case "delivered":
 		headline = "Your order has been delivered"
 		message = fmt.Sprintf("Thanks for shopping with %s. If anything is wrong with it, reply to this email and we will sort it out.", htmlpkg.EscapeString(storeName))

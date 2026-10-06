@@ -284,9 +284,9 @@ func (s *OrdersService) ConfirmDelivery(ctx context.Context, orderID uuid.UUID, 
 	if err != nil {
 		return dto.OrderResp{}, fmt.Errorf("lock order: %w", err)
 	}
-	if status != string(dto.OrderStatusShipped) {
+	if status != string(dto.OrderStatusShipped) && status != string(dto.OrderStatusReadyForCollection) {
 		return dto.OrderResp{}, apperrors.BadRequest(
-			"this order can't be marked received yet — it hasn't been dispatched")
+			"this order can't be marked received yet — it hasn't been dispatched or made ready for collection")
 	}
 
 	if _, err := tx.ExecContext(ctx, `
@@ -602,6 +602,8 @@ func (s *OrdersService) GetOrder(ctx context.Context, storeID uuid.UUID, orderID
 // vendorMaySet reports whether a vendor can move one of their own orders to
 // the requested status, which depends on who is delivering it.
 //
+//	collected         → confirmed, ready_for_collection, cancelled. Nothing is
+//	                    dispatched, so shipped and at_hub are both refused.
 //	vendor-delivered  → confirmed, shipped, cancelled. The vendor runs this
 //	                    order end to end, so they mark dispatch themselves.
 //	                    There is no hub in this flow, so at_hub would be a
@@ -614,11 +616,21 @@ func (s *OrdersService) GetOrder(ctx context.Context, storeID uuid.UUID, orderID
 //
 // delivered is settable in neither: it releases escrow on the spot, so it
 // stays with the buyer's confirm-delivery call or the auto-release sweep.
-func vendorMaySet(f dto.Fulfilment, status dto.OrderStatus) error {
+func vendorMaySet(f dto.Fulfilment, isPickup bool, status dto.OrderStatus) error {
 	switch status {
 	case dto.OrderStatusConfirmed, dto.OrderStatusCancelled:
 		return nil
+
+	case dto.OrderStatusReadyForCollection:
+		if !isPickup {
+			return apperrors.BadRequest("this order is being delivered, not collected — mark it dispatched once it is on its way")
+		}
+		return nil
+
 	case dto.OrderStatusShipped, dto.OrderStatusAtHub:
+		if isPickup {
+			return apperrors.BadRequest("the customer is collecting this one — mark it ready for collection instead")
+		}
 		if f == dto.FulfilmentGoMarketi {
 			return apperrors.BadRequest("this order is part of a multi-vendor basket that GoMarketi delivers — confirm it and we take it from there")
 		}
@@ -626,6 +638,7 @@ func vendorMaySet(f dto.Fulfilment, status dto.OrderStatus) error {
 			return apperrors.BadRequest("this order is yours to deliver, so it does not pass through the hub — mark it dispatched once it is on its way")
 		}
 		return nil
+
 	default:
 		return apperrors.BadRequest("you cannot set this order to " + string(status))
 	}
@@ -638,7 +651,7 @@ func (s *OrdersService) UpdateOrderStatus(ctx context.Context, storeID uuid.UUID
 	if err != nil {
 		return dto.OrderResp{}, err
 	}
-	if err := vendorMaySet(current.Fulfilment, req.Status); err != nil {
+	if err := vendorMaySet(current.Fulfilment, current.IsPickup, req.Status); err != nil {
 		return dto.OrderResp{}, err
 	}
 
@@ -651,7 +664,7 @@ func (s *OrdersService) UpdateOrderStatus(ctx context.Context, storeID uuid.UUID
 			-- but does not release on its own — only the buyer confirming
 			-- (or the clock running out) does that.
 			hub_received_at = CASE WHEN $1 = 'at_hub'  THEN COALESCE(hub_received_at, NOW()) ELSE hub_received_at END,
-			dispatched_at = CASE WHEN $1 = 'shipped'   THEN COALESCE(dispatched_at, NOW()) ELSE dispatched_at END,
+			dispatched_at = CASE WHEN $1 IN ('shipped','ready_for_collection') THEN COALESCE(dispatched_at, NOW()) ELSE dispatched_at END,
 			delivered_at  = CASE WHEN $1 = 'delivered' THEN COALESCE(delivered_at, NOW())  ELSE delivered_at  END,
 			updated_at = NOW()
 		WHERE id=$3 AND store_id=$4

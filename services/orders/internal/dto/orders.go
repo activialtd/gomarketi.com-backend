@@ -24,9 +24,13 @@ const (
 	// OrderStatusShipped means GoMarketi has dispatched the (possibly
 	// multi-vendor) consolidated batch from the hub to the customer — not
 	// that the vendor shipped it themselves.
-	OrderStatusShipped   OrderStatus = "shipped"
-	OrderStatusDelivered OrderStatus = "delivered"
-	OrderStatusCancelled OrderStatus = "cancelled"
+	OrderStatusShipped OrderStatus = "shipped"
+	// OrderStatusReadyForCollection is a pickup order waiting in the shop. It
+	// sits where shipped sits — the vendor has done their part and it is now
+	// on the buyer — and starts the same escrow clock for the same reason.
+	OrderStatusReadyForCollection OrderStatus = "ready_for_collection"
+	OrderStatusDelivered          OrderStatus = "delivered"
+	OrderStatusCancelled          OrderStatus = "cancelled"
 )
 
 // OrderItem is a single line item within an order.
@@ -198,7 +202,7 @@ type CreateCheckoutResp struct {
 // escrow immediately rather than after a window, so it stays with the buyer
 // (POST /v1/orders/public/:id/confirm-delivery) or the auto-release sweep.
 type UpdateOrderStatusReq struct {
-	Status OrderStatus `json:"status" validate:"required,oneof=confirmed at_hub shipped cancelled"`
+	Status OrderStatus `json:"status" validate:"required,oneof=confirmed at_hub shipped ready_for_collection cancelled"`
 	Note   *string     `json:"note"`
 }
 
