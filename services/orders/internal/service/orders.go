@@ -41,7 +41,7 @@ type OrdersService struct {
 // care about money in hand exclude cancelled separately, as they already did.
 const paidOnly = ` AND paid_at IS NOT NULL`
 
-const orderColumns = `id, store_id, customer_id, customer_name, customer_email, customer_phone, status,
+const orderColumns = `id, store_id, customer_id, customer_name, customer_email, customer_phone, status, is_pickup,
 	total_kobo, delivery_fee_kobo, delivery_address, payment_reference,
 	hub_received_at, dispatched_at, delivered_at, delivery_confirmed_at, cancelled_reason,
 	dispute_status, dispute_reason, disputed_at,
@@ -284,9 +284,9 @@ func (s *OrdersService) ConfirmDelivery(ctx context.Context, orderID uuid.UUID, 
 	if err != nil {
 		return dto.OrderResp{}, fmt.Errorf("lock order: %w", err)
 	}
-	if status != string(dto.OrderStatusShipped) {
+	if status != string(dto.OrderStatusShipped) && status != string(dto.OrderStatusReadyForCollection) {
 		return dto.OrderResp{}, apperrors.BadRequest(
-			"this order can't be marked received yet — it hasn't been dispatched")
+			"this order can't be marked received yet — it hasn't been dispatched or made ready for collection")
 	}
 
 	if _, err := tx.ExecContext(ctx, `
@@ -602,6 +602,8 @@ func (s *OrdersService) GetOrder(ctx context.Context, storeID uuid.UUID, orderID
 // vendorMaySet reports whether a vendor can move one of their own orders to
 // the requested status, which depends on who is delivering it.
 //
+//	collected         → confirmed, ready_for_collection, cancelled. Nothing is
+//	                    dispatched, so shipped and at_hub are both refused.
 //	vendor-delivered  → confirmed, shipped, cancelled. The vendor runs this
 //	                    order end to end, so they mark dispatch themselves.
 //	                    There is no hub in this flow, so at_hub would be a
@@ -614,11 +616,21 @@ func (s *OrdersService) GetOrder(ctx context.Context, storeID uuid.UUID, orderID
 //
 // delivered is settable in neither: it releases escrow on the spot, so it
 // stays with the buyer's confirm-delivery call or the auto-release sweep.
-func vendorMaySet(f dto.Fulfilment, status dto.OrderStatus) error {
+func vendorMaySet(f dto.Fulfilment, isPickup bool, status dto.OrderStatus) error {
 	switch status {
 	case dto.OrderStatusConfirmed, dto.OrderStatusCancelled:
 		return nil
+
+	case dto.OrderStatusReadyForCollection:
+		if !isPickup {
+			return apperrors.BadRequest("this order is being delivered, not collected — mark it dispatched once it is on its way")
+		}
+		return nil
+
 	case dto.OrderStatusShipped, dto.OrderStatusAtHub:
+		if isPickup {
+			return apperrors.BadRequest("the customer is collecting this one — mark it ready for collection instead")
+		}
 		if f == dto.FulfilmentGoMarketi {
 			return apperrors.BadRequest("this order is part of a multi-vendor basket that GoMarketi delivers — confirm it and we take it from there")
 		}
@@ -626,6 +638,7 @@ func vendorMaySet(f dto.Fulfilment, status dto.OrderStatus) error {
 			return apperrors.BadRequest("this order is yours to deliver, so it does not pass through the hub — mark it dispatched once it is on its way")
 		}
 		return nil
+
 	default:
 		return apperrors.BadRequest("you cannot set this order to " + string(status))
 	}
@@ -638,7 +651,7 @@ func (s *OrdersService) UpdateOrderStatus(ctx context.Context, storeID uuid.UUID
 	if err != nil {
 		return dto.OrderResp{}, err
 	}
-	if err := vendorMaySet(current.Fulfilment, req.Status); err != nil {
+	if err := vendorMaySet(current.Fulfilment, current.IsPickup, req.Status); err != nil {
 		return dto.OrderResp{}, err
 	}
 
@@ -651,7 +664,7 @@ func (s *OrdersService) UpdateOrderStatus(ctx context.Context, storeID uuid.UUID
 			-- but does not release on its own — only the buyer confirming
 			-- (or the clock running out) does that.
 			hub_received_at = CASE WHEN $1 = 'at_hub'  THEN COALESCE(hub_received_at, NOW()) ELSE hub_received_at END,
-			dispatched_at = CASE WHEN $1 = 'shipped'   THEN COALESCE(dispatched_at, NOW()) ELSE dispatched_at END,
+			dispatched_at = CASE WHEN $1 IN ('shipped','ready_for_collection') THEN COALESCE(dispatched_at, NOW()) ELSE dispatched_at END,
 			delivered_at  = CASE WHEN $1 = 'delivered' THEN COALESCE(delivered_at, NOW())  ELSE delivered_at  END,
 			updated_at = NOW()
 		WHERE id=$3 AND store_id=$4
@@ -767,33 +780,34 @@ func claimPaymentReference(ctx context.Context, tx *sqlx.Tx, ref string, amountK
 // no options cannot take a physical order, and the buyer is told so plainly
 // rather than being charged a number nobody set. Digital-only orders are
 // free and skip the check entirely.
-func (s *OrdersService) computeDeliveryFeeKobo(ctx context.Context, storeID uuid.UUID, items []dto.CreateOrderItem, deliveryOptionID string) (int64, string, error) {
+func (s *OrdersService) computeDeliveryFeeKobo(ctx context.Context, storeID uuid.UUID, items []dto.CreateOrderItem, deliveryOptionID string) (int64, string, bool, error) {
 	allDigital := s.allItemsDigital(ctx, items)
 
 	if deliveryOptionID != "" {
 		optionID, parseErr := uuid.Parse(deliveryOptionID)
 		if parseErr != nil {
-			return 0, "", apperrors.BadRequest("invalid delivery_option_id")
+			return 0, "", false, apperrors.BadRequest("invalid delivery_option_id")
 		}
 		var (
 			priceKobo int64
 			title     string
+			isPickup  bool
 		)
 		lookupErr := s.db.QueryRowContext(ctx, `
-			SELECT price_kobo, title FROM store_delivery_options
+			SELECT price_kobo, title, is_pickup FROM store_delivery_options
 			WHERE id = $1 AND store_id = $2 AND is_active = TRUE`,
 			optionID, storeID,
-		).Scan(&priceKobo, &title)
+		).Scan(&priceKobo, &title, &isPickup)
 		if errors.Is(lookupErr, sql.ErrNoRows) {
-			return 0, "", apperrors.BadRequest("delivery option not found for this store")
+			return 0, "", false, apperrors.BadRequest("delivery option not found for this store")
 		}
 		if lookupErr != nil {
-			return 0, "", fmt.Errorf("lookup delivery option: %w", lookupErr)
+			return 0, "", false, fmt.Errorf("lookup delivery option: %w", lookupErr)
 		}
 		if allDigital {
-			return 0, "", nil
+			return 0, "", false, nil
 		}
-		return priceKobo, title, nil
+		return priceKobo, title, isPickup, nil
 	}
 
 	// No option named. A physical order cannot be priced without one, so the
@@ -802,12 +816,12 @@ func (s *OrdersService) computeDeliveryFeeKobo(ctx context.Context, storeID uuid
 	if countErr := s.db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM store_delivery_options WHERE store_id=$1 AND is_active=TRUE`, storeID,
 	).Scan(&configured); countErr != nil {
-		return 0, "", fmt.Errorf("count delivery options: %w", countErr)
+		return 0, "", false, fmt.Errorf("count delivery options: %w", countErr)
 	}
 	if configured > 0 {
-		return 0, "", apperrors.BadRequest("choose a delivery option before paying")
+		return 0, "", false, apperrors.BadRequest("choose a delivery option before paying")
 	}
-	return 0, "", apperrors.BadRequest(
+	return 0, "", false, apperrors.BadRequest(
 		"this vendor has not set a delivery fee yet — please contact the store")
 }
 
@@ -846,7 +860,7 @@ func (s *OrdersService) allItemsDigital(ctx context.Context, items []dto.CreateO
 // commits to a basket, and payment turns it into a real one. Nothing is
 // credited here — see creditVendorTx, which runs at confirmation — because an
 // order that is never paid for must leave no trace in anyone's wallet.
-func insertOrderTx(ctx context.Context, tx *sqlx.Tx, storeID uuid.UUID, customerName, customerEmail, customerPhone, deliveryAddress string, items []dto.CreateOrderItem, deliveryFeeKobo int64, paymentRef string) (uuid.UUID, int64, error) {
+func insertOrderTx(ctx context.Context, tx *sqlx.Tx, storeID uuid.UUID, customerName, customerEmail, customerPhone, deliveryAddress string, items []dto.CreateOrderItem, deliveryFeeKobo int64, isPickup bool, paymentRef string) (uuid.UUID, int64, error) {
 	var itemsKobo int64
 	for _, it := range items {
 		itemsKobo += it.PriceKobo * int64(it.Quantity)
@@ -860,10 +874,10 @@ func insertOrderTx(ctx context.Context, tx *sqlx.Tx, storeID uuid.UUID, customer
 
 	var orderID uuid.UUID
 	err := tx.QueryRowContext(ctx, `
-		INSERT INTO orders (store_id, customer_id, customer_name, customer_email, customer_phone, status, total_kobo, delivery_fee_kobo, delivery_address, payment_reference)
-		VALUES ($1,$2,$3,$4,$5,'awaiting_payment',$6,$7,$8,$9)
+		INSERT INTO orders (store_id, customer_id, customer_name, customer_email, customer_phone, status, total_kobo, delivery_fee_kobo, delivery_address, is_pickup, payment_reference)
+		VALUES ($1,$2,$3,$4,$5,'awaiting_payment',$6,$7,$8,$9,$10)
 		RETURNING id`,
-		storeID, custID, customerName, customerEmail, customerPhone, totalKobo, deliveryFeeKobo, deliveryAddress, paymentRef,
+		storeID, custID, customerName, customerEmail, customerPhone, totalKobo, deliveryFeeKobo, deliveryAddress, isPickup, paymentRef,
 	).Scan(&orderID)
 	if err != nil {
 		return uuid.Nil, 0, fmt.Errorf("insert order: %w", err)
@@ -1058,7 +1072,7 @@ func (s *OrdersService) PlaceOrder(ctx context.Context, req dto.CreateOrderReq) 
 	// Computed here, server-side, from the store's own settings rather than
 	// trusted from the client — so a vendor's dashboard setting takes effect
 	// and a tampered frontend cannot invent a cheaper delivery.
-	deliveryFeeKobo, _, err := s.computeDeliveryFeeKobo(ctx, storeID, req.Items, req.DeliveryOptionID)
+	deliveryFeeKobo, _, isPickup, err := s.computeDeliveryFeeKobo(ctx, storeID, req.Items, req.DeliveryOptionID)
 	if err != nil {
 		return dto.OrderResp{}, err
 	}
@@ -1074,7 +1088,7 @@ func (s *OrdersService) PlaceOrder(ctx context.Context, req dto.CreateOrderReq) 
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	orderID, _, err := insertOrderTx(ctx, tx, storeID, req.CustomerName, req.CustomerEmail, req.CustomerPhone, req.DeliveryAddress, req.Items, deliveryFeeKobo, paymentRef)
+	orderID, _, err := insertOrderTx(ctx, tx, storeID, req.CustomerName, req.CustomerEmail, req.CustomerPhone, req.DeliveryAddress, req.Items, deliveryFeeKobo, isPickup, paymentRef)
 	if err != nil {
 		return dto.OrderResp{}, err
 	}
@@ -1092,27 +1106,28 @@ func (s *OrdersService) PlaceOrder(ctx context.Context, req dto.CreateOrderReq) 
 // options merged together, so the chosen one may belong to any store in the
 // basket. It still has to belong to one of them, or a buyer could name the
 // cheapest option on the platform.
-func (s *OrdersService) basketDeliveryFee(ctx context.Context, optionID string, storeIDs []uuid.UUID) (int64, error) {
+func (s *OrdersService) basketDeliveryFee(ctx context.Context, optionID string, storeIDs []uuid.UUID) (int64, bool, error) {
 	if optionID == "" {
-		return 0, apperrors.BadRequest("choose a delivery option before paying")
+		return 0, false, apperrors.BadRequest("choose a delivery option before paying")
 	}
 	id, err := uuid.Parse(optionID)
 	if err != nil {
-		return 0, apperrors.BadRequest("invalid delivery_option_id")
+		return 0, false, apperrors.BadRequest("invalid delivery_option_id")
 	}
 
 	var (
 		priceKobo int64
 		ownerID   uuid.UUID
+		isPickup  bool
 	)
 	err = s.db.QueryRowContext(ctx, `
-		SELECT price_kobo, store_id FROM store_delivery_options
-		WHERE id = $1 AND is_active = TRUE`, id).Scan(&priceKobo, &ownerID)
+		SELECT price_kobo, store_id, is_pickup FROM store_delivery_options
+		WHERE id = $1 AND is_active = TRUE`, id).Scan(&priceKobo, &ownerID, &isPickup)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, apperrors.BadRequest("delivery option not found")
+		return 0, false, apperrors.BadRequest("delivery option not found")
 	}
 	if err != nil {
-		return 0, fmt.Errorf("lookup basket delivery option: %w", err)
+		return 0, false, fmt.Errorf("lookup basket delivery option: %w", err)
 	}
 
 	// Checked here rather than in SQL: a basket holds a handful of stores, and
@@ -1120,10 +1135,10 @@ func (s *OrdersService) basketDeliveryFee(ctx context.Context, optionID string, 
 	// predicate.
 	for _, id := range storeIDs {
 		if id == ownerID {
-			return priceKobo, nil
+			return priceKobo, isPickup, nil
 		}
 	}
-	return 0, apperrors.BadRequest("that delivery option does not belong to any store in this basket")
+	return 0, false, apperrors.BadRequest("that delivery option does not belong to any store in this basket")
 }
 
 // PlaceCheckout is PlaceOrder for a basket spanning several stores: one order
@@ -1147,7 +1162,7 @@ func (s *OrdersService) PlaceCheckout(ctx context.Context, req dto.CreateCheckou
 		storeIDs = append(storeIDs, id)
 	}
 
-	deliveryFeeKobo, err := s.basketDeliveryFee(ctx, req.DeliveryOptionID, storeIDs)
+	deliveryFeeKobo, isPickup, err := s.basketDeliveryFee(ctx, req.DeliveryOptionID, storeIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -1176,7 +1191,7 @@ func (s *OrdersService) PlaceCheckout(ctx context.Context, req dto.CreateCheckou
 		if i == 0 {
 			fee = deliveryFeeKobo
 		}
-		orderID, _, err := insertOrderTx(ctx, tx, storeID, req.CustomerName, req.CustomerEmail, req.CustomerPhone, req.DeliveryAddress, so.Items, fee, paymentRef)
+		orderID, _, err := insertOrderTx(ctx, tx, storeID, req.CustomerName, req.CustomerEmail, req.CustomerPhone, req.DeliveryAddress, so.Items, fee, isPickup, paymentRef)
 		if err != nil {
 			return nil, err
 		}
@@ -1722,6 +1737,7 @@ type orderRow struct {
 	CustomerEmail       string         `db:"customer_email"`
 	CustomerPhone       string         `db:"customer_phone"`
 	Status              string         `db:"status"`
+	IsPickup            bool           `db:"is_pickup"`
 	Fulfilment          string         `db:"fulfilment"`
 	TotalKobo           int64          `db:"total_kobo"`
 	DeliveryFeeKobo     int64          `db:"delivery_fee_kobo"`
@@ -1758,6 +1774,7 @@ func rowToOrder(r orderRow) dto.OrderResp {
 		CustomerName:    r.CustomerName,
 		CustomerEmail:   r.CustomerEmail,
 		CustomerPhone:   r.CustomerPhone,
+		IsPickup:        r.IsPickup,
 		Status:          dto.OrderStatus(r.Status),
 		Fulfilment:      dto.Fulfilment(r.Fulfilment),
 		Items:           []dto.OrderItem{},

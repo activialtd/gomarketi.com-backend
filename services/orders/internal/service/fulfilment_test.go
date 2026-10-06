@@ -14,34 +14,47 @@ import (
 // immediately.
 func TestVendorMaySet(t *testing.T) {
 	cases := []struct {
-		name    string
-		f       dto.Fulfilment
-		status  dto.OrderStatus
-		allowed bool
+		name     string
+		f        dto.Fulfilment
+		isPickup bool
+		status   dto.OrderStatus
+		allowed  bool
 	}{
-		{"vendor-delivered may confirm", dto.FulfilmentVendor, dto.OrderStatusConfirmed, true},
-		{"vendor-delivered may ship themselves", dto.FulfilmentVendor, dto.OrderStatusShipped, true},
-		{"vendor-delivered may cancel", dto.FulfilmentVendor, dto.OrderStatusCancelled, true},
-		{"vendor-delivered has no hub step", dto.FulfilmentVendor, dto.OrderStatusAtHub, false},
+		{"vendor-delivered may confirm", dto.FulfilmentVendor, false, dto.OrderStatusConfirmed, true},
+		{"vendor-delivered may ship themselves", dto.FulfilmentVendor, false, dto.OrderStatusShipped, true},
+		{"vendor-delivered may cancel", dto.FulfilmentVendor, false, dto.OrderStatusCancelled, true},
+		{"vendor-delivered has no hub step", dto.FulfilmentVendor, false, dto.OrderStatusAtHub, false},
 
-		{"gomarketi-delivered may confirm", dto.FulfilmentGoMarketi, dto.OrderStatusConfirmed, true},
-		{"gomarketi-delivered may cancel", dto.FulfilmentGoMarketi, dto.OrderStatusCancelled, true},
-		{"gomarketi-delivered may NOT self-dispatch", dto.FulfilmentGoMarketi, dto.OrderStatusShipped, false},
-		{"gomarketi-delivered may NOT mark at hub", dto.FulfilmentGoMarketi, dto.OrderStatusAtHub, false},
+		{"gomarketi-delivered may confirm", dto.FulfilmentGoMarketi, false, dto.OrderStatusConfirmed, true},
+		{"gomarketi-delivered may cancel", dto.FulfilmentGoMarketi, false, dto.OrderStatusCancelled, true},
+		{"gomarketi-delivered may NOT self-dispatch", dto.FulfilmentGoMarketi, false, dto.OrderStatusShipped, false},
+		{"gomarketi-delivered may NOT mark at hub", dto.FulfilmentGoMarketi, false, dto.OrderStatusAtHub, false},
 
-		{"delivered is never vendor-settable", dto.FulfilmentVendor, dto.OrderStatusDelivered, false},
-		{"delivered is never settable on hub orders", dto.FulfilmentGoMarketi, dto.OrderStatusDelivered, false},
-		{"pending is not settable", dto.FulfilmentVendor, dto.OrderStatusPending, false},
+		{"delivered is never vendor-settable", dto.FulfilmentVendor, false, dto.OrderStatusDelivered, false},
+		{"delivered is never settable on hub orders", dto.FulfilmentGoMarketi, false, dto.OrderStatusDelivered, false},
+		{"pending is not settable", dto.FulfilmentVendor, false, dto.OrderStatusPending, false},
+
+		// Collection: the vendor puts it on the counter, nobody dispatches it.
+		{"collected may confirm", dto.FulfilmentVendor, true, dto.OrderStatusConfirmed, true},
+		{"collected may be made ready", dto.FulfilmentVendor, true, dto.OrderStatusReadyForCollection, true},
+		{"collected may cancel", dto.FulfilmentVendor, true, dto.OrderStatusCancelled, true},
+		{"collected is never shipped", dto.FulfilmentVendor, true, dto.OrderStatusShipped, false},
+		{"collected never reaches the hub", dto.FulfilmentVendor, true, dto.OrderStatusAtHub, false},
+		{"collected is still not delivered by the vendor", dto.FulfilmentVendor, true, dto.OrderStatusDelivered, false},
+
+		// A delivery cannot borrow the collection status.
+		{"delivered order is not ready for collection", dto.FulfilmentVendor, false, dto.OrderStatusReadyForCollection, false},
+		{"hub order is not ready for collection", dto.FulfilmentGoMarketi, false, dto.OrderStatusReadyForCollection, false},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := vendorMaySet(tc.f, tc.status)
+			err := vendorMaySet(tc.f, tc.isPickup, tc.status)
 			if tc.allowed && err != nil {
-				t.Errorf("%s/%s should be allowed, got: %v", tc.f, tc.status, err)
+				t.Errorf("%s (pickup=%v)/%s should be allowed, got: %v", tc.f, tc.isPickup, tc.status, err)
 			}
 			if !tc.allowed && err == nil {
-				t.Errorf("%s/%s must be refused, but was allowed", tc.f, tc.status)
+				t.Errorf("%s (pickup=%v)/%s must be refused, but was allowed", tc.f, tc.isPickup, tc.status)
 			}
 		})
 	}

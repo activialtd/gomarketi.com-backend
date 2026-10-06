@@ -52,9 +52,9 @@ func (c *BrevoMailer) SendWelcome(ctx context.Context, to, vendorName, storeName
 	}
 
 	payload := map[string]any{
-		"sender":  map[string]string{"email": c.from, "name": c.fromName},
-		"to":      []map[string]string{{"email": to, "name": vendorName}},
-		"subject": fmt.Sprintf("Your GoMarketi store %s is live!", storeName),
+		"sender":      map[string]string{"email": c.from, "name": c.fromName},
+		"to":          []map[string]string{{"email": to, "name": vendorName}},
+		"subject":     fmt.Sprintf("Your GoMarketi store %s is live!", storeName),
 		"htmlContent": welcomeHTML(vendorName, storeName, storeURL, storeSlug),
 	}
 
@@ -106,7 +106,7 @@ func welcomeHTML(vendorName, storeName, storeURL, storeSlug string) string {
                  attachment breaks in webmail, so this is a hosted PNG,
                  flattened onto white because some Outlook builds composite
                  alpha against black. -->
-            <img src="` + brandMark() + `" width="150" alt="GoMarket" style="display:block;border:0;width:150px;height:auto;">
+            <img src="`+brandMark()+`" width="150" alt="GoMarket" style="display:block;border:0;width:150px;height:auto;">
           </td>
         </tr>
 

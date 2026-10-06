@@ -219,7 +219,6 @@ type FieldError struct {
 
 // ── Markets ───────────────────────────────────────────────────────────────────
 
-
 // StoreSearchResult is a single store in a public search response. It is a
 // trimmed StoreResp — enough for a result card, no private fields.
 type StoreSearchResult struct {
@@ -237,7 +236,6 @@ type StoreSearchResult struct {
 	MarketName *string `json:"market_name,omitempty"`
 }
 
-
 // ── Delivery options ──────────────────────────────────────────────────────────
 
 // DeliveryOptionResp is a single vendor-defined delivery choice.
@@ -247,9 +245,12 @@ type DeliveryOptionResp struct {
 	Title       string `json:"title"`
 	Description string `json:"description"`
 	PriceKobo   int64  `json:"price_kobo"`
-	Position    int    `json:"position"`
-	IsActive    bool   `json:"is_active"`
-	CreatedAt   string `json:"created_at"`
+	// True when this is "collect it yourself" rather than a delivery area.
+	// Always free, and checkout does not ask for a delivery address.
+	IsPickup  bool   `json:"is_pickup"`
+	Position  int    `json:"position"`
+	IsActive  bool   `json:"is_active"`
+	CreatedAt string `json:"created_at"`
 }
 
 // CreateDeliveryOptionReq is the body for
@@ -258,7 +259,9 @@ type CreateDeliveryOptionReq struct {
 	Title       string `json:"title"       validate:"required,min=2,max=120"`
 	Description string `json:"description" validate:"omitempty,max=500"`
 	PriceKobo   int64  `json:"price_kobo"  validate:"min=0,max=100000000"`
-	Position    *int   `json:"position"    validate:"omitempty,min=0,max=1000"`
+	// A store may offer one pickup option; any price sent with it is ignored.
+	IsPickup bool `json:"is_pickup"`
+	Position *int `json:"position"    validate:"omitempty,min=0,max=1000"`
 }
 
 // UpdateDeliveryOptionReq is the body for
