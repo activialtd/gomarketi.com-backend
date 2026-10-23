@@ -91,6 +91,10 @@ func run(log zerolog.Logger) error {
 	// sitting in the pipeline forever — see StartAbandonedSweepLoop.
 	go svc.StartAbandonedSweepLoop(context.Background())
 
+	// Offers nobody answered and deals nobody bought lapse after 48 hours —
+	// see StartOfferExpiryLoop.
+	go svc.StartOfferExpiryLoop(context.Background())
+
 	h := handler.New(svc, log, broker)
 	r := gin.New()
 

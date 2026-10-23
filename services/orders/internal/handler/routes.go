@@ -66,6 +66,12 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 	pub.POST("/cart-email", h.SendCartInvoice)           // pre-payment cart summary email
 	pub.POST("/webhooks/paystack", h.PaystackWebhook)    // Paystack calls this directly — signature-verified, not JWT
 
+	// Price offers on negotiable products. Guests hold a buyer_token per
+	// negotiation instead of an account.
+	pub.POST("/offers", h.CreateOffer)
+	pub.GET("/offers/:id", h.GetPublicOffer)
+	pub.POST("/offers/:id/respond", h.RespondPublicOffer)
+
 	// Internal — service-to-service only, reached by direct networking (not
 	// the public gateway), protected by a shared secret instead of a user JWT.
 	internal := r.Group("/v1/orders/internal")
@@ -84,11 +90,15 @@ func Register(r *gin.Engine, h *Handler, log zerolog.Logger, allowedOrigins []st
 		// a buyer has no store (callerStoreID would always 403 them).
 		v1.GET("/orders/mine", h.GetMyOrders)
 		v1.GET("/orders/mine/:id", h.GetMyOrder)
+		v1.GET("/orders/offers/mine", h.GetMyOffers)
+		v1.POST("/orders/offers/mine/:id/respond", h.RespondMyOffer)
 
 		// Orders (MERCHANT.ORDERS dashboard section)
 		orders := v1.Group("/orders")
 		orders.GET("", h.ListOrders)
 		orders.GET("/abandoned", h.ListAbandonedCarts)
+		orders.GET("/offers", h.ListOffers)
+		orders.POST("/offers/:id/respond", h.RespondOffer)
 
 		// Buyer-facing: the signed-in shopper's own orders across every
 		// vendor, as opposed to the vendor routes above which are scoped to

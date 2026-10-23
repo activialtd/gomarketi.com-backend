@@ -889,9 +889,9 @@ func insertOrderTx(ctx context.Context, tx *sqlx.Tx, storeID uuid.UUID, customer
 			return uuid.Nil, 0, apperrors.BadRequest("invalid product_id in items")
 		}
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO order_items (order_id, product_id, name, image_url, quantity, price_kobo)
-			VALUES ($1,$2,$3,$4,$5,$6)`,
-			orderID, productID, it.Name, it.ImageURL, it.Quantity, it.PriceKobo,
+			INSERT INTO order_items (order_id, product_id, name, image_url, quantity, price_kobo, offer_id)
+			VALUES ($1,$2,$3,$4,$5,$6,NULLIF($7,'')::uuid)`,
+			orderID, productID, it.Name, it.ImageURL, it.Quantity, it.PriceKobo, it.OfferID,
 		); err != nil {
 			return uuid.Nil, 0, fmt.Errorf("insert order item: %w", err)
 		}
@@ -1076,6 +1076,9 @@ func (s *OrdersService) PlaceOrder(ctx context.Context, req dto.CreateOrderReq) 
 	if err != nil {
 		return dto.OrderResp{}, err
 	}
+	if err := s.priceItems(ctx, storeID, req.CustomerEmail, req.Items); err != nil {
+		return dto.OrderResp{}, err
+	}
 
 	paymentRef := strings.TrimSpace(req.PaymentRef)
 	if paymentRef == "" {
@@ -1158,6 +1161,9 @@ func (s *OrdersService) PlaceCheckout(ctx context.Context, req dto.CreateCheckou
 		id, err := uuid.Parse(so.StoreID)
 		if err != nil {
 			return nil, apperrors.BadRequest("invalid store_id")
+		}
+		if err := s.priceItems(ctx, id, req.CustomerEmail, so.Items); err != nil {
+			return nil, err
 		}
 		storeIDs = append(storeIDs, id)
 	}
@@ -1282,6 +1288,12 @@ func (s *OrdersService) ConfirmPayment(ctx context.Context, paymentRef string) (
 	// `fulfilment` column derives for the dashboard.
 	vendorDelivers := len(targets) == 1
 
+	type redeemedOffer struct {
+		storeID uuid.UUID
+		offerID string
+	}
+	var redeemed []redeemedOffer
+
 	tx, err := s.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
@@ -1302,10 +1314,23 @@ func (s *OrdersService) ConfirmPayment(ctx context.Context, paymentRef string) (
 		if err := creditVendorTx(ctx, tx, t.storeID, t.id, t.totalKobo-t.deliveryFeeKobo, t.deliveryFeeKobo, vendorDelivers, paymentRef); err != nil {
 			return nil, err
 		}
+		offerIDs, err := redeemOffersTx(ctx, tx, t.id)
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range offerIDs {
+			redeemed = append(redeemed, redeemedOffer{storeID: t.storeID, offerID: id})
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
+	}
+	for _, r := range redeemed {
+		go s.broker.Publish(r.storeID.String(), sse.Event{
+			Type: "offer_updated",
+			Data: fmt.Sprintf(`{"offer_id":%q,"status":"redeemed"}`, r.offerID),
+		})
 	}
 
 	confirmed, err := s.findOrdersByPaymentRef(ctx, paymentRef)

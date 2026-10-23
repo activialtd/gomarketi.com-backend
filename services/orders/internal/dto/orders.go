@@ -129,6 +129,9 @@ type CreateOrderItem struct {
 	ImageURL  string `json:"image_url"`
 	Quantity  int32  `json:"quantity"   validate:"required,min=1"`
 	PriceKobo int64  `json:"price_kobo" validate:"min=0"`
+	// OfferID buys the line at a negotiated price. The server checks it is an
+	// accepted deal for this product and buyer — see priceItems.
+	OfferID string `json:"offer_id" validate:"omitempty,uuid"`
 }
 
 // CreateOrderReq is the body for POST /v1/orders/public — called directly

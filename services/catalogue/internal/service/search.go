@@ -177,7 +177,7 @@ func (s *CatalogueService) searchProducts(ctx context.Context, q string, p Searc
 
 	query := fmt.Sprintf(`
 		SELECT p.id, p.store_id, p.name, p.description, p.category_id, p.price_kobo,
-		       p.stock, p.sku, p.images, p.tags, p.is_digital, p.is_published,
+		       p.stock, p.sku, p.images, p.tags, p.is_digital, p.is_published, p.is_negotiable,
 		       p.created_at, p.updated_at
 		FROM products p
 		WHERE %s
@@ -324,7 +324,7 @@ func (s *CatalogueService) relatedProducts(ctx context.Context, matches []dto.Pr
 
 	rows, err := s.db.QueryxContext(ctx, `
 		SELECT p.id, p.store_id, p.name, p.description, p.category_id, p.price_kobo,
-		       p.stock, p.sku, p.images, p.tags, p.is_digital, p.is_published,
+		       p.stock, p.sku, p.images, p.tags, p.is_digital, p.is_published, p.is_negotiable,
 		       p.created_at, p.updated_at
 		FROM products p
 		WHERE p.is_published = TRUE
