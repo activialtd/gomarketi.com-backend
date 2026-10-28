@@ -488,10 +488,14 @@ func (s *OrdersService) CreateOffer(ctx context.Context, req dto.CreateOfferReq)
 	return dto.CreateOfferResp{Offer: offer, BuyerToken: OfferToken(offerID)}, nil
 }
 
+// addOfferEvent records one move. The time is clock_timestamp(), not the
+// column default NOW(): NOW() is fixed for the whole transaction, so an
+// offer and its instant acceptance would tie and the thread could show the
+// acceptance before the offer.
 func addOfferEvent(ctx context.Context, tx *sqlx.Tx, offerID uuid.UUID, actor, action string, amount *int64, message string) error {
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO price_offer_events (offer_id, actor, action, amount_kobo, message)
-		VALUES ($1,$2,$3,$4,NULLIF($5,''))`,
+		INSERT INTO price_offer_events (offer_id, actor, action, amount_kobo, message, created_at)
+		VALUES ($1,$2,$3,$4,NULLIF($5,''),clock_timestamp())`,
 		offerID, actor, action, amount, message); err != nil {
 		return fmt.Errorf("record offer event: %w", err)
 	}
