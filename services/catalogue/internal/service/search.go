@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
 
 	"github.com/activialtd/gomarketi.com-backend/services/catalogue/internal/dto"
@@ -72,6 +73,7 @@ func (s *CatalogueService) Search(ctx context.Context, p SearchParams) (dto.Sear
 		Vendors:         []dto.VendorResult{},
 		RelatedProducts: []dto.ProductResp{},
 		Suggestions:     []string{},
+		Stores:          []dto.VendorResult{},
 	}
 
 	if include == "all" || include == "products" {
@@ -109,7 +111,90 @@ func (s *CatalogueService) Search(ctx context.Context, p SearchParams) (dto.Sear
 		resp.Suggestions = suggestions
 	}
 
+	stores, err := s.storesOf(ctx, resp.Products, resp.RelatedProducts)
+	if err != nil {
+		return dto.SearchResp{}, err
+	}
+	resp.Stores = stores
+
 	return resp, nil
+}
+
+// vendorColumns is the SELECT list scanVendor reads, over stores s joined to
+// markets m.
+const vendorColumns = `s.id, s.name, s.slug, s.category, s.tagline, s.logo_url,
+	s.city, s.state, s.market_id, m.name AS market_name,
+	(SELECT COUNT(*) FROM products pr
+	  WHERE pr.store_id = s.id AND pr.is_published = TRUE) AS product_count`
+
+func scanVendor(rows *sqlx.Rows) (dto.VendorResult, error) {
+	var (
+		v          dto.VendorResult
+		tagline    sql.NullString
+		logoURL    sql.NullString
+		city       sql.NullString
+		state      sql.NullString
+		marketID   uuid.NullUUID
+		marketName sql.NullString
+	)
+	if err := rows.Scan(
+		&v.ID, &v.Name, &v.Slug, &v.Category, &tagline, &logoURL,
+		&city, &state, &marketID, &marketName, &v.ProductCount,
+	); err != nil {
+		return dto.VendorResult{}, err
+	}
+	v.Tagline = nullStrPtr(tagline)
+	v.LogoURL = nullStrPtr(logoURL)
+	v.City = nullStrPtr(city)
+	v.State = nullStrPtr(state)
+	v.MarketName = nullStrPtr(marketName)
+	if marketID.Valid {
+		id := marketID.UUID.String()
+		v.MarketID = &id
+	}
+	return v, nil
+}
+
+// storesOf returns the store behind every product in the given lists.
+//
+// A product needs its seller to be shown at all, and the vendor results only
+// hold stores that matched the query themselves: searching "suit" finds the
+// suit but not "Ada Fashion House", and a client that labels products from
+// the vendor results had nothing to label it with.
+func (s *CatalogueService) storesOf(ctx context.Context, lists ...[]dto.ProductResp) ([]dto.VendorResult, error) {
+	seen := map[string]bool{}
+	ids := make([]string, 0)
+	for _, list := range lists {
+		for _, p := range list {
+			if !seen[p.StoreID] {
+				seen[p.StoreID] = true
+				ids = append(ids, p.StoreID)
+			}
+		}
+	}
+	if len(ids) == 0 {
+		return []dto.VendorResult{}, nil
+	}
+
+	rows, err := s.db.QueryxContext(ctx, `
+		SELECT `+vendorColumns+`
+		FROM stores s
+		LEFT JOIN markets m ON m.id = s.market_id
+		WHERE s.id = ANY($1::uuid[])`, pq.Array(ids))
+	if err != nil {
+		return nil, fmt.Errorf("stores of products: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]dto.VendorResult, 0, len(ids))
+	for rows.Next() {
+		v, err := scanVendor(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan product store: %w", err)
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
 }
 
 // searchProducts ranks published products against the query. An empty query
@@ -177,7 +262,7 @@ func (s *CatalogueService) searchProducts(ctx context.Context, q string, p Searc
 
 	query := fmt.Sprintf(`
 		SELECT p.id, p.store_id, p.name, p.description, p.category_id, p.price_kobo,
-		       p.stock, p.sku, p.images, p.tags, p.is_digital, p.is_published,
+		       p.stock, p.sku, p.images, p.tags, p.is_digital, p.is_published, p.is_negotiable,
 		       p.created_at, p.updated_at
 		FROM products p
 		WHERE %s
@@ -243,10 +328,7 @@ func (s *CatalogueService) searchVendors(ctx context.Context, q string, limit, o
 	args = append(args, limit+1, offset)
 
 	query := fmt.Sprintf(`
-		SELECT s.id, s.name, s.slug, s.category, s.tagline, s.logo_url,
-		       s.city, s.state, s.market_id, m.name AS market_name,
-		       (SELECT COUNT(*) FROM products pr
-		         WHERE pr.store_id = s.id AND pr.is_published = TRUE) AS product_count
+		SELECT `+vendorColumns+`
 		FROM stores s
 		LEFT JOIN markets m ON m.id = s.market_id
 		WHERE %s
@@ -262,29 +344,9 @@ func (s *CatalogueService) searchVendors(ctx context.Context, q string, limit, o
 
 	out := make([]dto.VendorResult, 0)
 	for rows.Next() {
-		var (
-			v          dto.VendorResult
-			tagline    sql.NullString
-			logoURL    sql.NullString
-			city       sql.NullString
-			state      sql.NullString
-			marketID   uuid.NullUUID
-			marketName sql.NullString
-		)
-		if err := rows.Scan(
-			&v.ID, &v.Name, &v.Slug, &v.Category, &tagline, &logoURL,
-			&city, &state, &marketID, &marketName, &v.ProductCount,
-		); err != nil {
+		v, err := scanVendor(rows)
+		if err != nil {
 			return nil, false, fmt.Errorf("scan vendor: %w", err)
-		}
-		v.Tagline = nullStrPtr(tagline)
-		v.LogoURL = nullStrPtr(logoURL)
-		v.City = nullStrPtr(city)
-		v.State = nullStrPtr(state)
-		v.MarketName = nullStrPtr(marketName)
-		if marketID.Valid {
-			id := marketID.UUID.String()
-			v.MarketID = &id
 		}
 		out = append(out, v)
 	}
@@ -324,7 +386,7 @@ func (s *CatalogueService) relatedProducts(ctx context.Context, matches []dto.Pr
 
 	rows, err := s.db.QueryxContext(ctx, `
 		SELECT p.id, p.store_id, p.name, p.description, p.category_id, p.price_kobo,
-		       p.stock, p.sku, p.images, p.tags, p.is_digital, p.is_published,
+		       p.stock, p.sku, p.images, p.tags, p.is_digital, p.is_published, p.is_negotiable,
 		       p.created_at, p.updated_at
 		FROM products p
 		WHERE p.is_published = TRUE

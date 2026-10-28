@@ -4,6 +4,8 @@ package dto
 // ── Products ──────────────────────────────────────────────────────────────────
 
 // CreateProductReq is the body for POST /v1/catalogue/products.
+// IsNegotiable opens the product to buyer offers; MinPriceKobo is then
+// required — the lowest price the vendor will take, never shown to buyers.
 type CreateProductReq struct {
 	Name                string   `json:"name"                  validate:"required,min=1,max=500"`
 	Description         *string  `json:"description"`
@@ -15,10 +17,13 @@ type CreateProductReq struct {
 	Tags                []string `json:"tags"`
 	IsDigital           bool     `json:"is_digital"`
 	CanonicalProductID  *string  `json:"canonical_product_id"  validate:"omitempty,uuid"`
+	IsNegotiable        bool     `json:"is_negotiable"`
+	MinPriceKobo        *int64   `json:"min_price_kobo"        validate:"omitempty,min=1"`
 }
 
 // UpdateProductReq is the body for PATCH /v1/catalogue/products/:id.
-// All fields are optional (PATCH semantics).
+// All fields are optional (PATCH semantics). IsNegotiable false clears the
+// floor; true needs one, sent now or already stored.
 type UpdateProductReq struct {
 	Name               *string  `json:"name"                 validate:"omitempty,min=1,max=500"`
 	Description        *string  `json:"description"`
@@ -29,9 +34,13 @@ type UpdateProductReq struct {
 	Images             []string `json:"images"`
 	Tags               []string `json:"tags"`
 	CanonicalProductID *string  `json:"canonical_product_id" validate:"omitempty,uuid"`
+	IsNegotiable       *bool    `json:"is_negotiable"`
+	MinPriceKobo       *int64   `json:"min_price_kobo"       validate:"omitempty,min=1"`
 }
 
 // ProductResp is returned for any product read or write operation.
+// MinPriceKobo, the negotiation floor, is set only on the vendor's own
+// endpoints, never on a public one.
 type ProductResp struct {
 	ID                 string   `json:"id"`
 	StoreID            string   `json:"store_id"`
@@ -45,6 +54,8 @@ type ProductResp struct {
 	Tags               []string `json:"tags"`
 	IsDigital          bool     `json:"is_digital"`
 	IsPublished        bool     `json:"is_published"`
+	IsNegotiable       bool     `json:"is_negotiable"`
+	MinPriceKobo       *int64   `json:"min_price_kobo,omitempty"`
 	CanonicalProductID *string  `json:"canonical_product_id,omitempty"`
 	CreatedAt          string   `json:"created_at"`
 	UpdatedAt          string   `json:"updated_at"`
@@ -193,6 +204,10 @@ type SearchResp struct {
 	// Suggestions are query completions drawn from product names and tags,
 	// for the "did you mean" / autocomplete row.
 	Suggestions []string `json:"suggestions"`
+	// Stores is the seller of every product in Products and RelatedProducts,
+	// whether or not that store matched the query — Vendors only holds the
+	// ones that did.
+	Stores []VendorResult `json:"stores"`
 }
 
 

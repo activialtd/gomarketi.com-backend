@@ -32,7 +32,7 @@ func (h *Handler) ListPublicProductsByQuery(c *gin.Context) {
 		q = &v
 	}
 
-	resp, err := h.svc.ListProducts(c.Request.Context(), storeID, page, perPage, catID, q, true)
+	resp, err := h.svc.ListProducts(c.Request.Context(), storeID, page, perPage, catID, q, true, false)
 	if err != nil {
 		h.writeError(c, err)
 		return
@@ -125,6 +125,9 @@ func (h *Handler) GetPublicProduct(c *gin.Context) {
 		c.JSON(http.StatusNotFound, dto.ErrorResp{Error: "product not found"})
 		return
 	}
+	// GetProduct is the vendor's read, so it carries the negotiation floor —
+	// which a buyer must never see.
+	resp.MinPriceKobo = nil
 	c.JSON(http.StatusOK, resp)
 }
 
@@ -148,7 +151,7 @@ func (h *Handler) ListPublicProducts(c *gin.Context) {
 		q = &v
 	}
 
-	resp, err := h.svc.ListProducts(c.Request.Context(), storeID, page, perPage, catID, q, true)
+	resp, err := h.svc.ListProducts(c.Request.Context(), storeID, page, perPage, catID, q, true, false)
 	if err != nil {
 		h.writeError(c, err)
 		return
@@ -183,7 +186,7 @@ func (h *Handler) ListProducts(c *gin.Context) {
 	}
 	publishedOnly := c.Query("published") == "true"
 
-	resp, err := h.svc.ListProducts(c.Request.Context(), storeID, page, perPage, categoryID, q, publishedOnly)
+	resp, err := h.svc.ListProducts(c.Request.Context(), storeID, page, perPage, categoryID, q, publishedOnly, true)
 	if err != nil {
 		h.writeError(c, err)
 		return

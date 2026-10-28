@@ -14,9 +14,9 @@ import (
 	"github.com/lib/pq"
 	"github.com/rs/zerolog"
 
+	"github.com/activialtd/gomarketi.com-backend/services/catalogue/internal/dto"
 	apperrors "github.com/activialtd/gomarketi.com-backend/shared/pkg/errors"
 	"github.com/activialtd/gomarketi.com-backend/shared/pkg/planlimits"
-	"github.com/activialtd/gomarketi.com-backend/services/catalogue/internal/dto"
 )
 
 type CatalogueService struct {
@@ -30,7 +30,9 @@ func New(db *sqlx.DB, log zerolog.Logger) *CatalogueService {
 
 // ── Products ──────────────────────────────────────────────────────────────────
 
-func (s *CatalogueService) ListProducts(ctx context.Context, storeID uuid.UUID, page, perPage int, categoryID *string, q *string, publishedOnly bool) (dto.ProductListResp, error) {
+// vendorView includes the vendor's private negotiation floor; the public
+// storefront listing must pass false.
+func (s *CatalogueService) ListProducts(ctx context.Context, storeID uuid.UUID, page, perPage int, categoryID *string, q *string, publishedOnly, vendorView bool) (dto.ProductListResp, error) {
 	if page < 1 {
 		page = 1
 	}
@@ -67,7 +69,7 @@ func (s *CatalogueService) ListProducts(ctx context.Context, storeID uuid.UUID, 
 	orderArgs := append(args, perPage, offset)
 	rows, err := s.db.QueryxContext(ctx,
 		`SELECT id, store_id, name, description, category_id, price_kobo, stock, sku,
-		        images, tags, is_digital, is_published, canonical_product_id, created_at, updated_at `+
+		        images, tags, is_digital, is_published, is_negotiable, min_price_kobo, canonical_product_id, created_at, updated_at `+
 			base+fmt.Sprintf(` ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, i, i+1),
 		orderArgs...)
 	if err != nil {
@@ -81,7 +83,11 @@ func (s *CatalogueService) ListProducts(ctx context.Context, storeID uuid.UUID, 
 		if err := rows.StructScan(&r); err != nil {
 			return dto.ProductListResp{}, err
 		}
-		products = append(products, rowToProduct(r))
+		if vendorView {
+			products = append(products, rowToVendorProduct(r))
+		} else {
+			products = append(products, rowToProduct(r))
+		}
 	}
 	return dto.ProductListResp{Products: products, Total: total, Page: page, PerPage: perPage}, nil
 }
@@ -156,7 +162,7 @@ func (s *CatalogueService) SearchProducts(ctx context.Context, storeIDs []string
 	listArgs := append(args, perPage, offset)
 	rows, err := s.db.QueryxContext(ctx,
 		`SELECT id, store_id, name, description, category_id, price_kobo, stock, sku,
-		        images, tags, is_digital, is_published, canonical_product_id, created_at, updated_at `+
+		        images, tags, is_digital, is_published, is_negotiable, min_price_kobo, canonical_product_id, created_at, updated_at `+
 			base+fmt.Sprintf(` ORDER BY %s DESC, (canonical_product_id IS NOT NULL) DESC, created_at DESC LIMIT $%d OFFSET $%d`, rank, i, i+1),
 		listArgs...)
 	if err != nil {
@@ -199,6 +205,10 @@ func (s *CatalogueService) CreateProduct(ctx context.Context, storeID uuid.UUID,
 	if maxImg := limits.MaxImagesPerProduct(); len(req.Images) > maxImg {
 		return dto.ProductResp{}, apperrors.BadRequest(fmt.Sprintf("your plan allows up to %d images per product", maxImg))
 	}
+	minPrice, err := negotiationFloor(req.IsNegotiable, req.MinPriceKobo, req.PriceKobo)
+	if err != nil {
+		return dto.ProductResp{}, err
+	}
 
 	tx, err := s.db.BeginTxx(ctx, nil)
 	if err != nil {
@@ -213,13 +223,14 @@ func (s *CatalogueService) CreateProduct(ctx context.Context, storeID uuid.UUID,
 
 	var r productRow
 	err = tx.QueryRowxContext(ctx, `
-		INSERT INTO products (store_id, name, description, category_id, price_kobo, stock, sku, images, tags, is_digital, canonical_product_id)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+		INSERT INTO products (store_id, name, description, category_id, price_kobo, stock, sku, images, tags, is_digital, canonical_product_id, is_negotiable, min_price_kobo)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		RETURNING id, store_id, name, description, category_id, price_kobo, stock, sku,
-		          images, tags, is_digital, is_published, canonical_product_id, created_at, updated_at`,
+		          images, tags, is_digital, is_published, is_negotiable, min_price_kobo, canonical_product_id, created_at, updated_at`,
 		storeID, req.Name, req.Description, req.CategoryID,
 		req.PriceKobo, req.Stock, req.SKU,
 		pq.Array(req.Images), pq.Array(req.Tags), req.IsDigital, canonicalID,
+		req.IsNegotiable, minPrice,
 	).StructScan(&r)
 	if err != nil {
 		return dto.ProductResp{}, fmt.Errorf("create product: %w", err)
@@ -228,7 +239,23 @@ func (s *CatalogueService) CreateProduct(ctx context.Context, storeID uuid.UUID,
 	if err := tx.Commit(); err != nil {
 		return dto.ProductResp{}, fmt.Errorf("commit: %w", err)
 	}
-	return rowToProduct(r), nil
+	return rowToVendorProduct(r), nil
+}
+
+// errBadFloor is the one message for every way a negotiation range can be
+// wrong, so the create and edit forms read the same whichever check caught it.
+var errBadFloor = apperrors.BadRequest("the lowest price you'll accept must be more than ₦0 and below the selling price")
+
+// negotiationFloor validates a new product's negotiation range and returns
+// the floor to store: nil for a fixed-price product, whatever was sent.
+func negotiationFloor(isNegotiable bool, minPriceKobo *int64, priceKobo int64) (*int64, error) {
+	if !isNegotiable {
+		return nil, nil
+	}
+	if minPriceKobo == nil || *minPriceKobo <= 0 || *minPriceKobo >= priceKobo {
+		return nil, errBadFloor
+	}
+	return minPriceKobo, nil
 }
 
 // resolveCanonicalProductID returns the canonical product ID a new listing
@@ -295,9 +322,9 @@ func (s *CatalogueService) SearchCanonicalProducts(ctx context.Context, q string
 }
 
 type canonicalProductRow struct {
-	ID                   uuid.UUID      `db:"id"`
-	Name                 string         `db:"name"`
-	RepresentativeImage  sql.NullString `db:"representative_image"`
+	ID                  uuid.UUID      `db:"id"`
+	Name                string         `db:"name"`
+	RepresentativeImage sql.NullString `db:"representative_image"`
 }
 
 func rowToCanonicalProduct(r canonicalProductRow) dto.CanonicalProductResp {
@@ -314,7 +341,7 @@ func (s *CatalogueService) GetPublicProductByID(ctx context.Context, productID u
 	var r productRow
 	err := s.db.QueryRowxContext(ctx, `
 		SELECT id, store_id, name, description, category_id, price_kobo, stock, sku,
-		       images, tags, is_digital, is_published, canonical_product_id, created_at, updated_at
+		       images, tags, is_digital, is_published, is_negotiable, min_price_kobo, canonical_product_id, created_at, updated_at
 		FROM products WHERE id=$1 AND is_published=TRUE`, productID).StructScan(&r)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.ProductResp{}, apperrors.NotFound("product not found")
@@ -329,7 +356,7 @@ func (s *CatalogueService) GetProduct(ctx context.Context, storeID uuid.UUID, pr
 	var r productRow
 	err := s.db.QueryRowxContext(ctx, `
 		SELECT id, store_id, name, description, category_id, price_kobo, stock, sku,
-		       images, tags, is_digital, is_published, canonical_product_id, created_at, updated_at
+		       images, tags, is_digital, is_published, is_negotiable, min_price_kobo, canonical_product_id, created_at, updated_at
 		FROM products WHERE id=$1 AND store_id=$2`, productID, storeID).StructScan(&r)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.ProductResp{}, apperrors.NotFound("product not found")
@@ -337,7 +364,7 @@ func (s *CatalogueService) GetProduct(ctx context.Context, storeID uuid.UUID, pr
 	if err != nil {
 		return dto.ProductResp{}, fmt.Errorf("get product: %w", err)
 	}
-	return rowToProduct(r), nil
+	return rowToVendorProduct(r), nil
 }
 
 // UpdateProduct only touches canonical_product_id when the vendor explicitly
@@ -358,14 +385,18 @@ func (s *CatalogueService) UpdateProduct(ctx context.Context, storeID uuid.UUID,
 			images               = CASE WHEN $7::text[] IS NOT NULL THEN $7 ELSE images END,
 			tags                 = CASE WHEN $8::text[] IS NOT NULL THEN $8 ELSE tags END,
 			canonical_product_id = COALESCE($9::uuid, canonical_product_id),
+			is_negotiable        = COALESCE($12, is_negotiable),
+			min_price_kobo       = CASE WHEN $12 = FALSE THEN NULL
+			                            WHEN $13::bigint IS NOT NULL THEN $13
+			                            ELSE min_price_kobo END,
 			updated_at           = NOW()
 		WHERE id=$10 AND store_id=$11
 		RETURNING id, store_id, name, description, category_id, price_kobo, stock, sku,
-		          images, tags, is_digital, is_published, canonical_product_id, created_at, updated_at`,
+		          images, tags, is_digital, is_published, is_negotiable, min_price_kobo, canonical_product_id, created_at, updated_at`,
 		req.Name, req.Description, req.CategoryID,
 		req.PriceKobo, req.Stock, req.SKU,
 		pq.Array(req.Images), pq.Array(req.Tags), req.CanonicalProductID,
-		productID, storeID,
+		productID, storeID, req.IsNegotiable, req.MinPriceKobo,
 	).StructScan(&r)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.ProductResp{}, apperrors.NotFound("product not found")
@@ -373,10 +404,17 @@ func (s *CatalogueService) UpdateProduct(ctx context.Context, storeID uuid.UUID,
 	if isFKViolation(err) {
 		return dto.ProductResp{}, apperrors.BadRequest("canonical_product_id does not exist")
 	}
+	// The range is checked by the products_negotiable_floor constraint rather
+	// than here, because an edit can break it from either end — a new floor,
+	// or a new price that drops below the existing floor — and only the row
+	// knows both.
+	if isCheckViolation(err) {
+		return dto.ProductResp{}, errBadFloor
+	}
 	if err != nil {
 		return dto.ProductResp{}, fmt.Errorf("update product: %w", err)
 	}
-	return rowToProduct(r), nil
+	return rowToVendorProduct(r), nil
 }
 
 func (s *CatalogueService) DeleteProduct(ctx context.Context, storeID uuid.UUID, productID uuid.UUID) error {
@@ -404,7 +442,7 @@ func (s *CatalogueService) setPublished(ctx context.Context, storeID, productID 
 		UPDATE products SET is_published=$1, updated_at=NOW()
 		WHERE id=$2 AND store_id=$3
 		RETURNING id, store_id, name, description, category_id, price_kobo, stock, sku,
-		          images, tags, is_digital, is_published, canonical_product_id, created_at, updated_at`,
+		          images, tags, is_digital, is_published, is_negotiable, min_price_kobo, canonical_product_id, created_at, updated_at`,
 		published, productID, storeID).StructScan(&r)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dto.ProductResp{}, apperrors.NotFound("product not found")
@@ -412,7 +450,7 @@ func (s *CatalogueService) setPublished(ctx context.Context, storeID, productID 
 	if err != nil {
 		return dto.ProductResp{}, fmt.Errorf("set published: %w", err)
 	}
-	return rowToProduct(r), nil
+	return rowToVendorProduct(r), nil
 }
 
 // ── Categories ────────────────────────────────────────────────────────────────
@@ -496,6 +534,8 @@ type productRow struct {
 	Tags               pq.StringArray `db:"tags"`
 	IsDigital          bool           `db:"is_digital"`
 	IsPublished        bool           `db:"is_published"`
+	IsNegotiable       bool           `db:"is_negotiable"`
+	MinPriceKobo       sql.NullInt64  `db:"min_price_kobo"`
 	CanonicalProductID sql.NullString `db:"canonical_product_id"`
 	CreatedAt          time.Time      `db:"created_at"`
 	UpdatedAt          time.Time      `db:"updated_at"`
@@ -508,6 +548,8 @@ type categoryRow struct {
 	ParentID sql.NullString `db:"parent_id"`
 }
 
+// rowToProduct is the public shape of a product. It never carries the
+// negotiation floor — a buyer who could see it would simply offer it.
 func rowToProduct(r productRow) dto.ProductResp {
 	images := []string(r.Images)
 	if images == nil {
@@ -518,17 +560,18 @@ func rowToProduct(r productRow) dto.ProductResp {
 		tags = []string{}
 	}
 	p := dto.ProductResp{
-		ID:          r.ID.String(),
-		StoreID:     r.StoreID.String(),
-		Name:        r.Name,
-		PriceKobo:   r.PriceKobo,
-		Stock:       r.Stock,
-		Images:      images,
-		Tags:        tags,
-		IsDigital:   r.IsDigital,
-		IsPublished: r.IsPublished,
-		CreatedAt:   r.CreatedAt.UTC().Format(time.RFC3339),
-		UpdatedAt:   r.UpdatedAt.UTC().Format(time.RFC3339),
+		ID:           r.ID.String(),
+		StoreID:      r.StoreID.String(),
+		Name:         r.Name,
+		PriceKobo:    r.PriceKobo,
+		Stock:        r.Stock,
+		Images:       images,
+		Tags:         tags,
+		IsDigital:    r.IsDigital,
+		IsPublished:  r.IsPublished,
+		IsNegotiable: r.IsNegotiable,
+		CreatedAt:    r.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:    r.UpdatedAt.UTC().Format(time.RFC3339),
 	}
 	if r.Description.Valid {
 		p.Description = &r.Description.String
@@ -541,6 +584,16 @@ func rowToProduct(r productRow) dto.ProductResp {
 	}
 	if r.CanonicalProductID.Valid {
 		p.CanonicalProductID = &r.CanonicalProductID.String
+	}
+	return p
+}
+
+// rowToVendorProduct is rowToProduct plus the floor, for the vendor's own
+// dashboard endpoints only.
+func rowToVendorProduct(r productRow) dto.ProductResp {
+	p := rowToProduct(r)
+	if r.MinPriceKobo.Valid {
+		p.MinPriceKobo = &r.MinPriceKobo.Int64
 	}
 	return p
 }
@@ -739,6 +792,12 @@ func rowToCollection(r collectionRow) dto.CollectionResp {
 func isPGConflict(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+// isCheckViolation reports whether err is a CHECK constraint violation (SQLSTATE 23514).
+func isCheckViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23514"
 }
 
 // isFKViolation reports whether err is a foreign-key violation (SQLSTATE 23503).
