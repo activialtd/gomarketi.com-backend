@@ -204,6 +204,10 @@ type SearchResp struct {
 	// Suggestions are query completions drawn from product names and tags,
 	// for the "did you mean" / autocomplete row.
 	Suggestions []string `json:"suggestions"`
+	// Stores is the seller of every product in Products and RelatedProducts,
+	// whether or not that store matched the query — Vendors only holds the
+	// ones that did.
+	Stores []VendorResult `json:"stores"`
 }
 
 
