@@ -1,4 +1,4 @@
-# GoMarket Backend — top-level Makefile
+# Wojalo Backend — top-level Makefile
 # Always run from the repo root (gomarketi.com-backend/).
 
 .PHONY: help docker-up docker-down docker-logs migrate dva-audit payment-audit gen tidy test \
@@ -95,7 +95,7 @@ gen-keys:
 
 help:
 	@echo ""
-	@echo "  GoMarket Backend"
+	@echo "  Wojalo Backend"
 	@echo ""
 	@echo "  docker-up       Start all infra containers"
 	@echo "  docker-down     Stop all infra containers"

@@ -32,7 +32,7 @@ func NewBrevo(apiKey, from, fromName string) *BrevoMailer {
 		return nil
 	}
 	if fromName == "" {
-		fromName = "GoMarket"
+		fromName = "Wojalo"
 	}
 	return &BrevoMailer{
 		apiKey:   apiKey,
@@ -47,14 +47,14 @@ func (c *BrevoMailer) SendWelcome(ctx context.Context, to, vendorName, storeName
 
 	storeURL := fmt.Sprintf("https://%s.%s", storeSlug, storeDomain)
 	if storeDomain == "" {
-		storeDomain = "gomarketi.com"
-		storeURL = fmt.Sprintf("https://%s.gomarketi.com", storeSlug)
+		storeDomain = "wojalo.com"
+		storeURL = fmt.Sprintf("https://%s.wojalo.com", storeSlug)
 	}
 
 	payload := map[string]any{
 		"sender":      map[string]string{"email": c.from, "name": c.fromName},
 		"to":          []map[string]string{{"email": to, "name": vendorName}},
-		"subject":     fmt.Sprintf("Your GoMarketi store %s is live!", storeName),
+		"subject":     fmt.Sprintf("Your Wojalo store %s is live!", storeName),
 		"htmlContent": welcomeHTML(vendorName, storeName, storeURL, storeSlug),
 	}
 
@@ -90,7 +90,7 @@ func welcomeHTML(vendorName, storeName, storeURL, storeSlug string) string {
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-  <title>Welcome to GoMarketi</title>
+  <title>Welcome to Wojalo</title>
 </head>
 <body style="margin:0;padding:0;background:#f4f7f6;font-family:'Segoe UI',Arial,sans-serif;">
 
@@ -106,7 +106,7 @@ func welcomeHTML(vendorName, storeName, storeURL, storeSlug string) string {
                  attachment breaks in webmail, so this is a hosted PNG,
                  flattened onto white because some Outlook builds composite
                  alpha against black. -->
-            <img src="`+brandMark()+`" width="150" alt="GoMarket" style="display:block;border:0;width:150px;height:auto;">
+            <img src="`+brandMark()+`" width="150" alt="Wojalo" style="display:block;border:0;width:150px;height:auto;">
           </td>
         </tr>
 
@@ -118,7 +118,7 @@ func welcomeHTML(vendorName, storeName, storeURL, storeSlug string) string {
                 Your store is live!
               </h1>
               <p style="margin:0;color:rgba(255,255,255,0.65);font-size:16px;line-height:1.5;">
-                Welcome to GoMarketi, %s. Your storefront is ready and waiting for its first customer.
+                Welcome to Wojalo, %s. Your storefront is ready and waiting for its first customer.
               </p>
             </div>
           </td>
@@ -158,7 +158,7 @@ func welcomeHTML(vendorName, storeName, storeURL, storeSlug string) string {
             <!-- Footer note -->
             <p style="margin:0;color:#94a3b8;font-size:13px;line-height:1.6;text-align:center;">
               Questions? Reply to this email or chat with us at
-              <a href="https://gomarketi.com" style="color:#1A7A42;text-decoration:none;">gomarketi.com</a>.
+              <a href="https://wojalo.com" style="color:#1A7A42;text-decoration:none;">wojalo.com</a>.
             </p>
           </td>
         </tr>
@@ -167,9 +167,9 @@ func welcomeHTML(vendorName, storeName, storeURL, storeSlug string) string {
         <tr>
           <td style="padding:24px 0 0;text-align:center;">
             <p style="margin:0;color:#b0bec5;font-size:12px;">
-              © 2026 GoMarketi · Helping Nigerian merchants sell online<br/>
-              <a href="https://vendor.gomarketi.com" style="color:#94a3b8;text-decoration:none;">Dashboard</a> ·
-              <a href="https://gomarketi.com/privacy" style="color:#94a3b8;text-decoration:none;">Privacy</a>
+              © 2026 Wojalo · Helping Nigerian merchants sell online<br/>
+              <a href="https://vendor.wojalo.com" style="color:#94a3b8;text-decoration:none;">Dashboard</a> ·
+              <a href="https://wojalo.com/privacy" style="color:#94a3b8;text-decoration:none;">Privacy</a>
             </p>
           </td>
         </tr>
@@ -188,7 +188,7 @@ func nextStepsRows() string {
 	steps := []struct{ icon, title, desc string }{
 		{"📦", "Add your first product", "Upload photos, set your price, and publish in under 2 minutes."},
 		{"🎨", "Customise your storefront", "Choose colours, fonts, and your store layout — no code needed."},
-		{"✅", "Complete KYC verification", "Verify your identity to unlock automated payouts and the GoMarketi badge."},
+		{"✅", "Complete KYC verification", "Verify your identity to unlock automated payouts and the Wojalo badge."},
 		{"📣", "Share your store link", "Send your store URL to customers on WhatsApp, Instagram, or anywhere."},
 	}
 	out := ""

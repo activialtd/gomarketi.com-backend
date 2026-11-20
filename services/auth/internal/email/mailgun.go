@@ -22,8 +22,8 @@ type MailgunClient struct {
 // MailgunConfig holds the credentials and sender identity for Mailgun.
 type MailgunConfig struct {
 	APIKey string // Mailgun private API key
-	Domain string // e.g. "mg.gomarketi.com"
-	From   string // e.g. "GoMarket <noreply@gomarketi.com>"
+	Domain string // e.g. "mg.wojalo.com"
+	From   string // e.g. "Wojalo <noreply@wojalo.com>"
 }
 
 // NewMailgunClient creates a MailgunClient. All fields in cfg are required.
@@ -43,12 +43,12 @@ func NewMailgunClient(cfg MailgunConfig) (*MailgunClient, error) {
 
 // SendOTP sends a verification code email to the given address.
 func (m *MailgunClient) SendOTP(ctx context.Context, to, otp string) error {
-	return m.sendCode(ctx, to, "Your GoMarket verification code", otpEmailText(otp), otpEmailHTML(otp))
+	return m.sendCode(ctx, to, "Your Wojalo verification code", otpEmailText(otp), otpEmailHTML(otp))
 }
 
 // SendPasswordReset sends a password reset code email to the given address.
 func (m *MailgunClient) SendPasswordReset(ctx context.Context, to, otp string) error {
-	return m.sendCode(ctx, to, "Reset your GoMarket password", resetEmailText(otp), resetEmailHTML(otp))
+	return m.sendCode(ctx, to, "Reset your Wojalo password", resetEmailText(otp), resetEmailHTML(otp))
 }
 
 func (m *MailgunClient) sendCode(ctx context.Context, to, subject, text, html string) error {
@@ -85,7 +85,7 @@ func (m *MailgunClient) sendCode(ctx context.Context, to, subject, text, html st
 
 func otpEmailText(otp string) string {
 	return fmt.Sprintf(
-		"Your GoMarket verification code is: %s\n\nThis code expires in 10 minutes.\nDo not share it with anyone.",
+		"Your Wojalo verification code is: %s\n\nThis code expires in 10 minutes.\nDo not share it with anyone.",
 		otp,
 	)
 }
@@ -94,7 +94,7 @@ func otpEmailHTML(otp string) string {
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html>
 <body style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px 16px;">
-  <h2 style="color:#1a1a1a;">Your GoMarket code</h2>
+  <h2 style="color:#1a1a1a;">Your Wojalo code</h2>
   <p style="font-size:14px;color:#555;">Use the code below to verify your email address.</p>
   <div style="background:#f5f5f5;border-radius:8px;padding:24px;text-align:center;margin:24px 0;">
     <span style="font-size:36px;font-weight:700;letter-spacing:8px;color:#1a1a1a;">%s</span>
@@ -106,7 +106,7 @@ func otpEmailHTML(otp string) string {
 
 func resetEmailText(otp string) string {
 	return fmt.Sprintf(
-		"Your GoMarket password reset code is: %s\n\nThis code expires in 10 minutes.\nIf you didn't request this, ignore this email — your password won't be changed.",
+		"Your Wojalo password reset code is: %s\n\nThis code expires in 10 minutes.\nIf you didn't request this, ignore this email — your password won't be changed.",
 		otp,
 	)
 }
@@ -115,7 +115,7 @@ func resetEmailHTML(otp string) string {
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html>
 <body style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px 16px;">
-  <h2 style="color:#1a1a1a;">Reset your GoMarket password</h2>
+  <h2 style="color:#1a1a1a;">Reset your Wojalo password</h2>
   <p style="font-size:14px;color:#555;">Use the code below to reset your password.</p>
   <div style="background:#f5f5f5;border-radius:8px;padding:24px;text-align:center;margin:24px 0;">
     <span style="font-size:36px;font-weight:700;letter-spacing:8px;color:#1a1a1a;">%s</span>

@@ -112,7 +112,7 @@ func (s *OrdersService) HandlePaystackWebhook(ctx context.Context, body []byte) 
 
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO wallet_transactions (store_id, type, amount_kobo, description, reference, status)
-		VALUES ($1, 'credit', $2, 'Direct bank transfer to your GoMarketi account', $3, 'completed')
+		VALUES ($1, 'credit', $2, 'Direct bank transfer to your Wojalo account', $3, 'completed')
 		ON CONFLICT (reference) DO NOTHING`,
 		storeID, evt.Data.Amount, evt.Data.Reference,
 	)

@@ -19,9 +19,9 @@ const (
 	OrderStatusPending   OrderStatus = "pending"
 	OrderStatusConfirmed OrderStatus = "confirmed"
 	// OrderStatusAtHub means the vendor has delivered this order's items to
-	// the central GoMarketi office (admin-confirmed hub intake).
+	// the central Wojalo office (admin-confirmed hub intake).
 	OrderStatusAtHub OrderStatus = "at_hub"
-	// OrderStatusShipped means GoMarketi has dispatched the (possibly
+	// OrderStatusShipped means Wojalo has dispatched the (possibly
 	// multi-vendor) consolidated batch from the hub to the customer — not
 	// that the vendor shipped it themselves.
 	OrderStatusShipped OrderStatus = "shipped"
@@ -71,16 +71,19 @@ const (
 // vendor is allowed to do with it.
 //
 // A basket spanning several vendors becomes several order rows sharing one
-// payment_reference. Those go through GoMarketi's hub: each vendor brings
-// their part in, and GoMarketi consolidates and dispatches one delivery, so
+// payment_reference. Those go through Wojalo's hub: each vendor brings
+// their part in, and Wojalo consolidates and dispatches one delivery, so
 // the vendor's last step is at_hub. An order that is the only one on its
 // reference is that vendor's own delivery end to end, so they mark it
 // shipped themselves and never see a hub step.
 type Fulfilment string
 
+// FulfilmentWojalo's wire value stays "gomarketi" from before the rebrand:
+// installed mobile apps compare against it, so changing it would make every
+// hub order look vendor-delivered to them.
 const (
-	FulfilmentVendor    Fulfilment = "vendor"
-	FulfilmentGoMarketi Fulfilment = "gomarketi"
+	FulfilmentVendor Fulfilment = "vendor"
+	FulfilmentWojalo   Fulfilment = "gomarketi"
 )
 
 type OrderResp struct {

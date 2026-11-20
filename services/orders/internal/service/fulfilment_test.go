@@ -25,13 +25,13 @@ func TestVendorMaySet(t *testing.T) {
 		{"vendor-delivered may cancel", dto.FulfilmentVendor, false, dto.OrderStatusCancelled, true},
 		{"vendor-delivered has no hub step", dto.FulfilmentVendor, false, dto.OrderStatusAtHub, false},
 
-		{"gomarketi-delivered may confirm", dto.FulfilmentGoMarketi, false, dto.OrderStatusConfirmed, true},
-		{"gomarketi-delivered may cancel", dto.FulfilmentGoMarketi, false, dto.OrderStatusCancelled, true},
-		{"gomarketi-delivered may NOT self-dispatch", dto.FulfilmentGoMarketi, false, dto.OrderStatusShipped, false},
-		{"gomarketi-delivered may NOT mark at hub", dto.FulfilmentGoMarketi, false, dto.OrderStatusAtHub, false},
+		{"hub-delivered may confirm", dto.FulfilmentWojalo, false, dto.OrderStatusConfirmed, true},
+		{"hub-delivered may cancel", dto.FulfilmentWojalo, false, dto.OrderStatusCancelled, true},
+		{"hub-delivered may NOT self-dispatch", dto.FulfilmentWojalo, false, dto.OrderStatusShipped, false},
+		{"hub-delivered may NOT mark at hub", dto.FulfilmentWojalo, false, dto.OrderStatusAtHub, false},
 
 		{"delivered is never vendor-settable", dto.FulfilmentVendor, false, dto.OrderStatusDelivered, false},
-		{"delivered is never settable on hub orders", dto.FulfilmentGoMarketi, false, dto.OrderStatusDelivered, false},
+		{"delivered is never settable on hub orders", dto.FulfilmentWojalo, false, dto.OrderStatusDelivered, false},
 		{"pending is not settable", dto.FulfilmentVendor, false, dto.OrderStatusPending, false},
 
 		// Collection: the vendor puts it on the counter, nobody dispatches it.
@@ -44,7 +44,7 @@ func TestVendorMaySet(t *testing.T) {
 
 		// A delivery cannot borrow the collection status.
 		{"delivered order is not ready for collection", dto.FulfilmentVendor, false, dto.OrderStatusReadyForCollection, false},
-		{"hub order is not ready for collection", dto.FulfilmentGoMarketi, false, dto.OrderStatusReadyForCollection, false},
+		{"hub order is not ready for collection", dto.FulfilmentWojalo, false, dto.OrderStatusReadyForCollection, false},
 	}
 
 	for _, tc := range cases {
@@ -62,7 +62,7 @@ func TestVendorMaySet(t *testing.T) {
 
 // TestVendorCreditAmount pins who earns the delivery fee. The fee follows
 // whoever does the delivering: a vendor running their own order end to end
-// earns it on top of the items, while on a multi-vendor basket GoMarketi
+// earns it on top of the items, while on a multi-vendor basket Wojalo
 // consolidates and delivers, so the fee is platform revenue.
 //
 // This mirrors the arithmetic in insertOrderTx. It is kept as its own test
@@ -84,8 +84,8 @@ func TestVendorCreditAmount(t *testing.T) {
 	}{
 		{"vendor delivers: earns items plus fee", 500_000, 150_000, true, 650_000},
 		{"vendor delivers, no fee charged", 500_000, 0, true, 500_000},
-		{"gomarketi delivers: items only", 500_000, 150_000, false, 500_000},
-		{"gomarketi delivers, no fee on the order row", 500_000, 0, false, 500_000},
+		{"hub delivers: items only", 500_000, 150_000, false, 500_000},
+		{"hub delivers, no fee on the order row", 500_000, 0, false, 500_000},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

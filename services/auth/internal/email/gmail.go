@@ -75,13 +75,13 @@ func (c *GmailClient) getAccessToken(ctx context.Context) (string, error) {
 }
 
 func (c *GmailClient) SendOTP(ctx context.Context, to, otp string) error {
-	return c.sendCode(ctx, to, "Your GoMarketi verification code",
+	return c.sendCode(ctx, to, "Your Wojalo verification code",
 		"Verify your email",
 		"Use the code below to complete your sign-in. It expires in 10 minutes.", otp)
 }
 
 func (c *GmailClient) SendPasswordReset(ctx context.Context, to, otp string) error {
-	return c.sendCode(ctx, to, "Reset your GoMarketi password",
+	return c.sendCode(ctx, to, "Reset your Wojalo password",
 		"Reset your password",
 		"Use the code below to reset your password. It expires in 10 minutes.", otp)
 }
@@ -94,7 +94,7 @@ func (c *GmailClient) sendCode(ctx context.Context, to, subject, heading, instru
 
 	// Build RFC 2822 message
 	raw := strings.Join([]string{
-		"From: GoMarketi <" + c.cfg.From + ">",
+		"From: Wojalo <" + c.cfg.From + ">",
 		"To: " + to,
 		"Subject: " + subject,
 		"MIME-Version: 1.0",

@@ -1,5 +1,5 @@
 // Package vercel registers store subdomains as domains on the storefront
-// Vercel project. The *.gomarketi.com wildcard already handles DNS routing
+// Vercel project. The *.wojalo.com wildcard already handles DNS routing
 // for any subdomain, but Vercel only issues a working SSL certificate for
 // domains that have been explicitly registered on the project — without
 // this, a freshly created store's subdomain loads over unencrypted HTTP
@@ -57,7 +57,7 @@ func New(cfg Config) (*Client, error) {
 	}, nil
 }
 
-// AddDomain registers domain (e.g. "cobi.gomarketi.com") on the configured
+// AddDomain registers domain (e.g. "cobi.wojalo.com") on the configured
 // project. Idempotent — a domain already registered on this project is
 // treated as success, not an error.
 func (c *Client) AddDomain(ctx context.Context, domain string) error {

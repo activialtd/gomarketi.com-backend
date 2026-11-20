@@ -29,7 +29,7 @@ func NewResend(apiKey, from string) *ResendMailer {
 		return nil
 	}
 	if from == "" {
-		from = "GoMarketi <noreply@gomarketi.com>"
+		from = "Wojalo <noreply@wojalo.com>"
 	}
 	return &ResendMailer{
 		apiKey: apiKey,
@@ -45,7 +45,7 @@ func (m *ResendMailer) SendAccountReady(ctx context.Context, to, vendorName, ban
 	payload := map[string]any{
 		"from":    m.from,
 		"to":      []string{to},
-		"subject": "Welcome to GoMarketi — your payment account is ready",
+		"subject": "Welcome to Wojalo — your payment account is ready",
 		"html":    accountReadyHTML(vendorName, bankName, accountNumber, accountName),
 	}
 	body, err := json.Marshal(payload)

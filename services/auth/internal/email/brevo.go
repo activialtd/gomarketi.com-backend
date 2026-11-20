@@ -23,8 +23,8 @@ type BrevoClient struct {
 
 type BrevoConfig struct {
 	APIKey   string // from Brevo dashboard → SMTP & API → API Keys
-	From     string // verified sender email e.g. noreply@gomarketi.com
-	FromName string // display name e.g. GoMarketi
+	From     string // verified sender email e.g. noreply@wojalo.com
+	FromName string // display name e.g. Wojalo
 }
 
 func NewBrevoClient(cfg BrevoConfig) (*BrevoClient, error) {
@@ -37,7 +37,7 @@ func NewBrevoClient(cfg BrevoConfig) (*BrevoClient, error) {
 	}
 	name := cfg.FromName
 	if name == "" {
-		name = "GoMarketi"
+		name = "Wojalo"
 	}
 	return &BrevoClient{
 		apiKey:     cfg.APIKey,
@@ -51,7 +51,7 @@ func (c *BrevoClient) SendOTP(ctx context.Context, to, otp string) error {
 	payload := map[string]any{
 		"sender":  map[string]string{"email": c.from, "name": c.fromName},
 		"to":      []map[string]string{{"email": to}},
-		"subject": "Your GoMarketi verification code",
+		"subject": "Your Wojalo verification code",
 		"htmlContent": fmt.Sprintf(`
 <div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px">
   <h2 style="color:#1a7a42;margin-bottom:8px">Verify your email</h2>
@@ -70,7 +70,7 @@ func (c *BrevoClient) SendPasswordReset(ctx context.Context, to, otp string) err
 	payload := map[string]any{
 		"sender":  map[string]string{"email": c.from, "name": c.fromName},
 		"to":      []map[string]string{{"email": to}},
-		"subject": "Reset your GoMarketi password",
+		"subject": "Reset your Wojalo password",
 		"htmlContent": fmt.Sprintf(`
 <div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px">
   <h2 style="color:#1a7a42;margin-bottom:8px">Reset your password</h2>

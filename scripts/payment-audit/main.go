@@ -195,7 +195,7 @@ func report(orphans []orphan) {
 func replay(ctx context.Context, orphans []orphan) {
 	base := strings.TrimRight(os.Getenv("ORDERS_API_URL"), "/")
 	if base == "" {
-		base = "https://api.gomarketi.com"
+		base = "https://api.wojalo.com"
 	}
 	client := &http.Client{Timeout: 30 * time.Second}
 

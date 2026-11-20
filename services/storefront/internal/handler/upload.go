@@ -39,12 +39,12 @@ const maxUploadSize = 5 << 20 // 5 MB
 
 // cloudinaryConfig reads Cloudinary credentials from the environment.
 // Required: CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET.
-// Optional: CLOUDINARY_FOLDER (defaults to "gomarketi").
+// Optional: CLOUDINARY_FOLDER (defaults to "wojalo").
 func cloudinaryConfig() (cloudName, apiKey, apiSecret, folder string, ok bool) {
 	cloudName = getenv("CLOUDINARY_CLOUD_NAME", "")
 	apiKey = getenv("CLOUDINARY_API_KEY", "")
 	apiSecret = getenv("CLOUDINARY_API_SECRET", "")
-	folder = getenv("CLOUDINARY_FOLDER", "gomarketi")
+	folder = getenv("CLOUDINARY_FOLDER", "wojalo")
 	ok = cloudName != "" && apiKey != "" && apiSecret != ""
 	return
 }

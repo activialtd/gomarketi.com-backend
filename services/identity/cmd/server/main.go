@@ -195,5 +195,5 @@ func resendFrom() string {
 			return v
 		}
 	}
-	return "GoMarketi <onboarding@resend.dev>"
+	return "Wojalo <onboarding@resend.dev>"
 }

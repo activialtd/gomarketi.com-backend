@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run all GoMarket services locally.
+# Run all Wojalo services locally.
 # Usage: ./dev.sh
 # Stop: Ctrl-C (kills all child processes)
 

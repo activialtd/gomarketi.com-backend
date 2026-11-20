@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deploy-railway.sh — set env vars and deploy GoMarketi services to Railway
+# deploy-railway.sh — set env vars and deploy Wojalo services to Railway
 #
 # Usage:
 #   ./deploy-railway.sh                        # deploy all → production
@@ -72,7 +72,7 @@ set_vars() {
         "JWT_PUBLIC_KEY_B64=$JWT_PUBLIC_KEY_B64"
         "BREVO_API_KEY=${BREVO_API_KEY:-}"
         "BREVO_FROM=${BREVO_FROM:-}"
-        "BREVO_FROM_NAME=${BREVO_FROM_NAME:-GoMarketi}"
+        "BREVO_FROM_NAME=${BREVO_FROM_NAME:-Wojalo}"
         "SMTP_HOST=${SMTP_HOST:-}"
         "SMTP_PORT=${SMTP_PORT:-}"
         "SMTP_USERNAME=${SMTP_USERNAME:-}"
@@ -98,8 +98,8 @@ set_vars() {
         "JWT_PUBLIC_KEY_B64=$JWT_PUBLIC_KEY_B64"
         "BREVO_API_KEY=${BREVO_API_KEY:-}"
         "BREVO_FROM=${BREVO_FROM:-}"
-        "BREVO_FROM_NAME=${BREVO_FROM_NAME:-GoMarketi}"
-        "STORE_DOMAIN=${STORE_DOMAIN:-gomarketi.com}"
+        "BREVO_FROM_NAME=${BREVO_FROM_NAME:-Wojalo}"
+        "STORE_DOMAIN=${STORE_DOMAIN:-wojalo.com}"
       )
       ;;
     *)

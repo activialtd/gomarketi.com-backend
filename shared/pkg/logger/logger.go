@@ -1,5 +1,5 @@
 // Package logger provides a zerolog-based structured JSON logger.
-// All GoMarket services log to stdout in production (JSON) and to stderr in
+// All Wojalo services log to stdout in production (JSON) and to stderr in
 // development (human-readable console format with coloured levels).
 package logger
 

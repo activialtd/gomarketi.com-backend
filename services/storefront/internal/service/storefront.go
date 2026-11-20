@@ -67,7 +67,7 @@ func New(db *sqlx.DB, emailer email.WelcomeMailer, domains vercel.Registrar, sto
 }
 
 // ── Slug validation ─────────────────────────────────────────────────────────
-// Slugs become live subdomains ({slug}.gomarketi.com) via Vercel domain
+// Slugs become live subdomains ({slug}.wojalo.com) via Vercel domain
 // registration, so they must be DNS-safe: lowercase letters/numbers/hyphens,
 // no leading/trailing hyphen. Also blocks slugs that would collide with a
 // platform subdomain already in use.

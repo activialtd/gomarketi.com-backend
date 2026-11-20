@@ -26,7 +26,7 @@ func NewResend(apiKey, from string) *ResendMailer {
 		return nil
 	}
 	if from == "" {
-		from = "GoMarketi <noreply@gomarketi.com>"
+		from = "Wojalo <noreply@wojalo.com>"
 	}
 	return &ResendMailer{
 		apiKey: apiKey,
@@ -38,14 +38,14 @@ func NewResend(apiKey, from string) *ResendMailer {
 // SendWelcome fires the branded welcome email to a newly onboarded vendor.
 func (m *ResendMailer) SendWelcome(ctx context.Context, to, vendorName, storeName, storeSlug, storeDomain string) error {
 	if storeDomain == "" {
-		storeDomain = "gomarketi.com"
+		storeDomain = "wojalo.com"
 	}
 	storeURL := fmt.Sprintf("https://%s.%s", storeSlug, storeDomain)
 
 	payload := map[string]any{
 		"from":    m.from,
 		"to":      []string{to},
-		"subject": fmt.Sprintf("Your GoMarketi store %s is live!", storeName),
+		"subject": fmt.Sprintf("Your Wojalo store %s is live!", storeName),
 		"html":    welcomeHTML(vendorName, storeName, storeURL, storeSlug),
 	}
 	body, err := json.Marshal(payload)

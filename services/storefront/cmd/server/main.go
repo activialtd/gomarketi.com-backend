@@ -102,7 +102,7 @@ func run(log zerolog.Logger) error {
 
 	storeDomain := viper.GetString("STORE_DOMAIN")
 	if storeDomain == "" {
-		storeDomain = "gomarketi.com"
+		storeDomain = "wojalo.com"
 	}
 
 	var domainRegistrar vercel.Registrar
@@ -203,5 +203,5 @@ func resendFrom() string {
 			return v
 		}
 	}
-	return "GoMarketi <onboarding@resend.dev>"
+	return "Wojalo <onboarding@resend.dev>"
 }

@@ -106,11 +106,11 @@ func campaignWrapHTML(recipientName, storeName, body string) string {
     <div style="height:1px;background:#f1f5f9;margin:28px 0;"></div>
     <p style="margin:0;font-size:11px;color:#94a3b8;text-align:center;">
       You're receiving this because you subscribed to updates from %s.<br>
-      Powered by <a href="https://gomarketi.com" style="color:#1A7A42;text-decoration:none;">GoMarketi</a>
+      Powered by <a href="https://wojalo.com" style="color:#1A7A42;text-decoration:none;">Wojalo</a>
     </p>
   </td></tr>
   <tr><td style="padding:20px 0;text-align:center;">
-    <p style="margin:0;font-size:11px;color:#94a3b8;">&copy; 2026 GoMarket</p>
+    <p style="margin:0;font-size:11px;color:#94a3b8;">&copy; 2026 Wojalo</p>
   </td></tr>
 </table>
 </td></tr>
@@ -312,7 +312,7 @@ func sendMailGmail(ctx context.Context, to, subject, html string) error {
 
 	// Build RFC 2822 message.
 	raw := strings.Join([]string{
-		"From: GoMarketi <" + from + ">",
+		"From: Wojalo <" + from + ">",
 		"To: " + to,
 		"Subject: " + subject,
 		"MIME-Version: 1.0",
@@ -419,7 +419,7 @@ func sendMailSMTP(ctx context.Context, to, subject, html, plainText string) erro
 // buildOrderURL constructs the customer-facing tracking URL.
 // Uses STOREFRONT_ROOT_DOMAIN to build a subdomain URL:
 //
-//	cobi.gomarketi.com/orders/{id}?email={email}
+//	cobi.wojalo.com/orders/{id}?email={email}
 //
 // Falls back to path-based if the env var is not set:
 //
@@ -427,7 +427,7 @@ func sendMailSMTP(ctx context.Context, to, subject, html, plainText string) erro
 func buildOrderURL(storeSlug, orderID, customerEmail string) string {
 	rootDomain := getenv("STOREFRONT_ROOT_DOMAIN", "")
 	if rootDomain != "" {
-		// subdomain format: cobi.gomarketi.com/orders/{id}?email={email}
+		// subdomain format: cobi.wojalo.com/orders/{id}?email={email}
 		return fmt.Sprintf("https://%s.%s/orders/%s?email=%s",
 			storeSlug, rootDomain, orderID, urlEscape(customerEmail))
 	}
@@ -657,7 +657,7 @@ func vendorAlertHTML(storeName, orderID, dashboardURL, customerName, customerEma
 
 func sendMailResend(ctx context.Context, apiKey, to, subject, html, plainText string) error {
 	// EMAIL_FROM is accepted as an alias for RESEND_FROM.
-	from := getenv("RESEND_FROM", getenv("EMAIL_FROM", "GoMarketi <onboarding@resend.dev>"))
+	from := getenv("RESEND_FROM", getenv("EMAIL_FROM", "Wojalo <onboarding@resend.dev>"))
 
 	payload := map[string]any{
 		"from":    from,

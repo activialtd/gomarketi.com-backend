@@ -11,7 +11,7 @@ import (
 
 type ResendConfig struct {
 	APIKey string
-	From   string // e.g. "GoMarketi <noreply@gomarketi.com>"
+	From   string // e.g. "Wojalo <noreply@wojalo.com>"
 }
 
 type ResendClient struct {
@@ -33,13 +33,13 @@ func NewResendClient(cfg ResendConfig) (*ResendClient, error) {
 }
 
 func (c *ResendClient) SendOTP(ctx context.Context, to, otp string) error {
-	return c.sendCode(ctx, to, "Your GoMarketi verification code",
+	return c.sendCode(ctx, to, "Your Wojalo verification code",
 		"Verify your email",
 		"Use the code below to complete your sign-in. It expires in 10 minutes.", otp)
 }
 
 func (c *ResendClient) SendPasswordReset(ctx context.Context, to, otp string) error {
-	return c.sendCode(ctx, to, "Reset your GoMarketi password",
+	return c.sendCode(ctx, to, "Reset your Wojalo password",
 		"Reset your password",
 		"Use the code below to reset your password. It expires in 10 minutes.", otp)
 }

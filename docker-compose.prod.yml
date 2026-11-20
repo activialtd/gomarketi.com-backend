@@ -28,8 +28,8 @@ x-service: &service
     # Every customer-facing link in an email is built from these. Unset, orders
     # falls back to http://<slug>.localhost:3001 and https://localhost:3000 —
     # which is what shipped in real order emails until this was pinned here.
-    STOREFRONT_ROOT_DOMAIN: "gomarketi.com"
-    VENDOR_BASE_URL: "https://vendor.gomarketi.com"
+    STOREFRONT_ROOT_DOMAIN: "wojalo.com"
+    VENDOR_BASE_URL: "https://vendor.wojalo.com"
   depends_on:
     postgres:
       condition: service_healthy

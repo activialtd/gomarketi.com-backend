@@ -22,11 +22,11 @@ func TestRenderPreviews(t *testing.T) {
 	}
 
 	cases := map[string]string{
-		"status-shipped.html":   statusUpdateHTML("Ada Obi", "Xemp Tech", "ee40078c-d619-4e73-8942-d6bcf65ae603", "https://xemp-tech.gomarketi.com/orders/ee40078c?email=a%40b.com", "shipped"),
+		"status-shipped.html":   statusUpdateHTML("Ada Obi", "Xemp Tech", "ee40078c-d619-4e73-8942-d6bcf65ae603", "https://xemp-tech.wojalo.com/orders/ee40078c?email=a%40b.com", "shipped"),
 		"status-confirmed.html": statusUpdateHTML("Ada Obi", "Xemp Tech", "ee40078c-d619-4e73-8942-d6bcf65ae603", "https://example.com", "confirmed"),
 		"status-cancelled.html": statusUpdateHTML("Ada Obi", "Xemp Tech", "ee40078c-d619-4e73-8942-d6bcf65ae603", "https://example.com", "cancelled"),
 		"invoice.html":          customerInvoiceHTML("Ada Obi", "Xemp Tech", "ee40078c-d619-4e73-8942-d6bcf65ae603", "https://example.com", 31410000, 450000, "Ikeja Under Bridge", items),
-		"vendor-alert.html":     vendorAlertHTML("Xemp Tech", "ee40078c-d619-4e73-8942-d6bcf65ae603", "https://vendor.gomarketi.com", "Ada Obi", "ada@example.com", "08031234567", "12 Allen Avenue, Ikeja, Lagos", 31410000, 450000, "Ikeja Under Bridge", items),
+		"vendor-alert.html":     vendorAlertHTML("Xemp Tech", "ee40078c-d619-4e73-8942-d6bcf65ae603", "https://vendor.wojalo.com", "Ada Obi", "ada@example.com", "08031234567", "12 Allen Avenue, Ikeja, Lagos", 31410000, 450000, "Ikeja Under Bridge", items),
 		"cart-summary.html":     cartSummaryHTML("Ada Obi", "Xemp Tech", "https://example.com", 31410000, items),
 	}
 

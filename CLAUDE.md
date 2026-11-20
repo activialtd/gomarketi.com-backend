@@ -78,7 +78,7 @@ Matching is trigram (`pg_trgm`) plus a generated `search_doc` tsvector on produc
 
 ### Money: escrow and the delivery fee
 
-The fulfilment lifecycle is `pending → confirmed → at_hub → shipped → delivered` (or `cancelled`). `at_hub` means the vendor handed the parcel to GoMarketi, not that the buyer has it, so it deliberately does not release escrow; `shipped` sets `dispatched_at`, which starts the auto-release clock.
+The fulfilment lifecycle is `pending → confirmed → at_hub → shipped → delivered` (or `cancelled`). `at_hub` means the vendor handed the parcel to Wojalo, not that the buyer has it, so it deliberately does not release escrow; `shipped` sets `dispatched_at`, which starts the auto-release clock.
 
 Buyer-facing reads (`GET /v1/orders/mine`, `/mine/:id`) match on the signed-in user's **email**, not a user id: checkout is public and `customer_id` is derived from store+email, so email is the only identity that spans stores. A buyer whose account has no email gets a clear error rather than an empty list.
 
