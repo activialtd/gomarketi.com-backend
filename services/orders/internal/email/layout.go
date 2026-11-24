@@ -20,7 +20,7 @@ import (
 // Flattened onto white because several Outlook versions composite alpha
 // against black and would swallow the dark wordmark.
 func brandMark() string {
-	base := strings.TrimRight(getenv("PUBLIC_WEB_URL", "https://gomarketi.com"), "/")
+	base := strings.TrimRight(getenv("PUBLIC_WEB_URL", "https://wojalo.com"), "/")
 	return base + "/email-logo.png"
 }
 
@@ -55,7 +55,7 @@ func shell(title, preheader, body string) string {
 <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%%;">
 
   <tr><td align="center" style="padding:0 0 24px;">
-    <img src="%s" width="150" alt="GoMarket" style="display:block;border:0;width:150px;height:auto;">
+    <img src="%s" width="150" alt="Wojalo" style="display:block;border:0;width:150px;height:auto;">
   </td></tr>
 
   <tr><td style="background:#ffffff;border:1px solid %s;border-radius:14px;padding:36px 36px 32px;">
@@ -64,7 +64,7 @@ func shell(title, preheader, body string) string {
 
   <tr><td style="padding:22px 8px 0;text-align:center;">
     <p style="margin:0;font-size:12px;line-height:1.7;color:%s;">
-      GoMarket · Shop your local market without the trip<br>
+      Wojalo · Shop your local market without the trip<br>
       Questions? Reply to this email and a person will answer.
     </p>
   </td></tr>

@@ -122,7 +122,7 @@ func (c *Client) CreateDedicatedAccount(ctx context.Context, customerCode string
 	if c.simMode {
 		c.log.Warn().Str("customer_code", customerCode).Msg("paystack: SIMULATION MODE — synthesizing a fake dedicated account")
 		n := time.Now().UnixMilli() % 10000000000
-		return fmt.Sprintf("%010d", n), "Wema Bank (simulated)", "GoMarketi Vendor (simulated)", nil
+		return fmt.Sprintf("%010d", n), "Wema Bank (simulated)", "Wojalo Vendor (simulated)", nil
 	}
 
 	payload, err := json.Marshal(map[string]string{

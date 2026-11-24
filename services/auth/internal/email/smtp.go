@@ -16,7 +16,7 @@ type SMTPConfig struct {
 	Port     string // e.g. 587
 	Username string // full email address
 	Password string // app password (not your account password)
-	From     string // display name + address, e.g. "GoMarket <noreply@gmail.com>"
+	From     string // display name + address, e.g. "Wojalo <noreply@gmail.com>"
 }
 
 // SMTPClient sends email over STARTTLS SMTP.
@@ -115,21 +115,21 @@ func (c *SMTPClient) sendCode(ctx context.Context, to, msg string) error {
 
 func buildOTPMessage(from, to, otp string) string {
 	return buildCodeMessage(from, to,
-		"Your GoMarket verification code",
-		"Your GoMarket verification code is: "+otp,
+		"Your Wojalo verification code",
+		"Your Wojalo verification code is: "+otp,
 		otpHTMLBody(otp))
 }
 
 func buildPasswordResetMessage(from, to, otp string) string {
 	return buildCodeMessage(from, to,
-		"Reset your GoMarket password",
-		"Your GoMarket password reset code is: "+otp,
+		"Reset your Wojalo password",
+		"Your Wojalo password reset code is: "+otp,
 		passwordResetHTMLBody(otp))
 }
 
 func buildCodeMessage(from, to, subject, plainBody, htmlBody string) string {
 	// RFC 2822 message with MIME multipart for plain+HTML.
-	boundary := "gomarket-boundary-001"
+	boundary := "wojalo-boundary-001"
 	var sb strings.Builder
 	sb.WriteString("From: " + from + "\r\n")
 	sb.WriteString("To: " + to + "\r\n")
@@ -157,7 +157,7 @@ func otpHTMLBody(otp string) string {
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html>
 <body style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px 16px;background:#fff;">
-  <h2 style="color:#1a1a1a;margin-bottom:8px;">Your GoMarket code</h2>
+  <h2 style="color:#1a1a1a;margin-bottom:8px;">Your Wojalo code</h2>
   <p style="font-size:14px;color:#555;margin-bottom:24px;">
     Use the code below to verify your email address. It expires in 10 minutes.
   </p>
@@ -175,7 +175,7 @@ func passwordResetHTMLBody(otp string) string {
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html>
 <body style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px 16px;background:#fff;">
-  <h2 style="color:#1a1a1a;margin-bottom:8px;">Reset your GoMarket password</h2>
+  <h2 style="color:#1a1a1a;margin-bottom:8px;">Reset your Wojalo password</h2>
   <p style="font-size:14px;color:#555;margin-bottom:24px;">
     Use the code below to reset your password. It expires in 10 minutes.
   </p>

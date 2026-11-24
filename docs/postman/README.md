@@ -1,12 +1,12 @@
-# GoMarketi API — Postman collection
+# Wojalo API — Postman collection
 
 For the frontend team, who don't have access to this repo's code.
 
 ## Import
 
-1. Postman → Import → drop in `GoMarketi-API.postman_collection.json`.
-2. Import both environment files too (`GoMarketi-Staging.postman_environment.json`,
-   `GoMarketi-Production.postman_environment.json`), then pick one from the
+1. Postman → Import → drop in `Wojalo-API.postman_collection.json`.
+2. Import both environment files too (`Wojalo-Staging.postman_environment.json`,
+   `Wojalo-Production.postman_environment.json`), then pick one from the
    environment dropdown (top-right).
 3. In Postman Settings → General, turn on **"Automatically follow redirects"**
    and make sure cookies are enabled for the domain — login/OTP verify/OAuth

@@ -1,4 +1,7 @@
-api.gomarketi.com {
+# api.gomarketi.com stays alongside api.wojalo.com during the rebrand: the
+# installed mobile app and any cached web build still call it. Drop it once
+# the app update has rolled out and the old domain's traffic has gone quiet.
+api.wojalo.com, api.gomarketi.com {
 	encode zstd gzip
 
 	# SSE needs streaming, not buffering

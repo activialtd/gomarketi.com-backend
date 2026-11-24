@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deploy-heroku.sh — build and deploy GoMarket services to Heroku
+# deploy-heroku.sh — build and deploy Wojalo services to Heroku
 #
 # Usage:
 #   ./deploy-heroku.sh              # deploy all services + gateway
@@ -120,6 +120,6 @@ done
 echo ""
 echo "All done."
 echo ""
-echo "Next: add api.gomarketi.com to the gateway app:"
-echo "  heroku domains:add api.gomarketi.com --app \$APP_GATEWAY"
+echo "Next: add api.wojalo.com to the gateway app:"
+echo "  heroku domains:add api.wojalo.com --app \$APP_GATEWAY"
 echo "  heroku domains --app \$APP_GATEWAY   # shows the DNS target CNAME value"

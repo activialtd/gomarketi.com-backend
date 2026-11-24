@@ -1,4 +1,4 @@
-// Package email sends the "your GoMarketi payment account is ready" email
+// Package email sends the "your Wojalo payment account is ready" email
 // fired after a vendor's Paystack Dedicated Virtual Account is provisioned.
 // Mirrors services/storefront/internal/email's Brevo-backed pattern.
 package email
@@ -38,7 +38,7 @@ func NewBrevo(apiKey, from, fromName string) *BrevoMailer {
 		return nil
 	}
 	if fromName == "" {
-		fromName = "GoMarketi"
+		fromName = "Wojalo"
 	}
 	return &BrevoMailer{
 		apiKey:   apiKey,
@@ -54,7 +54,7 @@ func (c *BrevoMailer) SendAccountReady(ctx context.Context, to, vendorName, bank
 	payload := map[string]any{
 		"sender":      map[string]string{"email": c.from, "name": c.fromName},
 		"to":          []map[string]string{{"email": to, "name": vendorName}},
-		"subject":     "Welcome to GoMarketi — your payment account is ready",
+		"subject":     "Welcome to Wojalo — your payment account is ready",
 		"htmlContent": accountReadyHTML(vendorName, bankName, accountNumber, accountName),
 	}
 
@@ -90,7 +90,7 @@ func accountReadyHTML(vendorName, bankName, accountNumber, accountName string) s
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-  <title>Welcome to GoMarketi</title>
+  <title>Welcome to Wojalo</title>
 </head>
 <body style="margin:0;padding:0;background:#f4f7f6;font-family:'Segoe UI',Arial,sans-serif;">
   <table width="100%%" cellpadding="0" cellspacing="0" style="background:#f4f7f6;padding:40px 16px;">
@@ -103,7 +103,7 @@ func accountReadyHTML(vendorName, bankName, accountNumber, accountName string) s
                  attachment breaks in webmail, so this is a hosted PNG,
                  flattened onto white because some Outlook builds composite
                  alpha against black. -->
-            <img src="` + brandMark() + `" width="150" alt="GoMarket" style="display:block;border:0;width:150px;height:auto;">
+            <img src="` + brandMark() + `" width="150" alt="Wojalo" style="display:block;border:0;width:150px;height:auto;">
           </td>
         </tr>
 
@@ -124,7 +124,7 @@ func accountReadyHTML(vendorName, bankName, accountNumber, accountName string) s
           <td style="background:#ffffff;border-radius:0 0 20px 20px;padding:32px 40px 40px;">
 
             <div style="background:#F0FAF3;border:1px solid rgba(26,122,66,0.2);border-radius:14px;padding:20px 24px;margin-bottom:28px;">
-              <p style="margin:0 0 14px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:#1A7A42;">Your GoMarketi account</p>
+              <p style="margin:0 0 14px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:#1A7A42;">Your Wojalo account</p>
               <table cellpadding="0" cellspacing="0" width="100%%">
                 <tr>
                   <td style="padding:6px 0;color:#6b7280;font-size:13px;">Bank</td>
@@ -142,7 +142,7 @@ func accountReadyHTML(vendorName, bankName, accountNumber, accountName string) s
             </div>
 
             <div style="text-align:center;margin-bottom:32px;">
-              <a href="https://vendor.gomarketi.com" style="display:inline-block;background:#1A7A42;color:#ffffff;text-decoration:none;font-size:15px;font-weight:700;padding:14px 32px;border-radius:12px;letter-spacing:0.2px;">
+              <a href="https://vendor.wojalo.com" style="display:inline-block;background:#1A7A42;color:#ffffff;text-decoration:none;font-size:15px;font-weight:700;padding:14px 32px;border-radius:12px;letter-spacing:0.2px;">
                 Go to your dashboard →
               </a>
             </div>
@@ -151,7 +151,7 @@ func accountReadyHTML(vendorName, bankName, accountNumber, accountName string) s
 
             <p style="margin:0;color:#94a3b8;font-size:13px;line-height:1.6;text-align:center;">
               Questions? Reply to this email or chat with us at
-              <a href="https://gomarketi.com" style="color:#1A7A42;text-decoration:none;">gomarketi.com</a>.
+              <a href="https://wojalo.com" style="color:#1A7A42;text-decoration:none;">wojalo.com</a>.
             </p>
           </td>
         </tr>
@@ -159,9 +159,9 @@ func accountReadyHTML(vendorName, bankName, accountNumber, accountName string) s
         <tr>
           <td style="padding:24px 0 0;text-align:center;">
             <p style="margin:0;color:#b0bec5;font-size:12px;">
-              © 2026 GoMarketi · Helping Nigerian merchants sell online<br/>
-              <a href="https://vendor.gomarketi.com" style="color:#94a3b8;text-decoration:none;">Dashboard</a> ·
-              <a href="https://gomarketi.com/privacy" style="color:#94a3b8;text-decoration:none;">Privacy</a>
+              © 2026 Wojalo · Helping Nigerian merchants sell online<br/>
+              <a href="https://vendor.wojalo.com" style="color:#94a3b8;text-decoration:none;">Dashboard</a> ·
+              <a href="https://wojalo.com/privacy" style="color:#94a3b8;text-decoration:none;">Privacy</a>
             </p>
           </td>
         </tr>

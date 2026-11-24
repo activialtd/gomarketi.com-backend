@@ -48,7 +48,7 @@ const orderColumns = `id, store_id, customer_id, customer_name, customer_email, 
 	created_at, updated_at,
 	(SELECT wt.status FROM wallet_transactions wt WHERE wt.order_id = orders.id LIMIT 1) AS wallet_status,
 	-- Who delivers: a basket spanning vendors becomes several orders sharing
-	-- one payment_reference and goes through GoMarketi's hub; an order alone
+	-- one payment_reference and goes through Wojalo's hub; an order alone
 	-- on its reference is the vendor's own delivery. Cheap because
 	-- idx_orders_payment_reference covers the lookup.
 	CASE WHEN orders.payment_reference IS NOT NULL AND EXISTS (
@@ -263,7 +263,7 @@ func (s *OrdersService) GetMyOrder(ctx context.Context, userID uuid.UUID, orderI
 // the same trust model GetPublicOrder already uses, since orders service
 // has no real per-buyer JWT identity wired through checkout today. This is
 // the trigger that releases the vendor's held wallet credit: it only
-// succeeds from status='shipped' (GoMarketi has actually dispatched the
+// succeeds from status='shipped' (Wojalo has actually dispatched the
 // order from the hub — see the admin batch-dispatch flow), so a buyer can
 // never release funds for something that was never sent.
 func (s *OrdersService) ConfirmDelivery(ctx context.Context, orderID uuid.UUID, email string) (dto.OrderResp, error) {
@@ -419,7 +419,7 @@ func (s *OrdersService) DisputeRefund(ctx context.Context, orderID uuid.UUID) (d
 }
 
 // NoShowRefund cancels one order in a batch and refunds the buyer for that
-// portion, because its vendor didn't deliver to the GoMarketi hub in time
+// portion, because its vendor didn't deliver to the Wojalo hub in time
 // for dispatch. Called by admin-api's batch-dispatch action (the one
 // internal service-to-service call in the hub/escrow feature, since this is
 // the only step that needs orders service's own Paystack secret key —
@@ -608,7 +608,7 @@ func (s *OrdersService) GetOrder(ctx context.Context, storeID uuid.UUID, orderID
 //	                    order end to end, so they mark dispatch themselves.
 //	                    There is no hub in this flow, so at_hub would be a
 //	                    step that never physically happens.
-//	GoMarketi-delivered → confirmed, cancelled, and nothing else. Once the
+//	Wojalo-delivered → confirmed, cancelled, and nothing else. Once the
 //	                    vendor accepts the order the platform takes over
 //	                    movement entirely, so neither at_hub nor shipped is
 //	                    theirs to claim — and shipped would start the escrow
@@ -631,8 +631,8 @@ func vendorMaySet(f dto.Fulfilment, isPickup bool, status dto.OrderStatus) error
 		if isPickup {
 			return apperrors.BadRequest("the customer is collecting this one — mark it ready for collection instead")
 		}
-		if f == dto.FulfilmentGoMarketi {
-			return apperrors.BadRequest("this order is part of a multi-vendor basket that GoMarketi delivers — confirm it and we take it from there")
+		if f == dto.FulfilmentWojalo {
+			return apperrors.BadRequest("this order is part of a multi-vendor basket that Wojalo delivers — confirm it and we take it from there")
 		}
 		if status == dto.OrderStatusAtHub {
 			return apperrors.BadRequest("this order is yours to deliver, so it does not pass through the hub — mark it dispatched once it is on its way")
@@ -904,7 +904,7 @@ func insertOrderTx(ctx context.Context, tx *sqlx.Tx, storeID uuid.UUID, customer
 //
 // The delivery fee follows whoever does the delivering: a vendor running their
 // own order end to end earns it on top of the items, while on a multi-vendor
-// basket GoMarketi consolidates and delivers, so the fee is platform revenue.
+// basket Wojalo consolidates and delivers, so the fee is platform revenue.
 //
 // Held in escrow either way — status 'pending', which GetWallet's
 // available-balance query excludes — until the buyer confirms receipt. See
@@ -947,7 +947,7 @@ func (s *OrdersService) notifyOrderCreated(storeID, orderID uuid.UUID, totalKobo
 		}
 	}
 	if storeName == "" {
-		storeName = "GoMarketi Store"
+		storeName = "Wojalo Store"
 	}
 	orderIDStr := orderID.String()
 
@@ -1042,7 +1042,7 @@ func (s *OrdersService) findOrdersByPaymentRef(ctx context.Context, ref string) 
 // newPaymentReference is minted server-side so the order owns its reference
 // rather than trusting one the browser made up.
 func newPaymentReference() string {
-	return "GMK_" + strings.ToUpper(uuid.New().String()[:8]) + "_" + strconv.FormatInt(time.Now().Unix(), 36)
+	return "WJL_" + strings.ToUpper(uuid.New().String()[:8]) + "_" + strconv.FormatInt(time.Now().Unix(), 36)
 }
 
 // PlaceOrder creates an order for one store, before any payment.
@@ -1283,7 +1283,7 @@ func (s *OrdersService) ConfirmPayment(ctx context.Context, paymentRef string) (
 		return nil, err
 	}
 
-	// A basket spanning stores is delivered by GoMarketi, so only a lone
+	// A basket spanning stores is delivered by Wojalo, so only a lone
 	// order on the reference earns its delivery fee — the same rule the
 	// `fulfilment` column derives for the dashboard.
 	vendorDelivers := len(targets) == 1
@@ -1356,11 +1356,11 @@ func (s *OrdersService) getVendorEmail(ctx context.Context, storeID uuid.UUID) (
 // getStoreSlugName returns the slug and display name for a store.
 func (s *OrdersService) getStoreSlugName(ctx context.Context, storeID uuid.UUID) (slug, name string) {
 	_ = s.db.QueryRowContext(ctx,
-		`SELECT COALESCE(slug,''), COALESCE(name,'GoMarketi Store') FROM stores WHERE id = $1`,
+		`SELECT COALESCE(slug,''), COALESCE(name,'Wojalo Store') FROM stores WHERE id = $1`,
 		storeID,
 	).Scan(&slug, &name)
 	if name == "" {
-		name = "GoMarketi Store"
+		name = "Wojalo Store"
 	}
 	return slug, name
 }

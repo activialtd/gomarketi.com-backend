@@ -1,4 +1,4 @@
-// Package middleware provides shared HTTP middleware for GoMarket's Go services.
+// Package middleware provides shared HTTP middleware for Wojalo's Go services.
 //
 // Auth note: JWT validation is performed by Envoy, not by these middlewares.
 // Envoy validates access tokens on protected routes and injects the user
@@ -27,17 +27,17 @@ import (
 // headers (not an error — the browser enforces the restriction).
 //
 // Every configured origin also implicitly allows its subdomains — every
-// vendor's storefront lives on its own subdomain (e.g. cobi.gomarketi.com),
-// so a bare "https://gomarketi.com" entry must cover the whole *.gomarketi.com
+// vendor's storefront lives on its own subdomain (e.g. cobi.wojalo.com),
+// so a bare "https://wojalo.com" entry must cover the whole *.wojalo.com
 // fleet, not just the apex, or checkout (which calls the orders service
 // cross-origin from the storefront) breaks for every vendor.
 //
 // allowedOrigins should come from config, e.g.:
 //   - development: ["http://localhost:3000"]
-//   - production:  ["https://gomarketi.com", "https://app.gomarketi.com"]
+//   - production:  ["https://wojalo.com", "https://app.wojalo.com"]
 type originSuffix struct {
 	scheme string // e.g. "https://"
-	host   string // e.g. ".gomarketi.com" — leading dot enforces a real subdomain boundary
+	host   string // e.g. ".wojalo.com" — leading dot enforces a real subdomain boundary
 }
 
 func CORS(allowedOrigins []string) gin.HandlerFunc {

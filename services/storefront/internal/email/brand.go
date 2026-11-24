@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// brandMark is the hosted GoMarket lockup used in the header of every email
+// brandMark is the hosted Wojalo lockup used in the header of every email
 // this service sends.
 //
 // Email cannot render inline SVG, and a CID attachment breaks in most webmail,
@@ -15,7 +15,7 @@ import (
 func brandMark() string {
 	base := os.Getenv("PUBLIC_WEB_URL")
 	if strings.TrimSpace(base) == "" {
-		base = "https://gomarketi.com"
+		base = "https://wojalo.com"
 	}
 	return strings.TrimRight(base, "/") + "/email-logo.png"
 }

@@ -1,6 +1,6 @@
-// Package money provides type-safe Kobo arithmetic for GoMarket financials.
+// Package money provides type-safe Kobo arithmetic for Wojalo financials.
 //
-// All monetary values in GoMarket are stored and computed in Kobo — the smallest
+// All monetary values in Wojalo are stored and computed in Kobo — the smallest
 // Nigerian Naira denomination (100 Kobo = 1 Naira). The Money type enforces this
 // at compile time: passing a raw int64 where a Money is expected is a type error.
 //
@@ -18,7 +18,7 @@ import (
 type Money int64
 
 // ErrNegativeResult is returned by Sub when the subtraction would produce
-// a negative balance. Balances in GoMarket must always be >= 0.
+// a negative balance. Balances in Wojalo must always be >= 0.
 var ErrNegativeResult = errors.New("money: result would be negative")
 
 // ErrNegativeAmount is returned when constructing a Money value from a
@@ -71,7 +71,7 @@ func (m Money) Kobo() int64 { return int64(m) }
 func (m Money) Add(other Money) Money { return m + other }
 
 // Sub returns m - other. Returns ErrNegativeResult if other > m,
-// because GoMarket balances may never go below zero.
+// because Wojalo balances may never go below zero.
 func (m Money) Sub(other Money) (Money, error) {
 	if other > m {
 		return 0, fmt.Errorf("%w: %s - %s", ErrNegativeResult, m, other)

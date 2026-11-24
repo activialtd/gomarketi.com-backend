@@ -1,7 +1,7 @@
 {
   "info": {
     "_postman_id": "cf961b89-3122-4d45-99eb-23f6399d7fff",
-    "name": "GoMarketi API",
+    "name": "Wojalo API",
     "description": "All requests go through the gateway at {{base_url}}. Authenticated requests need Authorization: Bearer {{access_token}} \u2014 run Auth > Login or Auth > Verify OTP first, then set the access_token collection variable from the response.\n\nRefresh tokens are HttpOnly cookies, not JSON \u2014 Postman's cookie jar handles this automatically if you enable 'Send cookies' for this domain (Settings > General).",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
@@ -18,7 +18,7 @@
   "variable": [
     {
       "key": "base_url",
-      "value": "https://api-staging.gomarketi.com"
+      "value": "https://api-staging.wojalo.com"
     },
     {
       "key": "access_token",
@@ -994,7 +994,7 @@
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{base_url}}/v1/storefront/public/stores/by-domain?domain=cobi.gomarketi.com",
+              "raw": "{{base_url}}/v1/storefront/public/stores/by-domain?domain=cobi.wojalo.com",
               "host": [
                 "{{base_url}}"
               ],
@@ -1008,7 +1008,7 @@
               "query": [
                 {
                   "key": "domain",
-                  "value": "cobi.gomarketi.com"
+                  "value": "cobi.wojalo.com"
                 }
               ]
             },

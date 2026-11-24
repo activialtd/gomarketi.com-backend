@@ -1,4 +1,4 @@
-// Package validator wraps go-playground/validator/v10 with GoMarket-specific
+// Package validator wraps go-playground/validator/v10 with Wojalo-specific
 // field error formatting. It uses json struct tags for field names in errors,
 // so API clients always see the same name they sent in the request body.
 package validator

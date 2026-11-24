@@ -17,7 +17,7 @@ func TestEncryptDecrypt_RoundTrip(t *testing.T) {
 		name      string
 		plaintext string
 	}{
-		{"simple ASCII", "Hello, GoMarket!"},
+		{"simple ASCII", "Hello, Wojalo!"},
 		{"empty string", ""},
 		{"Nigerian unicode", "₦50,000.00 — payment confirmed"},
 		{"long string", strings.Repeat("x", 4096)},

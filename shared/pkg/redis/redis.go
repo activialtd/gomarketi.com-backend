@@ -1,4 +1,4 @@
-// Package redis provides a configured go-redis/v9 client for GoMarket services.
+// Package redis provides a configured go-redis/v9 client for Wojalo services.
 // All services use the same connect pattern: parse the REDIS_URL env var,
 // open the client, verify with PING, return the client for injection.
 package redis

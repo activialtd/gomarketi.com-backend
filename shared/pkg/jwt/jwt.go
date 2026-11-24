@@ -1,4 +1,4 @@
-// Package jwt provides RS256 JWT issuance and validation for GoMarket services.
+// Package jwt provides RS256 JWT issuance and validation for Wojalo services.
 //
 // RS256 (asymmetric RSA) is required — not HS256 — so that Envoy can validate
 // access tokens using only the public key, while the private key never leaves
@@ -24,7 +24,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// Claims is the GoMarket JWT payload. It extends RegisteredClaims with the
+// Claims is the Wojalo JWT payload. It extends RegisteredClaims with the
 // role and onboarding context that Envoy and downstream services depend on.
 //
 // Envoy reads these claims from the validated token and injects them as HTTP

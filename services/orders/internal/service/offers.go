@@ -165,7 +165,7 @@ func offerTokenKey() []byte {
 	if k := os.Getenv("INTERNAL_API_KEY"); k != "" {
 		return []byte(k)
 	}
-	return []byte("gomarketi-dev-offer-token")
+	return []byte("wojalo-dev-offer-token")
 }
 
 // OfferToken is the guest buyer's key to one negotiation. Derived rather than

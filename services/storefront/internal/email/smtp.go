@@ -31,11 +31,11 @@ func NewSMTP(host, port, username, password, from string) (*SMTPMailer, error) {
 // SendWelcome delivers a branded welcome email via SMTP.
 func (s *SMTPMailer) SendWelcome(ctx context.Context, to, vendorName, storeName, storeSlug, storeDomain string) error {
 	if storeDomain == "" {
-		storeDomain = "gomarketi.com"
+		storeDomain = "wojalo.com"
 	}
 	storeURL := fmt.Sprintf("https://%s.%s", storeSlug, storeDomain)
 
-	subject := fmt.Sprintf("Your GoMarket store %s is live!", storeName)
+	subject := fmt.Sprintf("Your Wojalo store %s is live!", storeName)
 	html := welcomeHTML(vendorName, storeName, storeURL, storeSlug)
 	msg := buildWelcomeMessage(s.from, to, subject, html)
 
@@ -93,7 +93,7 @@ func (s *SMTPMailer) SendWelcome(ctx context.Context, to, vendorName, storeName,
 }
 
 func buildWelcomeMessage(from, to, subject, html string) string {
-	boundary := "gomarket-welcome-001"
+	boundary := "wojalo-welcome-001"
 	var sb strings.Builder
 	sb.WriteString("From: " + from + "\r\n")
 	sb.WriteString("To: " + to + "\r\n")
@@ -103,7 +103,7 @@ func buildWelcomeMessage(from, to, subject, html string) string {
 	sb.WriteString("\r\n")
 	sb.WriteString("--" + boundary + "\r\n")
 	sb.WriteString("Content-Type: text/plain; charset=UTF-8\r\n\r\n")
-	sb.WriteString("Welcome to GoMarket! Your store is live. Visit: " + "\r\n\r\n")
+	sb.WriteString("Welcome to Wojalo! Your store is live. Visit: " + "\r\n\r\n")
 	sb.WriteString("--" + boundary + "\r\n")
 	sb.WriteString("Content-Type: text/html; charset=UTF-8\r\n\r\n")
 	sb.WriteString(html + "\r\n")
